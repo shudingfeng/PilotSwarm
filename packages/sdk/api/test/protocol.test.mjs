@@ -85,6 +85,21 @@ test("null body values are preserved (github copilot key clear)", () => {
     assert.deepEqual(body, { key: null });
 });
 
+test("dispatcher delegation: the caller's own opt-in, and onBehalfOfOwner in the creation body", () => {
+    const read = buildOperationRequest("getMyDispatcherDelegation", {});
+    assert.deepEqual([read.method, read.path, read.body], ["GET", `${API_PREFIX}/me/dispatcher-delegation`, null]);
+    const write = buildOperationRequest("setMyDispatcherDelegation", { enabled: false });
+    assert.deepEqual([write.method, write.path, write.body], ["PUT", `${API_PREFIX}/me/dispatcher-delegation`, { enabled: false }]);
+    for (const name of ["getMyDispatcherDelegation", "setMyDispatcherDelegation"]) {
+        assert.equal(getOperation(name).access, "authed", `${name} names no user, so it needs no session access`);
+    }
+
+    const owner = { subject: "owner-1" };
+    assert.deepEqual(buildOperationRequest("createSession", { model: "m", onBehalfOfOwner: owner }).body, { model: "m", onBehalfOfOwner: owner });
+    assert.deepEqual(buildOperationRequest("createSessionForAgent", { agentName: "a", onBehalfOfOwner: owner }).body,
+        { agentName: "a", onBehalfOfOwner: owner });
+});
+
 test("moveSessionsToGroup carries nullable groupId in body", () => {
     const { body } = buildOperationRequest("moveSessionsToGroup", { groupId: null, sessionIds: ["a"] });
     assert.deepEqual(body, { groupId: null, sessionIds: ["a"] });

@@ -5,11 +5,12 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { WS_PATH } from "pilotswarm-sdk/api";
-import { buildSessionCatalogPgClientConfig } from "pilotswarm-sdk";
+import { buildSessionCatalogPgClientConfig, installLogRedaction } from "pilotswarm-sdk";
 import { getPortalAssetFile, getPortalConfig, parsePortalLinkOrigins } from "./config.js";
 import { authenticateRequest, getAuthConfig } from "./auth.js";
 import { getPublicAuthContext } from "./auth/authz/engine.js";
 import { PortalRuntime } from "./runtime.js";
+import { loadPersonalSecretStore } from "./personal-secret-store.js";
 import { createApiRouter } from "./api/router.js";
 import { errorDetail } from "./api/error-detail.js";
 import { attachWebSockets } from "./api/ws.js";
@@ -154,7 +155,12 @@ export async function startServer(opts = {}) {
         cmsFactsDatabaseUrl: process.env.PILOTSWARM_CMS_FACTS_DATABASE_URL || undefined,
         aadDbUser: process.env.PILOTSWARM_DB_AAD_USER || undefined,
     };
-    const runtime = new PortalRuntime({ ...storageOptions, mode });
+    // External personal secrets: the deployment's store for personal tokens
+    // (PILOTSWARM_PERSONAL_SECRET_STORE_MODULE). Fail-loud at startup, and
+    // from here on this process's logs are redacted when redaction is on.
+    const personalSecretStore = await loadPersonalSecretStore();
+    installLogRedaction();
+    const runtime = new PortalRuntime({ ...storageOptions, mode, personalSecretStore });
 
     const app = express();
     app.set("trust proxy", true);

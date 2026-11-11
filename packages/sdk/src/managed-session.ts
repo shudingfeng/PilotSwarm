@@ -16,7 +16,7 @@ import type { MessageAgentDelivery } from "./parent-turn-control.js";
 import type { ReasoningEffort, ContextTier } from "./model-providers.js";
 import { LiveTurnCoalescer } from "./live-turn.js";
 import { STREAMING_EVENT_TYPES, TURN_RESULT_EXCLUDED_EVENT_TYPES } from "./turn-result-events.js";
-import { mergeWorkspaceChange, sameWorkspace, validateWorkspaceText } from "./workspace-check.js";
+import { childWorkspacesDisabled, mergeWorkspaceChange, sameWorkspace, validateWorkspaceText } from "./workspace-check.js";
 import { attachedFoldersOf, parseSkillFile, readLoadFiles, resolveLoadPath } from "./workspace-loads.js";
 import { groupSkipped, parseRepoAgentFile } from "./workspace-repo-agents.js";
 import path from "node:path";
@@ -727,6 +727,28 @@ export const DEFAULT_TURN_INACTIVITY_TIMEOUT_MS = 5 * 60_000;
 // COPILOT_CONNECTION_CLOSED_MAX_RETRIES with a lossy-handoff fallback.
 export const TURN_INACTIVITY_ERROR_MARKER = "connection is closed or the subprocess is wedged";
 
+/** The longest delay a Node.js timer takes; a longer one fires at once. */
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
+/**
+ * `PILOTSWARM_CLI_ABORT_TIMEOUT_MS`: how long a turn guard waits for the
+ * Copilot CLI to answer its abort. Unset or empty: no limit. Anything but a
+ * positive whole number of milliseconds, up to the longest Node.js timer,
+ * is refused.
+ */
+export function cliAbortTimeoutMsFromEnv(
+    raw: string | undefined = process.env.PILOTSWARM_CLI_ABORT_TIMEOUT_MS,
+): number | undefined {
+    if (raw === undefined || raw.trim() === "") return undefined;
+    const value = raw.trim();
+    if (!/^\d+$/.test(value) || Number(value) <= 0 || Number(value) > MAX_TIMER_DELAY_MS) {
+        throw new Error(
+            `PILOTSWARM_CLI_ABORT_TIMEOUT_MS must be a positive whole number of milliseconds, at most ${MAX_TIMER_DELAY_MS} (got "${raw}")`,
+        );
+    }
+    return Number(value);
+}
+
 /**
  * Detect a tool call the model emitted as literal text instead of a real
  * tool_use block. Requires both the `<invoke name="...">` opener and a closing
@@ -935,6 +957,14 @@ export class ManagedSession {
      * or assistant.turn_start.
      */
     private staleIdlePending = false;
+    /**
+     * How long a turn guard waits for the CLI to answer its abort, and whom
+     * to tell when the CLI gives no answer in time. Set by SessionManager,
+     * which owns the CLI clients. Null: the wait has no limit.
+     */
+    private abortLimit: { timeoutMs: number; onUnanswered: () => void } | null = null;
+    /** This turn's guard abort got no answer within abortLimit. */
+    private abortUnanswered = false;
 
     constructor(
         sessionId: string,
@@ -944,6 +974,10 @@ export class ManagedSession {
         this.sessionId = sessionId;
         this.copilotSession = copilotSession;
         this.config = config;
+    }
+
+    setAbortLimit(limit: { timeoutMs: number; onUnanswered: () => void } | null): void {
+        this.abortLimit = limit;
     }
 
     /**
@@ -1267,7 +1301,7 @@ export class ManagedSession {
             parameters: {
                 type: "object",
                 properties: {
-                    ...(opts?.workspaceTools ? { workspace: SPAWN_WORKSPACE_PARAMETER } : {}),
+                    ...(opts?.workspaceTools && !childWorkspacesDisabled() ? { workspace: SPAWN_WORKSPACE_PARAMETER } : {}),
                     agent_name: {
                         type: "string",
                         description: "Name of a known user-creatable agent to spawn (from ps_list_agents). The agent's instructions, tools, and startup requirement are loaded automatically. Optionally pass task for a specific assignment; otherwise its initial prompt is used. Do not override system_message or tool_names. Worker-managed system agents are not valid here.",
@@ -1494,6 +1528,7 @@ export class ManagedSession {
      */
     async runTurn(prompt: string, opts?: TurnOptions): Promise<TurnResult> {
         this.nativeFeatureRevoked = false;
+        this.abortUnanswered = false;
         this.activeTurn = { turnIndex: opts?.turnIndex ?? -1, startedAt: Date.now() };
         const binding = opts?.turnControl ?? null;
         const steer = binding ? new SteerTurnState() : null;
@@ -1513,7 +1548,9 @@ export class ManagedSession {
             }
             // Cleanup failures must escape stop/error classification: the
             // activity cannot commit a snapshot with native work still live.
-            if (this.config.nativeSubagents === "sync") await settleNativeSubagents(this.copilotSession, {
+            // A CLI that left the abort unanswered was stopped, and its
+            // native tasks with it: there is nothing to ask it.
+            if (this.config.nativeSubagents === "sync" && !this.abortUnanswered) await settleNativeSubagents(this.copilotSession, {
                 rejectRunning: result?.type === "completed" && !this.stopRequest,
             });
             // A stop can arrive DURING cleanup. Classify only after it settles.
@@ -1598,6 +1635,11 @@ export class ManagedSession {
     /** The in-flight turn, if any. Read by the lock-bypassing stop path. */
     getActiveTurn(): { turnIndex: number; startedAt: number } | null {
         return this.activeTurn;
+    }
+
+    /** Whether a turn is running on this handle. */
+    hasActiveTurn(): boolean {
+        return this.activeTurn !== null;
     }
 
     /**
@@ -2509,12 +2551,13 @@ export class ManagedSession {
         });
 
         // Build sub-agent tools
+        const childWorkspacesOff = childWorkspacesDisabled();
         const spawnAgentTool = defineTool("spawn_agent", {
             description: DURABLE_SPAWN_DESCRIPTION,
             parameters: {
                 type: "object",
                 properties: {
-                    ...(this.config.workspaceTools ? { workspace: SPAWN_WORKSPACE_PARAMETER } : {}),
+                    ...(this.config.workspaceTools && !childWorkspacesOff ? { workspace: SPAWN_WORKSPACE_PARAMETER } : {}),
                     agent_name: {
                         type: "string",
                         description: "Name of a known user-creatable agent to spawn (from ps_list_agents). Its instructions, tools, and startup requirement load automatically. Optionally pass task for an assignment; otherwise its initial prompt is used. Do not override system_message or tool_names. Worker-managed system agents are not valid here.",
@@ -2564,7 +2607,14 @@ export class ManagedSession {
                     args = rest;
                 }
                 let childWorkspace: import("./types.js").SessionWorkspace | null | undefined;
-                if (Object.hasOwn(args, "workspace")) {
+                if (childWorkspacesOff) {
+                    // Rejected before any child exists. Omitted becomes null:
+                    // an omitted workspace inherits the parent's downstream.
+                    if (Object.hasOwn(args, "workspace") && args.workspace !== null) {
+                        return "Error: WORKSPACE_PATH_INVALID: sub-agents get no workspace on this deployment; omit workspace.";
+                    }
+                    childWorkspace = null;
+                } else if (Object.hasOwn(args, "workspace")) {
                     if (args.workspace === null) childWorkspace = null;
                     else {
                         const checked = validateWorkspaceText(args.workspace);
@@ -4009,17 +4059,27 @@ export class ManagedSession {
             // retries on a fresh subprocess and lossy-hands-off after bounded
             // attempts. This is the zombie-turn fix — the activity must settle.
             if (errMsg.includes(TURN_INACTIVITY_ERROR_MARKER)) {
-                try { await this.copilotSession.abort(); } catch {}
+                const answered = await this.abortAfterGuard();
                 return {
                     type: "error",
-                    message: errMsg,
+                    message: answered ? errMsg : `${errMsg} ${this.abortUnansweredNote()}`,
                     events: collectedEvents,
                     ...acceptedChange,
                 } as any;
             }
             // Timeout — kill it
             if (errMsg.includes("timed out")) {
-                try { await this.copilotSession.abort(); } catch {}
+                if (!(await this.abortAfterGuard())) {
+                    // The CLI is wedged: it cannot cancel the turn's shells
+                    // either. Settle as a lost connection, like the
+                    // inactivity watchdog, so the retry gets a fresh CLI.
+                    return {
+                        type: "error",
+                        message: `Turn timed out. ${this.abortUnansweredNote()} The ${TURN_INACTIVITY_ERROR_MARKER}; treating the turn as lost.`,
+                        events: collectedEvents,
+                        ...acceptedChange,
+                    } as any;
+                }
                 // Session workspaces: a shell the turn started keeps writing
                 // into the checkout after the abort. Cancel it before the
                 // turn returns, so a retry does not race it (test F10).
@@ -4126,6 +4186,39 @@ export class ManagedSession {
     }
 
     /**
+     * The abort after a turn guard fired. The SDK waits for the CLI's answer
+     * with no limit, so a wedged CLI would keep the turn, and the worker's
+     * activity, open for good. With an abort limit, stop waiting when it runs
+     * out and report the CLI once. Returns false when the CLI gave no answer
+     * in time.
+     */
+    private async abortAfterGuard(): Promise<boolean> {
+        const limit = this.abortLimit;
+        if (!limit) {
+            try { await this.copilotSession.abort(); } catch {}
+            return true;
+        }
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const answered = await Promise.race([
+            Promise.resolve().then(() => this.copilotSession.abort()).then(() => true, () => true),
+            new Promise<boolean>((resolve) => {
+                timer = setTimeout(() => resolve(false), limit.timeoutMs);
+                (timer as any).unref?.();
+            }),
+        ]);
+        clearTimeout(timer);
+        if (!answered) {
+            this.abortUnanswered = true;
+            try { limit.onUnanswered(); } catch {}
+        }
+        return answered;
+    }
+
+    private abortUnansweredNote(): string {
+        return `The Copilot CLI did not answer the abort within ${this.abortLimit?.timeoutMs} ms.`;
+    }
+
+    /**
      * Destroy the session — release resources, flush to disk.
      */
     async destroy(): Promise<void> {
@@ -4164,6 +4257,11 @@ export class ManagedSession {
         return tasks
             .filter(backgroundTaskRuns)
             .map((task: any) => ({ id: String(task.id), type: String(task.type) }));
+    }
+
+    /** Whether a background shell or agent task is running or idle. */
+    async hasActiveBackgroundTasks(): Promise<boolean> {
+        return (await this.activeBackgroundTasks()).length > 0;
     }
 
     /** Session workspaces: this session's workspace and its last attach on this worker. */

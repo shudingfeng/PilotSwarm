@@ -12,6 +12,7 @@ import type {
     LateSteer,
 } from "../types.js";
 import { cloneContextUsage, validClientMessageIds } from "./utils.js";
+import { isOwnerRoutingTag } from "../owner-routing.js";
 
 export interface ActiveTimer {
     deadlineMs: number;
@@ -246,6 +247,24 @@ export interface DurableSessionOptions {
     parentSessionId?: string;
     nestingLevel: number;
     baseSystemMessage?: string | { mode: "append" | "replace"; content: string };
+    /** 1.0.83: the owner routing tag (OrchestrationInput.ownerTag). Never set for a system session. */
+    ownerTag?: string;
+    /** 1.0.83: the fast workspace busy policy (OrchestrationInput.workspaceBusyFastRelease). */
+    workspaceBusyFastRelease?: boolean;
+}
+
+/** 1.0.83: the routing of the session's activities; undefined keeps the routing of 1.0.82. */
+export function sessionRouting(options: DurableSessionOptions): { ownerTag: string } | undefined {
+    return options.ownerTag ? { ownerTag: options.ownerTag } : undefined;
+}
+
+/** 1.0.83: what a session created during a turn takes from the session: its tag and busy policy. */
+export function createdSessionRouting(options: DurableSessionOptions): { ownerTag?: string; workspaceBusyFastRelease?: boolean } | undefined {
+    if (!options.ownerTag && !options.workspaceBusyFastRelease) return undefined;
+    return {
+        ...(options.ownerTag ? { ownerTag: options.ownerTag } : {}),
+        ...(options.workspaceBusyFastRelease ? { workspaceBusyFastRelease: true } : {}),
+    };
 }
 
 /** Single object passed through every orchestration helper. */
@@ -298,6 +317,19 @@ export const INTERNAL_SYSTEM_TURN_PROMPT =
  * provider's retryAfterMs when larger (docs/proposals/session-workspaces.md 4.7).
  */
 export const WORKSPACE_RETRY_SCHEDULE_SECONDS = [30, 120, 300, 900];
+
+/**
+ * 1.0.83: the schedule after a WORKSPACE_BUSY refusal of a session with the
+ * fast busy policy: 10 s, 20 s, 1 min, then every 3 min.
+ */
+export const WORKSPACE_BUSY_RETRY_SCHEDULE_SECONDS = [10, 20, 60, 180];
+
+/**
+ * 1.0.83: how long a set-workspace command of an owner-tagged session waits
+ * for its workspace check before it answers WORKSPACE_BUSY. Long enough for
+ * a slow attach on a worker that had to start first.
+ */
+export const WORKSPACE_CHECK_CAP_MS = 20 * 60_000;
 
 /**
  * The prompt a workspace retry wakes with. It is [SYSTEM:] traffic, so it is
@@ -377,12 +409,17 @@ export function timerGate(value: { gate?: unknown; budget?: unknown } | null | u
     return undefined;
 }
 
-/** Milliseconds before the next workspace attempt. */
-export function workspaceRetryDelayMs(step: number, retryAfterMs: unknown, scheduleMs?: number[]): number {
+/** Milliseconds before the next workspace attempt. The last step of a schedule repeats. */
+export function workspaceRetryDelayMs(
+    step: number,
+    retryAfterMs: unknown,
+    scheduleMs?: number[],
+    scheduleSeconds: number[] = WORKSPACE_RETRY_SCHEDULE_SECONDS,
+): number {
     const index = Math.max(0, Math.floor(step));
     const schedule = Array.isArray(scheduleMs) && scheduleMs.length > 0
         ? scheduleMs
-        : WORKSPACE_RETRY_SCHEDULE_SECONDS.map((seconds) => seconds * 1000);
+        : scheduleSeconds.map((seconds) => seconds * 1000);
     const base = Number(schedule[Math.min(index, schedule.length - 1)]) || 0;
     const provider = typeof retryAfterMs === "number" && Number.isFinite(retryAfterMs) && retryAfterMs > 0 ? retryAfterMs : 0;
     return Math.max(base, provider);
@@ -625,5 +662,9 @@ export function deriveOptions(input: OrchestrationInput): DurableSessionOptions 
             ?? (input.parentOrchId ? input.parentOrchId.replace(/^session-/, "") : undefined),
         nestingLevel: input.nestingLevel ?? 0,
         baseSystemMessage: input.baseSystemMessage ?? input.config?.systemMessage,
+        // 1.0.83: set only when the input carries them, so a session started
+        // without them derives the same options as in 1.0.82.
+        ...(!input.isSystem && isOwnerRoutingTag(input.ownerTag) ? { ownerTag: input.ownerTag } : {}),
+        ...(input.workspaceBusyFastRelease === true ? { workspaceBusyFastRelease: true } : {}),
     };
 }

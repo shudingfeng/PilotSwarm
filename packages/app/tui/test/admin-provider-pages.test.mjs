@@ -12,3 +12,7 @@ test("Admin Model Providers keeps distinct My and Shared shortcuts", () => {
     assert.match(source, /providerPage === "mine"[\s\S]*beginAdminCreateGithubProvider/);
     assert.match(source, /providerPage === "shared"[\s\S]*beginAdminCreateProvider\(\{ shared: true \}\)/);
 });
+
+test("My Providers g toggles the caller's dispatcher delegation", () => {
+    assert.match(source, /input === "g" && providerPage === "mine"\) \{\s*controller\.toggleDispatcherDelegation\(\)/);
+});

@@ -70,6 +70,7 @@ import {
     selectContextTierPickerModal,
     selectRenameSessionModal,
     RENAME_SESSION_MAX_LENGTH,
+    DISPATCHER_DELEGATION_OFF_WARNING,
     getRenameSessionEditableTitle,
     getRenameSessionPrefix,
     selectSessionAgentPickerModal,
@@ -16398,6 +16399,7 @@ function AdminModelProvidersSection({ controller, view, onAddPersonal, onAddShar
     };
     const inheritingAgents = (providers.systemAgentRoutes || []).filter((route) => !route.override);
     const sharedPage = providers.page === "shared" && view.isAdmin;
+    const delegation = providers.dispatcherDelegation || {};
 
     const pageHeader = React.createElement("div", { className: "ps-admin-provider-heading" },
         React.createElement("h3", null, "Model Providers"),
@@ -16432,7 +16434,28 @@ function AdminModelProvidersSection({ controller, view, onAddPersonal, onAddShar
                 disabled: pending,
                 emptyLabel: "Use cluster default",
                 onChange: (value) => setDefault("user", providers.userChoices || [], value),
-            })));
+            })),
+        // Only on deployments that name a dispatcher.
+        delegation.available ? React.createElement("div", { className: "ps-admin-provider-block", "data-testid": "dispatcher-delegation" },
+            React.createElement("h4", null, "Dispatcher Delegation"),
+            React.createElement("label", { className: "ps-reading-switch" },
+                React.createElement("input", {
+                    type: "checkbox",
+                    role: "switch",
+                    checked: delegation.enabled,
+                    "aria-checked": delegation.enabled,
+                    disabled: delegation.saving,
+                    onChange: (event) => {
+                        const enabled = event.target.checked;
+                        if (!enabled && !window.confirm(DISPATCHER_DELEGATION_OFF_WARNING)) return;
+                        void controller.setDispatcherDelegation(enabled);
+                    },
+                }),
+                "Let the deployment's dispatcher start and end sessions for me"),
+            React.createElement("p", { className: "ps-admin-console__hint" },
+                "The sessions it starts are yours and stay private; it holds a write share on each. Turning this off keeps them, but the dispatcher cannot reach them until you turn it back on."),
+            delegation.error ? React.createElement("div", { className: "ps-admin-console__error", role: "alert" }, delegation.error) : null)
+            : null);
 
     const sharedProvidersPage = React.createElement(React.Fragment, null,
         React.createElement("div", { className: "ps-admin-provider-block" },

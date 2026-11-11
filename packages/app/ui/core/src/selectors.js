@@ -4827,6 +4827,13 @@ export function selectAdminConsole(state) {
             pending: modelProviderState.mutation?.pending || null,
             error: modelProviderState.mutation?.error || null,
         },
+        // Shown on My Providers only when the deployment has a dispatcher.
+        dispatcherDelegation: {
+            available: Boolean(admin.dispatcherDelegation?.available),
+            enabled: Boolean(admin.dispatcherDelegation?.enabled),
+            saving: Boolean(admin.dispatcherDelegation?.saving),
+            error: admin.dispatcherDelegation?.error || null,
+        },
     };
     // Admin-only target switch: when on, Set/Replace/Clear act on the
     // SYSTEM user's key (ownerless system sessions run on it).

@@ -4,7 +4,7 @@
  * @module
  */
 
-import { runMigrations } from "./pg-migrator.js";
+import { assertMigrationsApplied, runMigrations } from "./pg-migrator.js";
 import { CMS_MIGRATIONS } from "./cms-migrations.js";
 
 export type { MigrationEntry } from "./pg-migrator.js";
@@ -19,4 +19,9 @@ const CMS_LOCK_SEED = 0x63_6D_73; // "cms"
  */
 export async function runCmsMigrations(pool: any, schema: string): Promise<void> {
     await runMigrations(pool, schema, CMS_MIGRATIONS(schema), CMS_LOCK_SEED);
+}
+
+/** Throws unless every CMS migration this code knows is applied to the schema. */
+export async function assertCmsMigrationsApplied(pool: any, schema: string): Promise<void> {
+    await assertMigrationsApplied(pool, schema, CMS_MIGRATIONS(schema), "CMS");
 }

@@ -303,6 +303,21 @@ function getLocalLogPollIntervalMs() {
     return 500;
 }
 
+/**
+ * PILOTSWARM_DEFAULT_IDLE_TIMEOUT_SEC: how long an idle top-level session
+ * this client starts keeps its worker, in seconds (the client's
+ * `dehydrateOnIdle`). Unset or empty: the client's own default. Anything
+ * but a positive whole number of seconds is refused.
+ */
+export function defaultIdleTimeoutSecFromEnv(raw = process.env.PILOTSWARM_DEFAULT_IDLE_TIMEOUT_SEC) {
+    if (raw === undefined || String(raw).trim() === "") return undefined;
+    const value = String(raw).trim();
+    if (!/^\d+$/.test(value) || Number(value) <= 0 || !Number.isSafeInteger(Number(value) * 1000)) {
+        throw new Error(`PILOTSWARM_DEFAULT_IDLE_TIMEOUT_SEC must be a positive whole number of seconds (got "${raw}")`);
+    }
+    return Number(value);
+}
+
 function guessArtifactContentType(filename) {
     const ext = path.extname(String(filename || "")).toLowerCase();
     if (ext === ".md" || ext === ".markdown" || ext === ".mdx") return "text/markdown";
@@ -516,13 +531,18 @@ function resolveUserPrincipalFor(transport, principal) {
     return normalizeUserPrincipal(transport.currentUser);
 }
 
+function dispatcherConfiguredFromEnv() {
+    return String(process.env.DISPATCHER_SP_OBJECT_ID || "").trim().length > 0;
+}
+
 export class NodeSdkTransport {
-    constructor({ store, mode, currentUser, useManagedIdentity, cmsFactsDatabaseUrl, aadDbUser } = {}) {
+    constructor({ store, mode, currentUser, useManagedIdentity, cmsFactsDatabaseUrl, aadDbUser, personalSecretStore } = {}) {
         this.store = store;
         this.mode = mode;
         this.useManagedIdentity = useManagedIdentity;
         this.cmsFactsDatabaseUrl = cmsFactsDatabaseUrl;
         this.aadDbUser = aadDbUser;
+        this.defaultIdleTimeoutSec = defaultIdleTimeoutSecFromEnv();
         this.pluginDirs = getPluginDirsFromEnv();
         // Optional EnhancedFactStore (HorizonDB) target. The client and
         // management client each build their own fact store, so they MUST
@@ -553,6 +573,8 @@ export class NodeSdkTransport {
             workspaceFiles: workspaceFilesConfigFromEnv(),
             // canvas-ws commands: off unless PORTAL_CANVAS_COMMANDS_RUNNER is set.
             canvasCommands: canvasCommandsConfigFromEnv(),
+            // External personal secrets: the portal's store for personal tokens.
+            ...(personalSecretStore ? { personalSecretStore } : {}),
         });
         this.sessionHandles = new Map();
         this.workers = [];
@@ -609,6 +631,7 @@ export class NodeSdkTransport {
             ...this.enhancedFacts,
             ...(this.sessionPolicy ? { sessionPolicy: this.sessionPolicy } : {}),
             ...(this.allowedAgentNames.length > 0 ? { allowedAgentNames: this.allowedAgentNames } : {}),
+            ...(this.defaultIdleTimeoutSec !== undefined ? { dehydrateOnIdle: this.defaultIdleTimeoutSec } : {}),
         });
         await this.client.start();
         await this.mgmt.start();
@@ -1192,6 +1215,22 @@ export class NodeSdkTransport {
     }
 
     /**
+     * The user's opt-in to the deployment's dispatcher. The portal supplies
+     * the signed-in principal per request; the native TUI falls back to its
+     * current user. `dispatcherConfigured` reflects this host's
+     * DISPATCHER_SP_OBJECT_ID.
+     */
+    async getMyDispatcherDelegation({ principal } = {}) {
+        const status = await this.mgmt.getMyDispatcherDelegation(resolveUserPrincipalFor(this, principal));
+        return { ...status, dispatcherConfigured: dispatcherConfiguredFromEnv() };
+    }
+
+    async setMyDispatcherDelegation({ principal, enabled } = {}) {
+        const status = await this.mgmt.setMyDispatcherDelegation(enabled, resolveUserPrincipalFor(this, principal));
+        return { ...status, dispatcherConfigured: dispatcherConfiguredFromEnv() };
+    }
+
+    /**
      * Admin: set or clear the SYSTEM user's GitHub Copilot key (used by
      * ownerless system sessions). The web runtime enforces the admin role
      * before dispatching here; `actor` is recorded for audit.
@@ -1557,8 +1596,8 @@ export class NodeSdkTransport {
         await this.mgmt.completeSessionGroup(groupId, options);
     }
 
-    async deleteSession(sessionId) {
-        await this.mgmt.deleteSession(sessionId);
+    async deleteSession(sessionId, reason, options) {
+        await this.mgmt.deleteSession(sessionId, reason, options);
         this.sessionHandles.delete(sessionId);
     }
 

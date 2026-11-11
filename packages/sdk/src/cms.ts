@@ -10,10 +10,12 @@ import { normalizeCapabilityState, type CapabilityState } from "./capability-cat
  */
 
 import { randomUUID } from "crypto";
-import { runCmsMigrations } from "./cms-migrator.js";
+import { assertCmsMigrationsApplied, runCmsMigrations } from "./cms-migrator.js";
+import { dbMigrationsSkipped } from "./pg-migrator.js";
 import { ProviderStore } from "./provider-store.js";
 import { FeatureStore } from "./feature-store.js";
 import { MotdStore } from "./motd-store.js";
+import { redactSecrets, redactSecretsIn } from "./secret-redaction.js";
 import { systemSessionProtectedError, type SessionOwnerInfo, type SessionSummaryState, type TurnControlKind, type TurnControlAddResult, type TurnStartResult, type TurnLookInput, type TurnLookRow, type TurnEndKind, type TurnEndResult, type TurnControl, type TurnStartRecord } from "./types.js";
 import type { MessageSender } from "./message-sender.js";
 import { TurnControlUnavailableError } from "./turn-control-contract.js";
@@ -510,6 +512,14 @@ export type UserRoleValue = "admin" | "user" | "anonymous";
 export interface UserRoleInfo {
     role: UserRoleValue | null;
     seenAt: Date | null;
+}
+
+/** A user's opt-in to the deployment's dispatcher (migration 0088). */
+export interface DispatcherDelegationStatus {
+    /** The user lets the deployment's dispatcher create sessions for them and end the ones it created. */
+    enabled: boolean;
+    /** Set over the Web API only: whether the deployment names a dispatcher at all. */
+    dispatcherConfigured?: boolean;
 }
 
 /** Narrow unknown role text to the stored vocabulary. Anything else is no privilege. */
@@ -1472,6 +1482,19 @@ export interface SessionCatalog {
      */
     setUserRole(principal: UserPrincipal, role: string | null): Promise<UserRoleValue | null>;
 
+    /**
+     * Whether the user lets the deployment's dispatcher create and end
+     * sessions for them (migration 0088). `false` for an unknown user.
+     */
+    getUserDispatcherDelegation(principal: UserPrincipal): Promise<boolean>;
+
+    /**
+     * Replace the user's dispatcher-delegation opt-in, creating the user row
+     * lazily. Only the user sets it: the portal binds it to the signed-in
+     * caller. Returns the stored value.
+     */
+    setUserDispatcherDelegation(principal: UserPrincipal, enabled: boolean): Promise<boolean>;
+
     /** Get skill usage (skill.invoked event aggregation) for a single session. */
     getSessionSkillUsage(sessionId: string, opts?: { since?: Date }): Promise<SkillUsageRow[]>;
 
@@ -1589,6 +1612,8 @@ function sqlForSchema(schema: string) {
             setUserGitHubCopilotKey:    `${s}.cms_set_user_github_copilot_key`,
             getUserRole:                `${s}.cms_get_user_role`,
             setUserRole:                `${s}.cms_set_user_role`,
+            getUserDispatcherDelegation: `${s}.cms_get_user_dispatcher_delegation`,
+            setUserDispatcherDelegation: `${s}.cms_set_user_dispatcher_delegation`,
             upsertSessionMetricSummary: `${s}.cms_upsert_session_metric_summary`,
             pruneDeletedSummaries:      `${s}.cms_prune_deleted_summaries`,
             getSessionSkillUsage:       `${s}.cms_get_session_skill_usage`,
@@ -1725,7 +1750,8 @@ export class PgSessionCatalog implements SessionCatalog {
 
     async initialize(): Promise<void> {
         if (this.initialized) return;
-        await runCmsMigrations(this.pool, this.sql.schema);
+        if (dbMigrationsSkipped()) await assertCmsMigrationsApplied(this.pool, this.sql.schema);
+        else await runCmsMigrations(this.pool, this.sql.schema);
         this.initialized = true;
     }
 
@@ -1932,7 +1958,7 @@ export class PgSessionCatalog implements SessionCatalog {
     async updateSession(sessionId: string, updates: SessionRowUpdates): Promise<void> {
         const jsonUpdates: Record<string, unknown> = {};
         if (updates.orchestrationId !== undefined) jsonUpdates.orchestrationId = updates.orchestrationId;
-        if (updates.title !== undefined) jsonUpdates.title = updates.title;
+        if (updates.title !== undefined) jsonUpdates.title = typeof updates.title === "string" ? redactSecrets(updates.title) : updates.title;
         if (updates.titleLocked !== undefined) jsonUpdates.titleLocked = updates.titleLocked;
         if (updates.state !== undefined) jsonUpdates.state = updates.state;
         if (updates.model !== undefined) jsonUpdates.model = updates.model;
@@ -1941,8 +1967,8 @@ export class PgSessionCatalog implements SessionCatalog {
         if (updates.modelResolutionSource !== undefined) jsonUpdates.modelResolutionSource = updates.modelResolutionSource;
         if (updates.lastActiveAt !== undefined) jsonUpdates.lastActiveAt = updates.lastActiveAt ? updates.lastActiveAt.toISOString() : null;
         if (updates.currentIteration !== undefined) jsonUpdates.currentIteration = updates.currentIteration;
-        if (updates.lastError !== undefined) jsonUpdates.lastError = updates.lastError;
-        if (updates.waitReason !== undefined) jsonUpdates.waitReason = updates.waitReason;
+        if (updates.lastError !== undefined) jsonUpdates.lastError = updates.lastError === null ? null : redactSecrets(updates.lastError);
+        if (updates.waitReason !== undefined) jsonUpdates.waitReason = updates.waitReason === null ? null : redactSecrets(updates.waitReason);
         if (updates.isSystem !== undefined) jsonUpdates.isSystem = updates.isSystem;
         if (updates.agentId !== undefined) jsonUpdates.agentId = updates.agentId;
         if (updates.splash !== undefined) jsonUpdates.splash = updates.splash;
@@ -1989,7 +2015,7 @@ export class PgSessionCatalog implements SessionCatalog {
         const { rows } = await this.turnControlQuery(
             "turnStart",
             `SELECT ${this.sql.fn.turnStart}($1, $2, $3::jsonb, $4::text) AS r`,
-            [sessionId, turn, JSON.stringify(records), workerNodeId ?? null],
+            [sessionId, turn, JSON.stringify(redactSecretsIn(records)), workerNodeId ?? null],
         );
         const r = rows[0]?.r ?? {};
         if (r.stale) return { stale: true };
@@ -2422,15 +2448,17 @@ export class PgSessionCatalog implements SessionCatalog {
         summary?: string | null;
         completedAt?: Date | null;
     }): Promise<void> {
+        const contractJson = redactSecretsIn(input.contractJson);
+        const resultJson = redactSecretsIn(input.resultJson);
         await this.pool.query(
             `SELECT ${this.sql.fn.upsertChildOutcome}($1, $2, $3, $4, $5, $6, $7)`,
             [
                 input.childSessionId,
                 input.parentSessionId,
-                input.contractJson ? JSON.stringify(input.contractJson) : null,
-                input.resultJson ? JSON.stringify(input.resultJson) : null,
-                input.verdict ?? null,
-                input.summary ?? null,
+                contractJson ? JSON.stringify(contractJson) : null,
+                resultJson ? JSON.stringify(resultJson) : null,
+                input.verdict == null ? null : redactSecrets(input.verdict),
+                input.summary == null ? null : redactSecrets(input.summary),
                 input.completedAt ?? null,
             ],
         );
@@ -2459,7 +2487,7 @@ export class PgSessionCatalog implements SessionCatalog {
 
         await this.pool.query(
             `SELECT ${this.sql.fn.recordEvents}($1, $2, $3)`,
-            [sessionId, JSON.stringify(events), workerNodeId ?? null],
+            [sessionId, JSON.stringify(redactSecretsIn(events)), workerNodeId ?? null],
         );
     }
 
@@ -2479,7 +2507,7 @@ export class PgSessionCatalog implements SessionCatalog {
                  name = CASE WHEN $3 IS NULL THEN "${this.sql.schema}".session_canvases.name ELSE EXCLUDED.name END,
                  size_bytes = EXCLUDED.size_bytes,
                  updated_at = now()`,
-            [sessionId, slot, name, latestRev, sizeBytes],
+            [sessionId, slot, name == null ? name : redactSecrets(name), latestRev, sizeBytes],
         );
     }
 
@@ -2728,7 +2756,7 @@ export class PgSessionCatalog implements SessionCatalog {
         try {
             const { rows } = await this.pool.query({
                 text: `SELECT ${this.sql.fn.publishLive}($1, $2, $3::jsonb, $4, $5, $6) AS result`,
-                values: [sessionId, normalizedTopic, JSON.stringify(data), kind, updatedBy || "", safeMaxBytes],
+                values: [sessionId, normalizedTopic, JSON.stringify(redactSecretsIn(data)), kind, updatedBy || "", safeMaxBytes],
                 query_timeout: 5_000,
             });
             return rows[0]?.result ?? null;
@@ -2975,12 +3003,12 @@ export class PgSessionCatalog implements SessionCatalog {
                 input.toolErrors,
                 input.toolNames ?? [],
                 input.resultType,
-                input.errorMessage,
+                input.errorMessage == null ? input.errorMessage : redactSecrets(input.errorMessage),
                 input.workerNodeId,
                 input.state,
                 input.lastActiveAt,
-                input.lastError,
-                input.waitReason,
+                input.lastError == null ? input.lastError : redactSecrets(input.lastError),
+                input.waitReason == null ? input.waitReason : redactSecrets(input.waitReason),
                 input.currentIteration,
             ],
         );
@@ -3439,6 +3467,39 @@ export class PgSessionCatalog implements SessionCatalog {
             ],
         );
         return normalizeUserRole(rows[0]?.role);
+    }
+
+    async getUserDispatcherDelegation(principal: UserPrincipal): Promise<boolean> {
+        const provider = principal?.provider?.trim();
+        const subject = principal?.subject?.trim();
+        if (!provider || !subject) return false;
+        const { rows } = await this.pool.query(
+            `SELECT ${this.sql.fn.getUserDispatcherDelegation}($1, $2) AS enabled`,
+            [provider, subject],
+        );
+        return rows[0]?.enabled === true;
+    }
+
+    async setUserDispatcherDelegation(principal: UserPrincipal, enabled: boolean): Promise<boolean> {
+        const provider = principal?.provider?.trim();
+        const subject = principal?.subject?.trim();
+        if (!provider || !subject) {
+            throw new Error("setUserDispatcherDelegation: provider and subject are required");
+        }
+        if (typeof enabled !== "boolean") {
+            throw new Error("setUserDispatcherDelegation: enabled must be true or false");
+        }
+        const { rows } = await this.pool.query(
+            `SELECT ${this.sql.fn.setUserDispatcherDelegation}($1, $2, $3, $4, $5) AS enabled`,
+            [
+                provider,
+                subject,
+                principal.email ?? null,
+                principal.displayName ?? null,
+                enabled,
+            ],
+        );
+        return rows[0]?.enabled === true;
     }
 
     async pruneDeletedSummaries(olderThan: Date): Promise<number> {

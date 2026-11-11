@@ -33,6 +33,11 @@
 export { PilotSwarmClient, PilotSwarmSession } from "./client.js";
 export type { SessionEventHandler } from "./client.js";
 export { PilotSwarmWorker } from "./worker.js";
+// PILOTSWARM_SESSION_MESSAGE_SCOPE: hosts that read it (the portal does) parse it like the worker.
+export { resolveSessionMessageScope } from "./session-messages.js";
+export type { SessionMessageScope } from "./session-messages.js";
+// PILOTSWARM_CLI_DISABLE_HOOKS: the CLI home's settings files in their fixed form, for images that create them ahead of time.
+export { CLI_HOOKS_OFF_CONFIG_TEXT, CLI_HOOKS_OFF_SETTINGS_TEXT } from "./cli-hooks.js";
 export { FEATURE_ALWAYS_ON_NOTICE, FEATURE_FLAGS, FeatureFlagError, FeatureFlagResolutionError, isAlwaysOn } from "./feature-flags.js";
 export type { FeatureKey, FeatureDecision, FeatureDefinition, FeatureSetting, ResolveOptions } from "./feature-flags.js";
 export { FeatureFlagCache } from "./feature-flag-cache.js";
@@ -87,7 +92,7 @@ export { migrateLegacyDuroxideSchema } from "./duroxide-schema-migration.js";
 export type { DuroxideSchemaMigrationOptions, DuroxideSchemaMigrationResult } from "./duroxide-schema-migration.js";
 export { PgSessionCatalog, PgSessionCatalogProvider, computeCacheHitRatio } from "./cms.js";
 export { normalizeUserRole } from "./cms.js";
-export type { SessionCatalog, SessionCatalogProvider, SessionRow, SessionRowUpdates, SessionEvent, PlacementViewer, SessionPlacementResult, TopEventEmitterRow, InsertTurnMetricInput, CompleteTurnWritebackInput, TurnMetricRow, HourlyTokenBucketRow, TokensByModelRow, SessionMetricSummary, SessionMetricSummaryUpsert, FleetStats, UserStats, UserStatsBucket, UserStatsModelBucket, UserStatsOwnerKind, SessionTreeStats, SkillKind, SkillUsageRow, SessionTreeSkillUsage, FleetSkillUsageRow, FleetSkillUsage, RetrievalSurface, RetrievalOperation, RetrievalUsageRow, SessionTreeRetrievalUsage, FleetRetrievalUsageRow, FleetRetrievalUsage, GraphNodeUsageKind, GraphNodeUsageRow, FleetGraphNodeUsageRow, FleetGraphNodeUsage, GraphEdgeSearchUsageRow, UserProfile, UserPrincipal, UserRoleInfo, UserRoleValue } from "./cms.js";
+export type { SessionCatalog, SessionCatalogProvider, SessionRow, SessionRowUpdates, SessionEvent, PlacementViewer, SessionPlacementResult, TopEventEmitterRow, InsertTurnMetricInput, CompleteTurnWritebackInput, TurnMetricRow, HourlyTokenBucketRow, TokensByModelRow, SessionMetricSummary, SessionMetricSummaryUpsert, FleetStats, UserStats, UserStatsBucket, UserStatsModelBucket, UserStatsOwnerKind, SessionTreeStats, SkillKind, SkillUsageRow, SessionTreeSkillUsage, FleetSkillUsageRow, FleetSkillUsage, RetrievalSurface, RetrievalOperation, RetrievalUsageRow, SessionTreeRetrievalUsage, FleetRetrievalUsageRow, FleetRetrievalUsage, GraphNodeUsageKind, GraphNodeUsageRow, FleetGraphNodeUsageRow, FleetGraphNodeUsage, GraphEdgeSearchUsageRow, UserProfile, UserPrincipal, UserRoleInfo, UserRoleValue, DispatcherDelegationStatus } from "./cms.js";
 export type {
     FactStore,
     FactRecord,
@@ -182,6 +187,13 @@ export type {
     WorkspaceDefaultsContext,
     WorkspaceReleaseReason,
     WorkspaceReleaseRequest,
+    SessionAdmission,
+    SessionAdmissionDecision,
+    SessionAdmissionRequest,
+    // Owner routing
+    OwnerCapacityRequest,
+    OwnerCapacityAnswer,
+    OwnerCapacityRequester,
     // Session turn control (Stop and Steer through the CMS)
     StopTurnResult,
     StopTurnOptions,
@@ -219,7 +231,8 @@ export {
     acceptsTurnControl,
     TurnControlUnavailableError,
 } from "./turn-control-contract.js";
-export { TURN_CONTROL_CAPABILITY } from "./activity-routing.js";
+export { TURN_CONTROL_CAPABILITY, OWNER_CAPACITY_CAPABILITY } from "./activity-routing.js";
+export { CAPACITY_UNAVAILABLE, CAPACITY_DENIED, OWNER_CAPACITY_TIMEOUT_MS } from "./owner-routing.js";
 export {
     IMAGE_ATTACHMENT_CONTENT_TYPES,
     ATTACHMENT_MAX_BYTES,
@@ -281,6 +294,19 @@ export { createGraphTools } from "./graph-tools.js";
 export { createInspectTools } from "./inspect-tools.js";
 export { createProviderTools, holdsProviderTools, PROVIDER_TOOL_NAMES } from "./provider-tools.js";
 export { ProviderStore, ProviderError } from "./provider-store.js";
+export { checkFineGrainedGitHubToken, requiresFineGrainedGitHubTokens } from "./provider-store.js";
+export type { CredentialGateOptions, GitHubTokenCheckOptions, PersonalCredentialContext, ProviderStoreOptions } from "./provider-store.js";
+// External personal secrets: the store and resolver contracts a deployment implements.
+export {
+    assertPersonalSecretStore, externalSecretRef, PersonalCredentialError, personalSecretsMode,
+} from "./personal-secret-store.js";
+export type {
+    ExternalSecretRef, PersonalCredentialAnswer, PersonalCredentialRequest, PersonalCredentialResolver,
+    PersonalSecretAttributes, PersonalSecretOwner, PersonalSecretPut, PersonalSecretsMode, PersonalSecretStore,
+    PersonalSecretWritten,
+} from "./personal-secret-store.js";
+export { installLogRedaction, redactSecretPrefixes, redactSecrets, redactSecretsIn, secretRedactionEnabled } from "./secret-redaction.js";
+export { assertCliProgramForExternalSecrets } from "./cli-program-guard.js";
 export { bootstrapProviders, buildRuntimeRegistry, loadProviderTypes } from "./provider-catalog.js";
 // Resource Manager Agent tools
 export { createResourceManagerTools } from "./resourcemgr-tools.js";
@@ -432,6 +458,6 @@ export type {
 export { defineTool } from "@github/copilot-sdk";
 export { createToolFactsAccessor, TOOL_PRIVATE_FACT_PREFIX } from "./tool-facts-accessor.js";
 export type { ToolFactsAccessor, ToolFactsScope, ToolFactsScopeOptions } from "./tool-facts-accessor.js";
-export { normalizeToolOnlyPrefixes, isToolOnlyFactKey } from "./facts-tools.js";
+export { normalizeToolOnlyPrefixes, isToolOnlyFactKey, factsManagerPrefixFor } from "./facts-tools.js";
 
 export type { NativeTaskTools, NativeTaskName } from "./native-task-policy.js";

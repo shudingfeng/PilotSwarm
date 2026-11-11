@@ -2115,6 +2115,7 @@ function buildAdminWorkersLines(view) {
 
 function buildAdminModelProviderLines(view) {
     const providers = view.modelProviders || {};
+    const delegation = providers.dispatcherDelegation || {};
     const lines = [];
     const configured = (entry) => entry?.configured?.model || "automatic";
     const effective = (entry) => entry?.effective?.model || "blocked — no usable provider";
@@ -2141,6 +2142,15 @@ function buildAdminModelProviderLines(view) {
         lines.push([{ text: "My Session Default", color: "white", bold: true }]);
         lines.push([{ text: `  configured  ${configured(providers.mySessionDefault)}`, color: "gray" }]);
         lines.push([{ text: `  effective   ${effective(providers.mySessionDefault)}`, color: "cyan" }]);
+        if (delegation.available) {
+            lines.push([{ text: "", color: "gray" }]);
+            lines.push([{ text: "Dispatcher Delegation", color: "white", bold: true }]);
+            lines.push([
+                { text: delegation.saving ? "  saving..." : delegation.enabled ? "  on " : "  off", color: delegation.enabled ? "green" : "yellow", bold: true },
+                { text: "  the deployment's dispatcher may start and end sessions for you", color: "gray" },
+            ]);
+            if (delegation.error) lines.push([{ text: `  ! ${delegation.error}`, color: "red" }]);
+        }
     } else if (view.isAdmin) {
         lines.push([{ text: "Shared Providers", color: "white", bold: true }]);
         if (!(providers.sharedProviders || []).length) {
@@ -2180,6 +2190,7 @@ function buildAdminModelProviderLines(view) {
             { text: "d ", color: "red", bold: true }, { text: "delete  ", color: "gray" },
             { text: "u ", color: "cyan", bold: true }, { text: "my default  ", color: "gray" },
             ...(view.isAdmin ? [{ text: "t ", color: "yellow", bold: true }, { text: "system use  ", color: "gray" }] : []),
+            ...(delegation.available ? [{ text: "g ", color: "yellow", bold: true }, { text: "delegation  ", color: "gray" }] : []),
         ]);
     } else if (view.isAdmin) {
         lines.push([

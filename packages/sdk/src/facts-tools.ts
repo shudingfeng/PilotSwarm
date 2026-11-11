@@ -265,6 +265,21 @@ function patternTouchesPrefix(pattern: string, prefix: string): boolean {
     return prefix.startsWith(literalPrefix) || literalPrefix.startsWith(prefix);
 }
 
+/**
+ * The prefix reserved for the Facts Manager (`skills/`, `asks/`,
+ * `config/facts-manager/`) that `key` is under or, with `pattern`, that the
+ * LIKE/glob pattern could match; null otherwise. Every session's prompt reads
+ * the shared `skills/` and `asks/` facts, so hosts that write facts for
+ * callers other than agents use this to apply the same reservation.
+ */
+export function factsManagerPrefixFor(key: string, opts: { pattern?: boolean } = {}): string | null {
+    const text = String(key ?? "");
+    for (const prefix of RESERVED_WRITE_PREFIXES) {
+        if (opts.pattern ? patternTouchesPrefix(text, prefix) : text.startsWith(prefix)) return prefix;
+    }
+    return null;
+}
+
 function checkNamespaceRead(keyPattern: string | undefined, agentIdentity?: string, toolOnly: readonly string[] = DEFAULT_TOOL_ONLY_PREFIXES): string | null {
     if (!keyPattern) return null;
     const toolPrefix = toolOnlyPrefixForPattern(keyPattern, toolOnly);

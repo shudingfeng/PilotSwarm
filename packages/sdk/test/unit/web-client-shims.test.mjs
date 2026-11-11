@@ -73,6 +73,9 @@ const SHIM_CASES = [
     { call: (c) => c.listSessionShares("s1"), op: "listSessionShares", params: { sessionId: "s1" } },
     { call: (c) => c.listKnownUsers({ limit: 10 }), op: "listKnownUsers", params: { limit: 10 } },
     { call: (c) => c.listAuthzAudit({ limit: 5, sessionId: "s1" }), op: "listAuthzAudit", params: { limit: 5, sessionId: "s1" } },
+    // — dispatcher delegation: the server binds both to the signed-in caller —
+    { call: (c) => c.getMyDispatcherDelegation(USER), op: "getMyDispatcherDelegation", params: {} },
+    { call: (c) => c.setMyDispatcherDelegation(true, USER), op: "setMyDispatcherDelegation", params: { enabled: true } },
 ];
 
 test("every shim maps its positional arguments onto the right wire call", async () => {

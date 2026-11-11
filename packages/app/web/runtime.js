@@ -1,4 +1,11 @@
 import { NodeSdkTransport } from "pilotswarm/host";
+import {
+    factsManagerPrefixFor,
+    personalSecretsMode,
+    requiresFineGrainedGitHubTokens,
+    resolveSessionMessageScope,
+    secretRedactionEnabled,
+} from "pilotswarm-sdk";
 import { adminCanAccessResource, adminCapabilities, ADMIN_SCOPE_POLICY_VERSION } from "pilotswarm-sdk/api";
 import { projectFleetAccounting, projectUserAccounting, projectAgentWorkerState, projectWorker } from "pilotswarm-sdk/api";
 import {
@@ -9,6 +16,10 @@ import {
     relationFor,
     forbiddenError,
     notFoundError,
+    isDispatcherPrincipal,
+    parseOnBehalfOfOwner,
+    delegationRevokedError,
+    auditUnavailableError,
 } from "./authz.js";
 
 /**
@@ -118,6 +129,24 @@ function requireUserPrincipal(authContext, methodName) {
     return principal;
 }
 
+/**
+ * The legacy key RPCs store a GitHub token in the database, unchecked. With
+ * PILOTSWARM_REQUIRE_FINE_GRAINED_GH_PAT on they refuse a key, and so does
+ * the personal one with PILOTSWARM_PERSONAL_SECRETS=external, which keeps
+ * personal tokens out of the database. Clearing one stays allowed, since
+ * that stores nothing.
+ */
+function assertLegacyKeyAccepted(refusal, methodName, key) {
+    if (!refusal || typeof key !== "string" || key.trim().length === 0) return;
+    throw forbiddenError(
+        `Portal RPC '${methodName}' is disabled on this deployment, which ${refusal}. `
+        + "Add one, or use Update Key on yours.",
+    );
+}
+
+const FINE_GRAINED_ONLY = "accepts GitHub tokens only through a GitHub Copilot provider, where they are checked";
+const EXTERNAL_PERSONAL_SECRETS = "keeps personal GitHub tokens only in its secret store, through a GitHub Copilot provider";
+
 // Break-glass audit coverage: every non-read session op, plus the reads that
 // expose content (transcript, artifacts, history). Status polling and list
 // metadata are excluded to keep the audit stream signal-dense.
@@ -131,6 +160,10 @@ const BREAK_GLASS_AUDITED = {
     getLatestResponse: true,
     listSessionShares: true,
 };
+
+// What the deployment's dispatcher may do, beyond its targeted write share,
+// on a session of a user who allows delegation.
+const DELEGATED_END_OF_WORK = new Set(["completeSession", "cancelSession", "deleteSession"]);
 
 // How often an unchanged role is re-confirmed in the users table.
 //
@@ -168,6 +201,9 @@ const PROVIDER_ERROR_STATUS = {
     // routing first" — a refusal whose message is the whole value. Without
     // a status it falls to the 500 branch, which scrubs the message.
     PROVIDER_IN_USE: 409,
+    // External personal secrets: the secret store did not answer. The
+    // message is fixed text, so it is shown although the status is a 5xx.
+    PROVIDER_SECRET_STORE_UNAVAILABLE: 503,
 };
 
 /** `?names=a,b` off the wire, or an array from the legacy /api/rpc caller. */
@@ -176,13 +212,40 @@ function providerNames(raw) {
     return list.map((name) => String(name || "").trim()).filter(Boolean);
 }
 
+/**
+ * The Facts Manager prefix (`skills/`, `asks/`, `config/facts-manager/`) of
+ * the shared facts a storeFact/deleteFact input writes, or null. The stores
+ * write a shared fact only for `shared: true`; a pattern delete reaches
+ * shared facts unless its scope is "session", and every key its LIKE pattern
+ * could match counts.
+ */
+function sharedKnowledgePrefix(method, input) {
+    const key = String(input?.key ?? "");
+    if (method === "deleteFact" && input?.pattern === true) {
+        const scope = input.scope ?? (input.shared === true ? "shared" : "session");
+        return scope === "session" ? null : factsManagerPrefixFor(key, { pattern: true });
+    }
+    return input?.shared === true ? factsManagerPrefixFor(key) : null;
+}
+
 export class PortalRuntime {
-    constructor({ store, mode, useManagedIdentity, cmsFactsDatabaseUrl, aadDbUser } = {}) {
-        this.transport = new NodeSdkTransport({ store, mode, useManagedIdentity, cmsFactsDatabaseUrl, aadDbUser });
+    constructor({ store, mode, useManagedIdentity, cmsFactsDatabaseUrl, aadDbUser, personalSecretStore } = {}) {
+        this.transport = new NodeSdkTransport({
+            store, mode, useManagedIdentity, cmsFactsDatabaseUrl, aadDbUser,
+            ...(personalSecretStore ? { personalSecretStore } : {}),
+        });
         this.mode = mode;
         this.started = false;
         this.startPromise = null;
         this.authz = loadAuthzConfig();
+        // Read once, like the authz settings: a malformed value stops the
+        // portal at startup.
+        this.requireFineGrainedGitHubTokens = requiresFineGrainedGitHubTokens();
+        this.personalSecretsExternal = personalSecretsMode() === "external";
+        secretRedactionEnabled();
+        // The workers' setting, read here too: "owner" also keeps non-admins
+        // out of the shared knowledge every session's prompt reads.
+        this.sessionMessageScope = resolveSessionMessageScope(process.env.PILOTSWARM_SESSION_MESSAGE_SCOPE);
         // Throttle repeated break-glass audit rows for the same actor+session
         // (the portal polls events continuously while a session is open).
         this._breakGlassSeen = new Map(); // key -> expiry epoch ms
@@ -346,7 +409,7 @@ export class PortalRuntime {
 
         if (access.startsWith("session:")) {
             const sessionId = safeParams[spec.sessionParam];
-            return this._gateSession(method, access, sessionId, authContext, { owner, isAdmin });
+            return this._gateSession(method, access, sessionId, authContext, { owner, isAdmin, params: safeParams });
         }
 
         return { snapshot: null };
@@ -365,7 +428,7 @@ export class PortalRuntime {
         });
     }
 
-    async _gateSession(method, accessClass, sessionId, authContext, { owner, isAdmin }) {
+    async _gateSession(method, accessClass, sessionId, authContext, { owner, isAdmin, params = null }) {
         // session:share is a brand-new capability with no pre-model behavior
         // to preserve, so it is enforced even during the ownership dark-launch
         // — otherwise a user could pre-plant a durable grant that survives the
@@ -379,9 +442,15 @@ export class PortalRuntime {
         // cms_get_session_access returns no row for either) must not open the
         // gate. Only genuinely id-less ops get the permissive null path. Skip
         // when the transport can't resolve snapshots at all (legacy/no-auth).
+        // The one exception is a forced delete that finishes a soft-deleted
+        // session's tree, for its owner, an admin or the delegated dispatcher.
         if (hasSessionId && this._accessSnapshotSupported()) {
             const snapshot = await this._getAccessSnapshot(sessionId, owner);
             if (!snapshot) {
+                if (effectiveEnforce && method === "deleteSession" && params?.force === true) {
+                    const retry = await this._gateForcedDeleteOfDeleted(method, accessClass, sessionId, authContext, { owner, isAdmin, params });
+                    if (retry) return retry;
+                }
                 this._recordAudit({
                     actor: this._auditActor(authContext),
                     action: method,
@@ -392,11 +461,301 @@ export class PortalRuntime {
                 if (!effectiveEnforce) return { snapshot: null };
                 throw notFoundError();
             }
+            const delegated = await this._gateDelegation(method, accessClass, snapshot, sessionId, authContext, { isAdmin, effectiveEnforce, params });
+            if (delegated) return delegated;
             return this._decideSessionAccess(method, accessClass, snapshot, sessionId, authContext, { isAdmin, effectiveEnforce });
         }
 
         const snapshot = await this._getAccessSnapshot(sessionId, owner);
         return this._decideSessionAccess(method, accessClass, snapshot, sessionId, authContext, { isAdmin, effectiveEnforce });
+    }
+
+    // ── Dispatcher delegation ───────────────────────────────────────────
+    //
+    // Everything below is inert unless DISPATCHER_SP_OBJECT_ID names the
+    // deployment's dispatcher, and costs other callers one string comparison.
+
+    _isDispatcher(authContext) {
+        return isDispatcherPrincipal(authContext?.principal, this.authz);
+    }
+
+    /**
+     * The user whose opt-in decides the dispatcher's access to a session tree
+     * owned by `owner`, or null when the usual rules apply: another caller,
+     * the dispatcher's own sessions, unowned trees and the system user's.
+     */
+    _delegatingOwner(owner, authContext) {
+        if (!this._isDispatcher(authContext)) return null;
+        const provider = String(owner?.provider || "").trim();
+        const subject = String(owner?.subject || "").trim();
+        if (!provider || !subject || (provider === "system" && subject === "system")) return null;
+        const caller = normalizeSessionOwner(authContext);
+        if (caller && caller.provider === provider && caller.subject === subject) return null;
+        return { provider, subject };
+    }
+
+    /** Read fresh on every call, so turning delegation off holds from the dispatcher's next request. */
+    async _ownerAllowsDelegation(owner) {
+        if (typeof this.transport.getMyDispatcherDelegation !== "function") return false;
+        const status = await this.transport.getMyDispatcherDelegation({ principal: owner });
+        return status?.enabled === true;
+    }
+
+    /**
+     * The dispatcher's rules on another user's session. Without the owner's
+     * opt-in it is refused wherever it would otherwise have access — 403
+     * DELEGATION_REVOKED rather than the 404 that hides sessions it never
+     * had — under the same enforce/would_deny switch as every other session
+     * check. With the opt-in it may also complete, cancel and delete a
+     * session it holds the targeted write share on, and each such call is
+     * audited before it runs. Null leaves the usual decision in charge.
+     */
+    async _gateDelegation(method, accessClass, snapshot, sessionId, authContext, { isAdmin, effectiveEnforce, params }) {
+        const owner = snapshot.isSystem ? null : this._delegatingOwner(snapshot.owner, authContext);
+        if (!owner) return null;
+        const endOfWork = DELEGATED_END_OF_WORK.has(method) && snapshot.viewerShareAccess === "write";
+        if (await this._ownerAllowsDelegation(owner)) {
+            if (!endOfWork) return null;
+            await this._recordDelegatedCall({
+                action: method,
+                sessionId,
+                owner,
+                authContext,
+                details: method === "deleteSession" ? {
+                    ...(params?.force === true ? { force: true } : {}),
+                    ...(params?.settleTimeoutMs !== undefined ? { settleTimeoutMs: params.settleTimeoutMs } : {}),
+                } : {},
+            });
+            return { snapshot, delegated: true };
+        }
+        const usual = evaluateSessionAccess(accessClass, snapshot, {
+            isAdmin,
+            adminScope: this.authz.adminScope,
+            systemReadable: this.authz.systemVisibility === "read",
+        });
+        if (!usual.allowed && !endOfWork) return null;
+        this._recordAudit({
+            actor: this._auditActor(authContext),
+            action: method,
+            sessionId: String(sessionId),
+            target: `${owner.provider}/${owner.subject}`,
+            decision: effectiveEnforce ? "deny" : "would_deny",
+            reason: "the owner does not allow the dispatcher to act for them",
+        });
+        if (effectiveEnforce) throw delegationRevokedError();
+        return { snapshot };
+    }
+
+    /**
+     * Audit entry and log line of one delegated creation or end of work.
+     * Unlike the other audit writes this one is awaited: when it cannot be
+     * written, the call fails.
+     */
+    async _recordDelegatedCall({ action, sessionId, owner, authContext, details = {} }) {
+        const entry = {
+            actor: this._auditActor(authContext),
+            action,
+            sessionId: sessionId ? String(sessionId) : null,
+            target: `${owner.provider}/${owner.subject}`,
+            decision: "delegated",
+            reason: "the owner allows the deployment's dispatcher to act for them",
+            details: { owner: { provider: owner.provider, subject: owner.subject }, ...details },
+        };
+        try {
+            if (typeof this.transport.recordAuthzAudit !== "function") throw new Error("this transport keeps no authorization audit");
+            await this.transport.recordAuthzAudit(entry);
+        } catch (error) {
+            throw auditUnavailableError(error);
+        }
+        this._logDelegatedCall(entry);
+    }
+
+    /** One JSON line per delegated call, for log-based alerting outside the database. */
+    _logDelegatedCall(entry) {
+        const { owner: _owner, ...details } = entry.details;
+        console.log(JSON.stringify({
+            event: "pilotswarm.dispatcher_delegation",
+            at: new Date().toISOString(),
+            action: entry.action,
+            sessionId: entry.sessionId,
+            owner: entry.target,
+            dispatcher: `${entry.actor.provider}/${entry.actor.subject}`,
+            ...details,
+        }));
+    }
+
+    /**
+     * `onBehalfOfOwner` on session creation: only the deployment's dispatcher
+     * (never an admin as such), and only for a user who allows it. Enforced
+     * whatever AUTHZ_ENFORCE_OWNERSHIP says — creating a session that someone
+     * else owns is a new capability with no earlier behavior to keep. Returns
+     * the owner, or null when the request does not ask for delegation.
+     */
+    async _delegatedCreateOwner(method, safeParams, authContext) {
+        if (safeParams.onBehalfOfOwner == null) return null;
+        if (!this._isDispatcher(authContext)) {
+            this._recordAudit({
+                actor: this._auditActor(authContext),
+                action: method,
+                decision: "deny",
+                reason: "onBehalfOfOwner is reserved for the deployment's dispatcher",
+            });
+            throw forbiddenError("onBehalfOfOwner is reserved for the deployment's dispatcher.");
+        }
+        const requested = parseOnBehalfOfOwner(safeParams.onBehalfOfOwner, authContext?.principal);
+        const owner = this._delegatingOwner(requested, authContext);
+        if (!owner) {
+            throw Object.assign(new Error("onBehalfOfOwner must name another user."), { code: "INVALID_REQUEST" });
+        }
+        if (safeParams.visibility != null && normalizeVisibility(safeParams.visibility, null) !== "private") {
+            throw Object.assign(new Error("A session created on behalf of its owner stays private."), { code: "INVALID_REQUEST" });
+        }
+        if (!(await this._ownerAllowsDelegation(owner))) {
+            this._recordAudit({
+                actor: this._auditActor(authContext),
+                action: method,
+                target: `${owner.provider}/${owner.subject}`,
+                decision: "deny",
+                reason: "the owner does not allow the dispatcher to act for them",
+            });
+            throw delegationRevokedError("This user does not allow the deployment's dispatcher to create sessions for them.");
+        }
+        return { ...requested, ...owner };
+    }
+
+    /**
+     * Finish a delegated creation: audit it, then give the dispatcher its
+     * targeted write share — the private session's only share. On failure the
+     * session is removed again, so the dispatcher never holds an unaudited one.
+     */
+    async _completeDelegatedCreate(method, created, owner, authContext, details = {}) {
+        const sessionId = created?.sessionId;
+        try {
+            await this._recordDelegatedCall({ action: method, sessionId, owner, authContext, details });
+            const dispatcher = normalizeSessionOwner(authContext);
+            await this.transport.grantSessionShare(sessionId, dispatcher, "write", dispatcher);
+        } catch (error) {
+            if (sessionId) {
+                await this.transport.deleteSession(sessionId, "Delegated creation failed", { force: true, settleTimeoutMs: 0 }).catch(() => {});
+            }
+            throw error;
+        }
+    }
+
+    /**
+     * Listings leave out, for the dispatcher, the sessions of users who do not
+     * allow it — while ownership is enforced, like the gate's refusal.
+     */
+    async _dropUndelegatedSessions(rows, authContext) {
+        if (!this.authz.enforce || !Array.isArray(rows) || !this._isDispatcher(authContext)) return rows;
+        const allowed = new Map();
+        const kept = [];
+        for (const row of rows) {
+            const owner = row?.isSystem ? null : this._delegatingOwner(row?.owner, authContext);
+            if (owner) {
+                const key = `${owner.provider}\u0001${owner.subject}`;
+                if (!allowed.has(key)) allowed.set(key, this._ownerAllowsDelegation(owner));
+                if (!(await allowed.get(key))) continue;
+            }
+            kept.push(row);
+        }
+        return kept;
+    }
+
+    /**
+     * A forced delete whose target is already soft-deleted, which the access
+     * read cannot see: a retry, or the end of what a plain delete left in the
+     * target's tree. The target is looked up in the caller's own listing with
+     * deleted sessions, which listSessionsPage already shows them, and the
+     * decision is made on its tree's root as for a live session: its owner
+     * and admins pass, and so does the delegated dispatcher, under
+     * _gateDelegation's rules and audit. Only a live session of the tree
+     * shows the dispatcher's share, so with none left the dispatcher is
+     * refused. Null leaves the caller today's 404.
+     */
+    async _gateForcedDeleteOfDeleted(method, accessClass, sessionId, authContext, { owner, isAdmin, params }) {
+        const tree = await this._deletedTreeAccess(String(sessionId), owner, isAdmin);
+        if (!tree) return null;
+        const { snapshot, shareKnown } = tree;
+        if (!snapshot.isSystem && this._delegatingOwner(snapshot.owner, authContext)) {
+            if (!shareKnown) return null;
+            const delegated = await this._gateDelegation(method, accessClass, snapshot, sessionId, authContext, { isAdmin, effectiveEnforce: true, params });
+            if (delegated) return delegated;
+        }
+        if (!snapshot.viewerIsOwner && !this._resourceAdmin(isAdmin, snapshot)) return null;
+        return this._decideSessionAccess(method, accessClass, snapshot, sessionId, authContext, { isAdmin, effectiveEnforce: true });
+    }
+
+    /**
+     * The access snapshot of a deleted session's tree root, or null when the
+     * caller's listing with deleted sessions has no such session. A live
+     * session left in the tree gives it through the access read, as for any
+     * call. With none left, the root's row gives its owner and system flag,
+     * but not the caller's share (`shareKnown: false`).
+     */
+    async _deletedTreeAccess(sessionId, owner, isAdmin) {
+        if (typeof this.transport.mgmt?.listSessionsPage !== "function") return null;
+        const viewer = this._listViewer(owner, isAdmin);
+        const rows = [];
+        let cursor = null;
+        for (;;) {
+            const page = await this.transport.mgmt.listSessionsPage({
+                limit: 200,
+                includeDeleted: true,
+                ...(cursor ? { cursor } : {}),
+                ...(viewer ? { viewer } : {}),
+            });
+            const sessions = Array.isArray(page?.sessions) ? page.sessions : [];
+            rows.push(...sessions);
+            const next = page?.hasMore ? page.nextCursor : null;
+            if (!next || sessions.length === 0
+                || (cursor && next.sessionId === cursor.sessionId && next.updatedAt === cursor.updatedAt)) break;
+            cursor = next;
+        }
+        const target = rows.find((row) => row?.sessionId === sessionId);
+        if (!target) return null;
+        const rootId = target.rootSessionId || sessionId;
+        for (const row of rows) {
+            if (row?.sessionId === sessionId || (row?.rootSessionId || row?.sessionId) !== rootId) continue;
+            const snapshot = await this._getAccessSnapshot(row.sessionId, owner);
+            if (snapshot?.rootSessionId === rootId) return { snapshot, shareKnown: true };
+        }
+        const root = rows.find((row) => row?.sessionId === rootId) ?? target;
+        const rootOwner = normalizeOwnerPrincipal(root.owner);
+        return {
+            snapshot: {
+                rootSessionId: rootId,
+                isSystem: root.isSystem === true,
+                visibility: root.visibility || "private",
+                owner: root.owner ?? null,
+                viewerIsOwner: Boolean(rootOwner && owner && rootOwner.provider === owner.provider && rootOwner.subject === owner.subject),
+                viewerShareAccess: null,
+            },
+            shareKnown: false,
+        };
+    }
+
+    /**
+     * Only the owner, an admin or the delegated dispatcher may force a delete.
+     * Like session:share, the forced delete is new, so this holds whatever
+     * AUTHZ_ENFORCE_OWNERSHIP says for a session the gate finds. With
+     * enforcement on, the gate has already refused everyone else, and it
+     * finds a target that is already deleted through its tree
+     * (_gateForcedDeleteOfDeleted), so a retry can finish. With enforcement
+     * off, the gate lets a target it cannot find through, as it does every
+     * call in that mode, so there is no snapshot to check and the call passes.
+     */
+    _assertMayForceDelete(gate, sessionId, authContext, isAdmin) {
+        const snapshot = gate?.snapshot;
+        if (!snapshot || gate.delegated || snapshot.viewerIsOwner || this._resourceAdmin(isAdmin, snapshot)) return;
+        this._recordAudit({
+            actor: this._auditActor(authContext),
+            action: "deleteSession",
+            sessionId: String(sessionId),
+            decision: "deny",
+            reason: "only the owner, an admin or the delegated dispatcher may force a delete",
+        });
+        throw forbiddenError("Only the session's owner or an admin, or the delegated dispatcher, can force a delete.");
     }
 
     _decideSessionAccess(method, accessClass, snapshot, sessionId, authContext, { isAdmin, effectiveEnforce }) {
@@ -439,11 +798,28 @@ export class PortalRuntime {
      * Facts write containment: non-admin callers may write/delete shared
      * facts (the deployment's collaboration memory) and facts of sessions
      * they can WRITE; anything else — in particular pattern deletes over
-     * other sessions' private facts — is denied.
+     * other sessions' private facts — is denied. With the "owner" session
+     * message scope, the shared facts under the Facts Manager's prefixes are
+     * admin-only too: every session's prompt reads them.
      */
     async _authorizeFactsWrite(method, safeParams, authContext, { owner, isAdmin }) {
-        if (this._resourceAdmin(isAdmin)) return;
         const inputs = Array.isArray(safeParams.input) ? safeParams.input : [safeParams.input];
+        if (!isAdmin && this.sessionMessageScope === "owner") {
+            for (const input of inputs) {
+                const prefix = sharedKnowledgePrefix(method, input);
+                if (!prefix) continue;
+                const reason = `Only an administrator can store or delete shared facts under '${prefix}'.`;
+                this._recordAudit({
+                    actor: this._auditActor(authContext),
+                    action: method,
+                    target: String(input?.key ?? ""),
+                    decision: "deny",
+                    reason,
+                });
+                throw forbiddenError(reason);
+            }
+        }
+        if (this._resourceAdmin(isAdmin)) return;
         for (const input of inputs) {
             const sessionId = typeof input?.sessionId === "string" && input.sessionId.trim() ? input.sessionId.trim() : null;
             const scopeKey = typeof input?.scopeKey === "string" ? input.scopeKey : "";
@@ -674,10 +1050,12 @@ export class PortalRuntime {
         const gate = await this._authorizeCall(method, safeParams, authContext, { owner, isAdmin });
         const listViewer = this._listViewer(owner, isAdmin);
         switch (method) {
-            case "listSessions":
-                return listViewer
-                    ? this.transport.mgmt.listSessionsVisible(listViewer, placementPrincipal(authContext))
-                    : this.transport.mgmt.listSessions(placementPrincipal(authContext));
+            case "listSessions": {
+                const rows = listViewer
+                    ? await this.transport.mgmt.listSessionsVisible(listViewer, placementPrincipal(authContext))
+                    : await this.transport.mgmt.listSessions(placementPrincipal(authContext));
+                return this._dropUndelegatedSessions(rows, authContext);
+            }
             case "listSessionGroups":
                 // Viewer-scoped: everyone (admins included) sees only their
                 // own groups — a group is a user's private organization.
@@ -697,7 +1075,7 @@ export class PortalRuntime {
                 return this.transport.getChildOutcome(safeParams.childSessionId);
             case "listChildOutcomes":
                 return this.transport.listChildOutcomes(safeParams.parentSessionId);
-            case "listSessionsPage":
+            case "listSessionsPage": {
                 // The portal opts into a personal catalog even when its user
                 // also has unrestricted fleet administration. With no signed-in
                 // principal (trusted no-auth deployments), retain the legacy
@@ -705,11 +1083,15 @@ export class PortalRuntime {
                 const pageViewer = safeParams.viewerOnly === true && owner
                     ? this._listViewer(owner, isAdmin, true)
                     : listViewer;
-                return this.transport.mgmt.listSessionsPage({
+                const page = await this.transport.mgmt.listSessionsPage({
                     ...normalizeSessionPageOptions(safeParams),
                     ...(pageViewer ? { viewer: pageViewer } : {}),
                     placement: placementPrincipal(authContext),
                 });
+                return Array.isArray(page?.sessions)
+                    ? { ...page, sessions: await this._dropUndelegatedSessions(page.sessions, authContext) }
+                    : page;
+            }
             case "getSession":
                 return this.transport.mgmt.getSession(safeParams.sessionId, placementPrincipal(authContext));
             case "getOrchestrationStats":
@@ -772,17 +1154,47 @@ export class PortalRuntime {
                     principal: requireUserPrincipal(authContext, "setCurrentUserProfileSettings"),
                     settings: safeParams.settings,
                 });
-            case "setCurrentUserGitHubCopilotKey":
+            // Bound to the signed-in caller: nobody sets another user's opt-in.
+            case "getMyDispatcherDelegation": {
+                const status = await this.transport.getMyDispatcherDelegation({
+                    principal: requireUserPrincipal(authContext, "getMyDispatcherDelegation"),
+                });
+                return { enabled: status?.enabled === true, dispatcherConfigured: Boolean(this.authz.dispatcherSubject) };
+            }
+            case "setMyDispatcherDelegation": {
+                const principal = requireUserPrincipal(authContext, "setMyDispatcherDelegation");
+                if (typeof safeParams.enabled !== "boolean") {
+                    throw Object.assign(new Error("setMyDispatcherDelegation requires enabled: true or false"), { code: "INVALID_REQUEST" });
+                }
+                const status = await this.transport.setMyDispatcherDelegation({ principal, enabled: safeParams.enabled });
+                this._recordAudit({
+                    actor: this._auditActor(authContext),
+                    action: "setMyDispatcherDelegation",
+                    target: `${principal.provider}/${principal.subject}`,
+                    decision: "share_change",
+                    reason: `dispatcher delegation ${safeParams.enabled ? "on" : "off"}`,
+                });
+                return { enabled: status?.enabled === true, dispatcherConfigured: Boolean(this.authz.dispatcherSubject) };
+            }
+            case "setCurrentUserGitHubCopilotKey": {
+                const principal = requireUserPrincipal(authContext, "setCurrentUserGitHubCopilotKey");
+                assertLegacyKeyAccepted(
+                    this.personalSecretsExternal ? EXTERNAL_PERSONAL_SECRETS
+                        : this.requireFineGrainedGitHubTokens ? FINE_GRAINED_ONLY : null,
+                    "setCurrentUserGitHubCopilotKey", safeParams.key);
                 return this.transport.setCurrentUserGitHubCopilotKey({
-                    principal: requireUserPrincipal(authContext, "setCurrentUserGitHubCopilotKey"),
+                    principal,
                     key: typeof safeParams.key === "string" ? safeParams.key : null,
                 });
+            }
             case "setSystemGitHubCopilotKey": {
                 if (!isAdmin) {
                     const err = new Error("Portal RPC 'setSystemGitHubCopilotKey' requires the admin role.");
                     err.code = "PORTAL_ADMIN_REQUIRED";
                     throw err;
                 }
+                assertLegacyKeyAccepted(this.requireFineGrainedGitHubTokens ? FINE_GRAINED_ONLY : null,
+                    "setSystemGitHubCopilotKey", safeParams.key);
                 return this.transport.setSystemGitHubCopilotKey({
                     actor: normalizeSessionOwner(authContext),
                     key: typeof safeParams.key === "string" ? safeParams.key : null,
@@ -910,20 +1322,29 @@ export class PortalRuntime {
             case "getExecutionHistory":
                 return this.transport.getExecutionHistory(safeParams.sessionId, safeParams.executionId);
             case "createSession": {
-                await this._assertPlacementGroupOwned(safeParams.groupId, authContext, { isAdmin });
+                // With onBehalfOfOwner the group, owner and visibility are the
+                // owner's: the dispatcher acts for them, not as itself.
+                const delegatedOwner = await this._delegatedCreateOwner(method, safeParams, authContext);
+                const placementAuth = delegatedOwner ? { principal: delegatedOwner } : authContext;
+                const placementAdmin = delegatedOwner ? false : isAdmin;
+                await this._assertPlacementGroupOwned(safeParams.groupId, placementAuth, { isAdmin: placementAdmin });
                 const created = await this.transport.createSession({
                     model: safeParams.model,
                     reasoningEffort: safeParams.reasoningEffort,
                     contextTier: safeParams.contextTier,
                     groupId: safeParams.groupId,
-                    owner,
-                    visibility: normalizeVisibility(safeParams.visibility, this.authz.defaultVisibility),
+                    owner: delegatedOwner ?? owner,
+                    visibility: delegatedOwner ? "private" : normalizeVisibility(safeParams.visibility, this.authz.defaultVisibility),
                     ...(safeParams.workspace != null ? { workspace: safeParams.workspace } : {}),
                 });
-                return this._ensureCreatedPlacement(created, safeParams.groupId, authContext, isAdmin);
+                if (delegatedOwner) await this._completeDelegatedCreate(method, created, delegatedOwner, authContext);
+                return this._ensureCreatedPlacement(created, safeParams.groupId, placementAuth, placementAdmin);
             }
             case "createSessionForAgent": {
-                await this._assertPlacementGroupOwned(safeParams.groupId, authContext, { isAdmin });
+                const delegatedOwner = await this._delegatedCreateOwner(method, safeParams, authContext);
+                const placementAuth = delegatedOwner ? { principal: delegatedOwner } : authContext;
+                const placementAdmin = delegatedOwner ? false : isAdmin;
+                await this._assertPlacementGroupOwned(safeParams.groupId, placementAuth, { isAdmin: placementAdmin });
                 const created = await this.transport.createSessionForAgent(safeParams.agentName, {
                     model: safeParams.model,
                     reasoningEffort: safeParams.reasoningEffort,
@@ -933,12 +1354,16 @@ export class PortalRuntime {
                     splashMobile: safeParams.splashMobile,
                     initialPrompt: safeParams.initialPrompt,
                     groupId: safeParams.groupId,
-                    owner,
-                    isAdmin: resourceAdmin,
-                    visibility: normalizeVisibility(safeParams.visibility, this.authz.defaultVisibility),
+                    owner: delegatedOwner ?? owner,
+                    // The agent catalog the owner sees, without anyone's admin reach.
+                    isAdmin: delegatedOwner ? false : resourceAdmin,
+                    visibility: delegatedOwner ? "private" : normalizeVisibility(safeParams.visibility, this.authz.defaultVisibility),
                     ...(safeParams.workspace != null ? { workspace: safeParams.workspace } : {}),
                 });
-                return this._ensureCreatedPlacement(created, safeParams.groupId, authContext, isAdmin);
+                if (delegatedOwner) {
+                    await this._completeDelegatedCreate(method, created, delegatedOwner, authContext, { agentName: safeParams.agentName ?? null });
+                }
+                return this._ensureCreatedPlacement(created, safeParams.groupId, placementAuth, placementAdmin);
             }
             case "listCreatableAgents":
                 return this.transport.listCreatableAgents(owner, resourceAdmin);
@@ -1250,7 +1675,11 @@ export class PortalRuntime {
             case "completeSessionGroup":
                 return this.transport.completeSessionGroup(safeParams.groupId, safeParams.options || {});
             case "deleteSession":
-                return this.transport.deleteSession(safeParams.sessionId);
+                if (safeParams.force === true) this._assertMayForceDelete(gate, safeParams.sessionId, authContext, isAdmin);
+                return this.transport.deleteSession(safeParams.sessionId, safeParams.reason, {
+                    ...(safeParams.force === true ? { force: true } : {}),
+                    ...(safeParams.settleTimeoutMs !== undefined ? { settleTimeoutMs: safeParams.settleTimeoutMs } : {}),
+                });
             case "restartSystemSession":
                 return this.transport.restartSystemSession(safeParams.agentIdOrSessionId, safeParams.options || {});
             case "setSessionModel":
@@ -1562,6 +1991,7 @@ export class PortalRuntime {
         } catch (error) {
             const status = PROVIDER_ERROR_STATUS[error?.code];
             if (status) error.status = status;
+            if (error?.code === "PROVIDER_SECRET_STORE_UNAVAILABLE") error.expose = true;
             throw error;
         }
     }
@@ -1640,6 +2070,20 @@ export class PortalRuntime {
     async authorizeSessionSubscribe(sessionId, authContext) {
         await this.start();
         await this._gateBespokeRead("subscribeSession", sessionId, authContext);
+    }
+
+    /**
+     * For the dispatcher's subscription to another user's session: a check of
+     * the owner's opt-in to run before each delivery, so an open subscription
+     * sends nothing more once delegation is off. Null when none is needed —
+     * also with enforcement off, where revoking changes no access.
+     */
+    async dispatcherDeliveryCheck(sessionId, authContext) {
+        if (!this.authz.enforce || !this._isDispatcher(authContext)) return null;
+        await this.start();
+        const snapshot = await this._getAccessSnapshot(sessionId, normalizeSessionOwner(authContext));
+        const owner = snapshot && !snapshot.isSystem ? this._delegatingOwner(snapshot.owner, authContext) : null;
+        return owner ? () => this._ownerAllowsDelegation(owner) : null;
     }
 
     /** Log tail is fleet-wide observability: admin (or dark-launch). */

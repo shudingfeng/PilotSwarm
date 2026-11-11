@@ -3117,6 +3117,8 @@ function baseReducer(state, action) {
             return { ...state, admin: { ...state.admin, motds: { ...state.admin.motds, ...action.patch } } };
         case "admin/features":
             return { ...state, admin: { ...state.admin, features: { ...state.admin.features, ...action.patch } } };
+        case "admin/dispatcherDelegation":
+            return { ...state, admin: { ...state.admin, dispatcherDelegation: { ...state.admin.dispatcherDelegation, ...action.patch } } };
         case "admin/workers/attempt": {
             const workers = state.admin.workers || {};
             return { ...state, admin: { ...state.admin, workers: { ...workers, attempts: (workers.attempts || 0) + 1, lastAttemptAt: Date.now(), lastSkip: action.skip || null } } };

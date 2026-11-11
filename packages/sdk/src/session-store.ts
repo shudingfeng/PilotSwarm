@@ -440,6 +440,16 @@ function buildMetadata(tarPath: string, sessionId: string, meta?: Record<string,
 }
 
 /**
+ * Windows: always the system tar.exe (bsdtar), which these flags are tested
+ * with, even when PATH puts another tar first (Git for Windows ships GNU tar),
+ * and without a console window on a service host.
+ */
+function spawnTar(args: string[]) {
+    if (process.platform !== "win32") return spawn("tar", args);
+    return spawn(path.join(process.env.SystemRoot || "C:\\Windows", "System32", "tar.exe"), args, { windowsHide: true });
+}
+
+/**
  * Tar the session dir, compress with `codec`, and write to `tarPath`.
  * Returns `rawSizeBytes` (the uncompressed tar-stream length — a free
  * by-product of the pipeline, and the right "uncompressed snapshot size"
@@ -457,7 +467,7 @@ async function archiveSessionDir(
     tarPath: string,
     codec: SnapshotCodec = DEFAULT_SNAPSHOT_CODEC,
 ): Promise<{ rawSizeBytes: number; codec: SnapshotCodec }> {
-    const tar = spawn("tar", [...TAR_EXCLUDES, "-cf", "-", "-C", sessionStateDir, sessionId]);
+    const tar = spawnTar([...TAR_EXCLUDES, "-cf", "-", "-C", sessionStateDir, sessionId]);
     let rawSizeBytes = 0;
     const counter = new Transform({
         transform(chunk, _enc, cb) { rawSizeBytes += chunk.length; cb(null, chunk); },
@@ -484,7 +494,7 @@ async function extractSessionArchive(
     // Read through zero padding to EOF. Otherwise tar can exit successfully
     // at the archive terminator while decompression is still writing, causing
     // EPIPE/ERR_STREAM_PREMATURE_CLOSE and hiding compression trailer errors.
-    const tar = spawn("tar", ["--ignore-zeros", "-xf", "-", "-C", sessionStateDir]);
+    const tar = spawnTar(["--ignore-zeros", "-xf", "-", "-C", sessionStateDir]);
     const [pipeResult, procResult] = await Promise.allSettled([
         pipeline(input, makeDecompressor(codec), tar.stdin!),
         awaitProcess(tar, "tar extract"),

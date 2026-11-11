@@ -39,6 +39,41 @@ import { WORKSPACE_ORCHESTRATION_MIN_VERSION } from "./orchestration-version.js"
 
 export const DEFAULT_ATTACH_TIMEOUT_MS = 30_000;
 
+/** The longest delay a Node.js timer takes; a longer one fires at once. */
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
+/**
+ * The attach deadline for one folder: `PILOTSWARM_WORKSPACE_ATTACH_TIMEOUT_MS`,
+ * or DEFAULT_ATTACH_TIMEOUT_MS when it is unset or empty. Anything but a
+ * positive whole number of milliseconds, up to the longest Node.js timer, is
+ * refused. The worker reads the setting when it is constructed, so a bad
+ * value stops it from starting.
+ */
+export function workspaceAttachTimeoutMsFromEnv(
+    raw: string | undefined = process.env.PILOTSWARM_WORKSPACE_ATTACH_TIMEOUT_MS,
+): number {
+    if (raw === undefined || raw.trim() === "") return DEFAULT_ATTACH_TIMEOUT_MS;
+    const value = raw.trim();
+    if (!/^\d+$/.test(value) || Number(value) <= 0 || Number(value) > MAX_TIMER_DELAY_MS) {
+        throw new Error(
+            `PILOTSWARM_WORKSPACE_ATTACH_TIMEOUT_MS must be a positive whole number of milliseconds, at most ${MAX_TIMER_DELAY_MS} (got "${raw}")`,
+        );
+    }
+    return Number(value);
+}
+
+/**
+ * The deadline of an attach whose caller sets none. Never throws, like the
+ * attach itself: a bad setting is refused when the worker is constructed.
+ */
+function defaultAttachTimeoutMs(): number {
+    try {
+        return workspaceAttachTimeoutMsFromEnv();
+    } catch {
+        return DEFAULT_ATTACH_TIMEOUT_MS;
+    }
+}
+
 /**
  * The partial-changes note: what a workspace turn is told when an earlier
  * attempt of it ran, failed or was lost with its worker (section 4.7).
@@ -142,7 +177,7 @@ function withDeadline<T>(work: Promise<T>, ms: number, onTimeout: () => T): Prom
 /** The roots a provider serves, or an error if it cannot say. */
 export async function listWorkspaceRoots(
     provider: WorkspaceProvider | null | undefined,
-    timeoutMs = DEFAULT_ATTACH_TIMEOUT_MS,
+    timeoutMs = defaultAttachTimeoutMs(),
 ): Promise<{ ok: true; roots: WorkspaceRoot[] } | Failure> {
     if (!provider) return { ok: true, roots: [] };
     const timedOut = Symbol("timeout");
@@ -169,7 +204,7 @@ export async function listWorkspaceRoots(
 export async function checkWorkspaceRoot(
     provider: WorkspaceProvider | null | undefined,
     workspace: SessionWorkspace,
-    timeoutMs = DEFAULT_ATTACH_TIMEOUT_MS,
+    timeoutMs = defaultAttachTimeoutMs(),
 ): Promise<{ ok: true; root: WorkspaceRoot } | Failure> {
     const listed = await listWorkspaceRoots(provider, timeoutMs);
     if (!listed.ok) return listed;
@@ -195,7 +230,7 @@ export async function prepareWorkspace(
         adoptExtra?: boolean;
     } = {},
 ): Promise<WorkspacePreparation> {
-    const attachTimeoutMs = opts.attachTimeoutMs ?? DEFAULT_ATTACH_TIMEOUT_MS;
+    const attachTimeoutMs = opts.attachTimeoutMs ?? defaultAttachTimeoutMs();
     const text = validateWorkspaceText(req.workspace);
     if (!text.ok) return failure(text.code, text.message);
     // The provider attaches one folder per call: the working folder here,

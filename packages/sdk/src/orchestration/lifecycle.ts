@@ -17,6 +17,7 @@ import {
     commandResponseKey,
 } from "../types.js";
 import { createSessionProxy } from "../session-proxy.js";
+import { capacityUnavailable, normalizeOwnerCapacityAnswer, type OwnerCapacityDecision } from "../owner-routing.js";
 import { sameWorkingFolder, sameWorkspace, validateWorkspaceText, workingFolderOf } from "../workspace-check.js";
 import {
     beginGracefulShutdown,
@@ -28,8 +29,11 @@ import {
     FIRST_SUMMARIZE_DELAY,
     INTERNAL_SYSTEM_TURN_PROMPT,
     REPEAT_SUMMARIZE_DELAY,
+    WORKSPACE_CHECK_CAP_MS,
     WORKSPACE_RELEASE_CAP_MS,
     WORKSPACE_RETRY_WAKE_PROMPT,
+    createdSessionRouting,
+    sessionRouting,
     timerGate,
     workspaceChangedNote,
     extraFoldersChangedNote,
@@ -208,7 +212,7 @@ export function* releaseAffinity(
         }
     }
     state.affinityKey = yield ctx.newGuid();
-    runtime.session = createSessionProxy(ctx, runtime.input.sessionId, state.affinityKey, state.config, "turn-control-v1");
+    runtime.session = createSessionProxy(ctx, runtime.input.sessionId, state.affinityKey, state.config, "turn-control-v1", sessionRouting(runtime.options));
     try {
         yield runtime.manager.recordSessionEvent(runtime.input.sessionId, [{
             eventType: "session.affinity_released",
@@ -217,6 +221,28 @@ export function* releaseAffinity(
     } catch (err: any) {
         ctx.traceInfo(`[orch] affinity_released event failed (non-fatal): ${err.message ?? err}`);
     }
+}
+
+/**
+ * 1.0.83: ask for capacity for an owner-tagged session's owner. Its
+ * activities wait for a worker that declares the owner's tag; the answer
+ * tells whether to run them now (`ok`), to end the turn (`deny`), or to wait
+ * on the busy timer (`busy`). An activity that fails counts as no answer.
+ * Call only for a session with an owner tag.
+ */
+export function* requestOwnerCapacity(runtime: DurableSessionRuntime): Generator<any, OwnerCapacityDecision, any> {
+    const { ctx } = runtime;
+    let answer: OwnerCapacityDecision;
+    try {
+        const raw: any = yield runtime.manager.requestOwnerCapacity(runtime.input.sessionId, runtime.options.ownerTag!);
+        answer = normalizeOwnerCapacityAnswer(typeof raw === "string" ? JSON.parse(raw) : raw);
+    } catch (err: any) {
+        answer = capacityUnavailable(`The capacity request failed: ${err?.message ?? err}`);
+    }
+    if (answer.decision !== "ok") {
+        ctx.traceInfo(`[orch] capacity request answered ${answer.decision} (${answer.code}): ${answer.message}`);
+    }
+    return answer;
 }
 
 export function* maybeSummarize(runtime: DurableSessionRuntime): Generator<any, void, any> {
@@ -345,7 +371,7 @@ export function* applyAgentWorkspaceExtrasChange(runtime: DurableSessionRuntime,
     const revision = state.workspaceRevision + 1;
     const extraPaths = action.extraPaths && typeof action.extraPaths === "object" ? action.extraPaths as Record<string, string> : null;
     state.config.workspace = next;
-    runtime.session = createSessionProxy(ctx, runtime.input.sessionId, state.affinityKey, state.config, "turn-control-v1");
+    runtime.session = createSessionProxy(ctx, runtime.input.sessionId, state.affinityKey, state.config, "turn-control-v1", sessionRouting(runtime.options));
     state.workspaceRevision = revision;
     const note = extraFoldersChangedNote(previous, next, extraPaths);
     if (note) state.workspaceNotice = state.workspaceNotice ? `${state.workspaceNotice} ${note}` : note;
@@ -683,6 +709,9 @@ export function buildContinueInput(
         ...(state.multiWriter ? { multiWriter: true } : {}),
         ...(state.sharedPreambleSent ? { sharedPreambleSent: true } : {}),
         ...(state.ownerDisplay ? { ownerDisplay: state.ownerDisplay } : {}),
+        // 1.0.83: owner routing, only when set.
+        ...(options.ownerTag ? { ownerTag: options.ownerTag } : {}),
+        ...(options.workspaceBusyFastRelease ? { workspaceBusyFastRelease: true } : {}),
         ...restOverrides,
     };
 }
@@ -1077,6 +1106,24 @@ function* handleSetWorkspaceCommand(runtime: DurableSessionRuntime, cmdMsg: Comm
     let path: string | null = null;
     let extraPaths: Record<string, string> | null = null;
     if (next) {
+        // 1.0.83: an owner-tagged session's check waits for a worker of its
+        // owner. The command asks for one first, and the check is capped, so
+        // a command never holds the session's later commands for good. A
+        // refusal or the cap answers the command and keeps the workspace.
+        if (runtime.options.ownerTag) {
+            const capacity = yield* requestOwnerCapacity(runtime);
+            if (capacity.decision !== "ok") {
+                yield* reply({
+                    error: `${capacity.code}: ${capacity.message}`,
+                    result: {
+                        code: capacity.code,
+                        revision: state.workspaceRevision,
+                        ...(capacity.decision === "busy" && capacity.retryAfterMs ? { retryAfterMs: capacity.retryAfterMs } : {}),
+                    },
+                });
+                return;
+            }
+        }
         // The attach and the path check, on the worker that holds the
         // session, with the same code as the turn preamble: the working
         // folder and every extra folder.
@@ -1084,7 +1131,16 @@ function* handleSetWorkspaceCommand(runtime: DurableSessionRuntime, cmdMsg: Comm
         // rolling deploy) answers the command; it must not fail the session.
         let outcome: any;
         try {
-            const raw: any = yield runtime.session.checkWorkspace({ workspace: next, revision, turnIndex: state.iteration, previous });
+            const check = runtime.session.checkWorkspace({ workspace: next, revision, turnIndex: state.iteration, previous });
+            let raw: any;
+            if (runtime.options.ownerTag) {
+                const raced: any = yield ctx.race(check, ctx.scheduleTimer(WORKSPACE_CHECK_CAP_MS));
+                raw = raced?.index === 0
+                    ? raced.value
+                    : { ok: false, code: "WORKSPACE_BUSY", message: `the workspace check did not finish within ${WORKSPACE_CHECK_CAP_MS / 60_000} minutes` };
+            } else {
+                raw = yield check;
+            }
             outcome = typeof raw === "string" ? JSON.parse(raw) : raw;
         } catch (err: any) {
             outcome = { ok: false, code: "WORKSPACE_ATTACH_FAILED", message: `the workspace check did not run: ${err?.message ?? err}` };
@@ -1108,7 +1164,7 @@ function* handleSetWorkspaceCommand(runtime: DurableSessionRuntime, cmdMsg: Comm
     else delete state.config.workspace;
     // The proxy carries the config into every turn; rebuild it from the
     // changed config rather than rely on sharing one object.
-    runtime.session = createSessionProxy(ctx, runtime.input.sessionId, state.affinityKey, state.config, "turn-control-v1");
+    runtime.session = createSessionProxy(ctx, runtime.input.sessionId, state.affinityKey, state.config, "turn-control-v1", sessionRouting(runtime.options));
     state.workspaceRevision = revision;
     // A change of extra folders only (section 4.10) keeps the working
     // directory, so its note names the extra folders alone. A note not yet
@@ -1289,6 +1345,8 @@ export function* advanceRegenPipeline(
                 ...(regen.distillerModel ? { distillerModel: regen.distillerModel } : {}),
                 ...((regen as any).distillerReasoningEffort ? { distillerReasoningEffort: (regen as any).distillerReasoningEffort } : {}),
                 ...((regen as any).distillerContextTier ? { distillerContextTier: (regen as any).distillerContextTier } : {}),
+                // 1.0.83: the distiller session takes this session's tag and busy policy.
+                ...createdSessionRouting(runtime.options),
             });
             if (!spawn?.distillerSessionId) {
                 // No resolvable distiller model (or deterministic-only deployment

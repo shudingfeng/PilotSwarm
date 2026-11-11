@@ -86,7 +86,8 @@ import type {
     ProviderStore, ProviderRow, ProviderStatusRow, PausedSessionRow, DefaultTuple, UsageFilters,
     ProviderClass, UsageGridRow, ProviderDefaults, ProviderCredential, SystemAgentModelOverride,
 } from "./provider-store.js";
-import { ProviderError } from "./provider-store.js";
+import { ProviderError, requiresFineGrainedGitHubTokens } from "./provider-store.js";
+import type { PersonalSecretStore } from "./personal-secret-store.js";
 import type { BudgetPeriod } from "./provider-budgets.js";
 import { wakeProviderPausedSessions } from "./provider-wake.js";
 import { LOCAL_DEFAULT_USER_PRINCIPAL } from "./session-owner-utils.js";
@@ -124,6 +125,7 @@ import type {
     UserPrincipal,
     UserRoleInfo,
     UserRoleValue,
+    DispatcherDelegationStatus,
     SessionGroupRow,
     PlacementViewer,
     SessionPlacementResult,
@@ -825,6 +827,13 @@ export interface PilotSwarmManagementClientOptions {
     aadDbUser?: string;
     /** Artifact store used by direct-mode agent-package publish/read/delete operations. */
     artifactStore?: ArtifactStore | null;
+    /**
+     * Where personal GitHub tokens go when PILOTSWARM_PERSONAL_SECRETS=external.
+     * The portal passes the store it loads from
+     * PILOTSWARM_PERSONAL_SECRET_STORE_MODULE; without one, external mode
+     * refuses to save a personal credential.
+     */
+    personalSecretStore?: PersonalSecretStore | null;
 }
 
 // ─── Management Client ──────────────────────────────────────────
@@ -903,6 +912,7 @@ export class PilotSwarmManagementClient {
         // Create CMS catalog
         _trace("[mgmt] CMS create start...");
         this._catalog = await runtimeStorageProvider.createSessionCatalog(storage.runtime);
+        if (this.config.personalSecretStore) this._catalog.providers?.setPersonalSecretStore(this.config.personalSecretStore);
         _trace("[mgmt] CMS initialize start...");
         await this._catalog.initialize();
         _trace("[mgmt] CMS initialize done");
@@ -1022,6 +1032,127 @@ export class PilotSwarmManagementClient {
         try {
             await this._duroxideClient.deleteInstance(`session-${sessionId}`, true);
         } catch {}
+    }
+
+    /**
+     * The forced delete's terminal path: deletes the subtree under `targetId`
+     * from the leaves up, the target last, and throws as soon as any part
+     * fails, naming it, so the target stays for a retry. The subtree comes
+     * from the rows' parent links, soft-deleted rows included, because the
+     * descendant walk skips them: a retry still finishes the children of a
+     * parent that is already gone. Never touches a sibling or an ancestor.
+     */
+    private async _deleteTreeStrictly(targetId: string, reason: string): Promise<void> {
+        const short = (id: string) => id.slice(0, 8);
+        const failure = (id: string, what: string, error: unknown) => new Error(
+            `Forced delete of session ${short(targetId)} stopped at ${short(id)}: ${what} failed: ${String((error as any)?.message ?? error)}`,
+        );
+
+        let rows: Array<{ sessionId: string; parentSessionId: string | null; isSystem: boolean; deletedAt: Date | null }>;
+        try {
+            rows = await this._listSessionRowsIncludingDeleted();
+        } catch (error) {
+            throw failure(targetId, "listing the sessions", error);
+        }
+        const byId = new Map(rows.map((row) => [row.sessionId, row]));
+        const children = new Map<string, string[]>();
+        for (const row of rows) {
+            if (!row.parentSessionId) continue;
+            children.set(row.parentSessionId, [...(children.get(row.parentSessionId) ?? []), row.sessionId]);
+        }
+        const order: string[] = [];
+        const visited = new Set<string>();
+        const visit = (id: string): void => {
+            if (visited.has(id)) return;
+            visited.add(id);
+            for (const child of children.get(id) ?? []) visit(child);
+            order.push(id);
+        };
+        visit(targetId);
+
+        for (const id of order) {
+            const row = byId.get(id);
+            if (row?.isSystem) throw failure(id, "deleting it", systemSessionProtectedError("delete"));
+            try {
+                await this._deleteOrchestrationInstanceStrictly(id);
+            } catch (error) {
+                throw failure(id, "deleting its orchestration instance", error);
+            }
+            if (!row || row.deletedAt) continue;
+            // A child created or moved after the listing would be orphaned by
+            // deleting its parent; its orchestration is gone now, so a retry
+            // lists it and finishes it.
+            let live: string[];
+            try {
+                live = await this._catalog!.getDescendantSessionIds(id);
+            } catch (error) {
+                throw failure(id, "listing its live descendants", error);
+            }
+            if (live.length > 0) {
+                throw failure(id, "the check for live descendants", new Error(`${live.map(short).join(", ")} appeared after the listing; retry`));
+            }
+            try {
+                await this._catalog!.updateSession(id, {
+                    state: "failed",
+                    lastError: id === targetId ? reason : `Ancestor ${targetId} deleted: ${reason}`,
+                    waitReason: null,
+                });
+            } catch (error) {
+                throw failure(id, "marking it failed", error);
+            }
+            try {
+                await this._catalog!.softDeleteSession(id);
+            } catch (error) {
+                throw failure(id, "soft-deleting it", error);
+            }
+            if (this._factStore) {
+                try {
+                    await this._factStore.deleteSessionFactsForSession(id);
+                } catch (err) {
+                    console.error(`[PilotSwarmManagementClient] session fact cleanup failed for ${id}:`, err);
+                }
+            }
+        }
+    }
+
+    /**
+     * A session's orchestration instance; one that is already gone counts as
+     * deleted. duroxide reports a start that no worker has taken yet as
+     * NotFound, and deleteInstance refuses it and leaves it queued, so a
+     * worker started later would run the deleted session. A cancel queued
+     * behind the start ends it before any activity runs (duroxide 0.2.4); a
+     * cancel for an instance that never existed is dropped.
+     */
+    private async _deleteOrchestrationInstanceStrictly(sessionId: string): Promise<void> {
+        const instanceId = `session-${sessionId}`;
+        // getStatus answers NotFound for a missing instance, so a retry does not
+        // depend on how deleteInstance treats one.
+        if ((await this._duroxideClient.getStatus(instanceId))?.status === "NotFound") {
+            await this._duroxideClient.cancelInstance(instanceId, "Session deleted");
+            // A worker may have taken the start meanwhile.
+            if ((await this._duroxideClient.getStatus(instanceId))?.status === "NotFound") return;
+        }
+        await this._duroxideClient.deleteInstance(instanceId, true);
+    }
+
+    /** Every session row, soft-deleted ones too, for the forced delete's parent links. */
+    private async _listSessionRowsIncludingDeleted(): Promise<Array<{ sessionId: string; parentSessionId: string | null; isSystem: boolean; deletedAt: Date | null }>> {
+        const pageSize = 500;
+        const rows: Array<{ sessionId: string; parentSessionId: string | null; isSystem: boolean; deletedAt: Date | null; updatedAt: Date }> = [];
+        let cursor: { updatedAt: Date; sessionId: string } | null = null;
+        for (;;) {
+            const page = await this._catalog!.listSessionsPage({
+                limit: pageSize + 1,
+                cursorUpdatedAt: cursor?.updatedAt ?? null,
+                cursorSessionId: cursor?.sessionId ?? null,
+                includeDeleted: true,
+            });
+            const visible = page.slice(0, pageSize);
+            rows.push(...visible);
+            const last = visible[visible.length - 1];
+            if (page.length <= pageSize || !last) return rows;
+            cursor = { updatedAt: last.updatedAt, sessionId: last.sessionId };
+        }
     }
 
     private _getSystemAgentPlans(): SystemAgentSessionPlan[] {
@@ -1266,6 +1397,33 @@ export class PilotSwarmManagementClient {
     async getUserRole(principal: UserPrincipal): Promise<UserRoleInfo> {
         this._ensureStarted();
         return this._catalog!.getUserRole(principal);
+    }
+
+    // ─── Dispatcher delegation (migration 0088) ───────────────
+
+    /**
+     * Whether the user lets the deployment's dispatcher create sessions for
+     * them and end the sessions it created. In direct mode `principal` names
+     * the user (the local default user when omitted); over the Web API it is
+     * always the signed-in caller.
+     */
+    async getMyDispatcherDelegation(principal?: UserPrincipal | null): Promise<DispatcherDelegationStatus> {
+        this._ensureStarted();
+        return { enabled: await this._catalog!.getUserDispatcherDelegation(principal ?? LOCAL_DEFAULT_USER_PRINCIPAL) };
+    }
+
+    /**
+     * Turn the user's dispatcher-delegation opt-in on or off; `principal` as
+     * in `getMyDispatcherDelegation`. Turning it off keeps the dispatcher's
+     * shares: the portal refuses the dispatcher on this user's sessions until
+     * the opt-in is back on.
+     */
+    async setMyDispatcherDelegation(enabled: boolean, principal?: UserPrincipal | null): Promise<DispatcherDelegationStatus> {
+        this._ensureStarted();
+        if (typeof enabled !== "boolean") {
+            throw Object.assign(new TypeError("setMyDispatcherDelegation: enabled must be true or false"), { code: "INVALID_REQUEST" });
+        }
+        return { enabled: await this._catalog!.setUserDispatcherDelegation(principal ?? LOCAL_DEFAULT_USER_PRINCIPAL, enabled) };
     }
 
     /**
@@ -1681,15 +1839,38 @@ export class PilotSwarmManagementClient {
     /**
      * Delete a session: cancel orchestration + soft-delete from CMS.
      * Refuses to delete system sessions.
+     *
+     * `force`: when the delete command has not settled within
+     * `settleTimeoutMs` (default and maximum 65 s), delete the session's
+     * subtree directly, from the leaves up with the session last, and throw,
+     * naming what failed, when any part fails; the session then stays for a
+     * retry, which also finishes a subtree whose session is already gone.
+     * `settleTimeoutMs: 0` sends no command and does not wait.
      */
-    async deleteSession(sessionId: string, reason?: string): Promise<void> {
+    async deleteSession(sessionId: string, reason?: string, options: { force?: boolean; settleTimeoutMs?: number } = {}): Promise<void> {
         this._ensureStarted();
+        const force = options.force === true;
+        const settleTimeoutMs = options.settleTimeoutMs ?? SESSION_COMMAND_SETTLE_TIMEOUT_MS;
+        if (options.settleTimeoutMs !== undefined) {
+            if (!force) {
+                throw Object.assign(new TypeError("deleteSession: settleTimeoutMs needs force: true"), { code: "INVALID_REQUEST" });
+            }
+            if (!Number.isInteger(settleTimeoutMs) || settleTimeoutMs < 0 || settleTimeoutMs > SESSION_COMMAND_SETTLE_TIMEOUT_MS) {
+                throw Object.assign(
+                    new RangeError(`deleteSession: settleTimeoutMs must be an integer from 0 to ${SESSION_COMMAND_SETTLE_TIMEOUT_MS}`),
+                    { code: "INVALID_REQUEST" },
+                );
+            }
+        }
+        const deleteReason = reason ?? "Deleted by management client";
         const session = await this.getSession(sessionId);
-        if (!session) return;
+        if (!session) {
+            if (force) await this._deleteTreeStrictly(sessionId, deleteReason);
+            return;
+        }
         if (session.isSystem) {
             throw systemSessionProtectedError("delete");
         }
-        const deleteReason = reason ?? "Deleted by management client";
 
         if (
             session.status === "pending"
@@ -1700,6 +1881,10 @@ export class PilotSwarmManagementClient {
             || session.status === "cancelled"
             || isTerminalOrchestrationStatus(session.orchestrationStatus)
         ) {
+            if (force) {
+                await this._deleteTreeStrictly(sessionId, deleteReason);
+                return;
+            }
             // Terminal fast path: there is no live orchestration to run the
             // descendant cascade (the delete command handler), so cascade
             // here. Enumerate BEFORE deleting the target — the descendant
@@ -1724,17 +1909,26 @@ export class PilotSwarmManagementClient {
             return;
         }
 
-        await this.sendCommand(sessionId, {
-            cmd: "delete",
-            id: buildLifecycleCommandId("delete"),
-            args: { reason: deleteReason },
-        });
+        if (force && settleTimeoutMs === 0) {
+            await this._deleteTreeStrictly(sessionId, deleteReason);
+            return;
+        }
 
-        await this._waitForSession(
-            sessionId,
-            (current) => current == null,
-            SESSION_COMMAND_SETTLE_TIMEOUT_MS,
-        );
+        try {
+            await this.sendCommand(sessionId, {
+                cmd: "delete",
+                id: buildLifecycleCommandId("delete"),
+                args: { reason: deleteReason },
+            });
+            await this._waitForSession(
+                sessionId,
+                (current) => current == null,
+                settleTimeoutMs,
+            );
+        } catch (err) {
+            if (!force) throw err;
+            await this._deleteTreeStrictly(sessionId, deleteReason);
+        }
     }
 
     /**
@@ -4482,12 +4676,39 @@ export class PilotSwarmManagementClient {
     }
 
     /**
-     * Refuse a key update on a provider that has no key.
+     * Must a credential for this TYPE pass the fine-grained GitHub token gate?
+     * Only with PILOTSWARM_REQUIRE_FINE_GRAINED_GH_PAT on, and only for a type
+     * the catalog declares `github`. Decided here for the same reason as
+     * workload identity: the store knows a type only by its name.
+     */
+    private _requiresFineGrainedGitHubToken(typeId: string | null | undefined): boolean {
+        if (!requiresFineGrainedGitHubTokens()) return false;
+        return this._isGitHubProviderType(typeId);
+    }
+
+    /** Is this TYPE a GitHub one? External personal secrets hold only those. */
+    private _isGitHubProviderType(typeId: string | null | undefined): boolean {
+        const wanted = String(typeId ?? "").trim();
+        return this.getModelsByProvider().find((candidate) => candidate.providerId === wanted)?.type === "github";
+    }
+
+    /** The signed-in owner of a personal credential, for the secret store. */
+    private _credentialOwner(viewer: ProviderViewer): { provider: string; subject: string } | null {
+        const principal = viewer?.principal;
+        return principal?.provider && principal?.subject ? { provider: principal.provider, subject: principal.subject } : null;
+    }
+
+    /**
+     * Refuse a key update on a provider that has no key, and return the
+     * stored row: an update names no type, so the row's type decides the
+     * token gate.
      *
      * Accepting it would store a real secret in a row nothing ever reads a
      * secret from, and tell the person their rotation worked.
      */
-    private async _assertCredentialIsUpdatable(store: ProviderStore, name: string, actor: number | null, isAdmin: boolean): Promise<void> {
+    private async _assertCredentialIsUpdatable(
+        store: ProviderStore, name: string, actor: number | null, isAdmin: boolean,
+    ): Promise<ProviderRow | undefined> {
         const rows = await store.listProviders(actor, isAdmin);
         const row = rows.find((candidate) => candidate.name === name);
         if (row && this._typeUsesWorkloadIdentity(row.typeId)) {
@@ -4497,6 +4718,7 @@ export class PilotSwarmManagementClient {
                 + "Change the worker's identity configuration instead.",
             );
         }
+        return row;
     }
 
     async createProvider(
@@ -4512,6 +4734,7 @@ export class PilotSwarmManagementClient {
             secretRef: input.credentials ?? null,
             baseUrl: input.baseUrl ?? null,
             workloadIdentity: this._typeUsesWorkloadIdentity(input.type),
+            requireFineGrainedGitHubToken: this._requiresFineGrainedGitHubToken(input.type),
         }, actor, isAdmin);
         await this._auditProviderMutation(viewer, "createProvider", created.name, { class: "shared", type: created.typeId });
         // A name that did not resolve a moment ago now does.
@@ -4548,6 +4771,9 @@ export class PilotSwarmManagementClient {
             ownerUserId: actor,
             secretRef: input.credentials ?? null,
             baseUrl: input.baseUrl ?? null,
+            requireFineGrainedGitHubToken: this._requiresFineGrainedGitHubToken(input.type),
+            gitHubType: this._isGitHubProviderType(input.type),
+            owner: this._credentialOwner(viewer),
         }, actor, isAdmin);
         await this._wakeProvidersPaused(input.name);
         await this._auditProviderMutation(viewer, "createMyProvider", created.name, { class: "personal", type: created.typeId });
@@ -4560,8 +4786,12 @@ export class PilotSwarmManagementClient {
         input: ProviderCredentialUpdateInput,
     ): Promise<{ name: string; typeId: string; class: ProviderClass }> {
         const { store, actor, isAdmin } = await this._providerActor(viewer);
-        await this._assertCredentialIsUpdatable(store, input.name, actor, isAdmin);
-        const updated = await store.updatePersonalCredential(input.name, input.credentials, actor);
+        const row = await this._assertCredentialIsUpdatable(store, input.name, actor, isAdmin);
+        const updated = await store.updatePersonalCredential(input.name, input.credentials, actor, {
+            requireFineGrainedGitHubToken: this._requiresFineGrainedGitHubToken(row?.typeId),
+            gitHubType: this._isGitHubProviderType(row?.typeId),
+            owner: this._credentialOwner(viewer),
+        });
         await this._auditProviderMutation(viewer, "updateMyProviderCredential", updated.name, {
             class: "personal",
             type: updated.typeId,
@@ -4582,8 +4812,10 @@ export class PilotSwarmManagementClient {
         input: ProviderCredentialUpdateInput,
     ): Promise<{ name: string; typeId: string; class: ProviderClass }> {
         const { store, actor, isAdmin } = await this._providerActor(viewer);
-        await this._assertCredentialIsUpdatable(store, input.name, actor, isAdmin);
-        const updated = await store.updateSharedCredential(input.name, input.credentials, actor, isAdmin);
+        const row = await this._assertCredentialIsUpdatable(store, input.name, actor, isAdmin);
+        const updated = await store.updateSharedCredential(input.name, input.credentials, actor, isAdmin, {
+            requireFineGrainedGitHubToken: this._requiresFineGrainedGitHubToken(row?.typeId),
+        });
         await this._auditProviderMutation(viewer, "updateSharedProviderCredential", updated.name, {
             class: "shared",
             type: updated.typeId,

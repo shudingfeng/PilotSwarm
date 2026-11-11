@@ -46,7 +46,49 @@ export function loadAuthzConfig(env = process.env) {
         // "read" (default): system sessions are metadata/content-visible to
         // every admitted user, interaction stays admin-only. "admin": hidden.
         systemVisibility: String(env.SESSIONS_SYSTEM_VISIBILITY || "").trim().toLowerCase() === "admin" ? "admin" : "read",
+        // The deployment's dispatcher: an application principal (its object
+        // ID is the token's subject) that users may let create sessions for
+        // them and end the ones it created. Unset turns every delegation rule
+        // off.
+        dispatcherSubject: String(env.DISPATCHER_SP_OBJECT_ID || "").trim() || null,
     };
+}
+
+/** Is this principal the deployment's dispatcher? Object IDs compare case-insensitively. */
+export function isDispatcherPrincipal(principal, config) {
+    const dispatcher = config?.dispatcherSubject;
+    const subject = String(principal?.subject || "").trim();
+    return Boolean(dispatcher) && Boolean(subject) && subject.toLowerCase() === dispatcher.toLowerCase();
+}
+
+/**
+ * The user named by `onBehalfOfOwner: { subject, provider? }`. The provider
+ * defaults to the caller's: a portal signs everyone in through one provider.
+ */
+export function parseOnBehalfOfOwner(raw, callerPrincipal) {
+    const subject = raw && typeof raw === "object" && !Array.isArray(raw) && typeof raw.subject === "string"
+        ? raw.subject.trim()
+        : "";
+    const provider = typeof raw?.provider === "string" && raw.provider.trim()
+        ? raw.provider.trim()
+        : String(callerPrincipal?.provider || "").trim();
+    if (!subject || !provider) {
+        throw Object.assign(new Error("onBehalfOfOwner must be { subject, provider? }"), { code: "INVALID_REQUEST" });
+    }
+    return { provider, subject, email: null, displayName: null };
+}
+
+export function delegationRevokedError(message = "This session's owner does not allow the deployment's dispatcher to act for them.") {
+    return Object.assign(new Error(message), { code: "DELEGATION_REVOKED", status: 403 });
+}
+
+export function auditUnavailableError(cause) {
+    return Object.assign(new Error("The authorization audit could not be written, so the delegated call was refused."), {
+        code: "AUDIT_UNAVAILABLE",
+        status: 503,
+        expose: true,
+        cause,
+    });
 }
 
 // Every dispatchable method now has an OPERATIONS row — copyArtifact,

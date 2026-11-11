@@ -67,6 +67,7 @@ export const GENERATED_OP_NAMES: readonly string[] = [
     "getModelDefaults",
     "getModelsByProvider",
     "getMotdImage",
+    "getMyDispatcherDelegation",
     "getMyFeatureFlags",
     "getOrchestrationStats",
     "getProviderStatus",
@@ -161,6 +162,7 @@ export const GENERATED_OP_NAMES: readonly string[] = [
     "setCurrentUserProfileSettings",
     "setModelDefault",
     "setMyDefault",
+    "setMyDispatcherDelegation",
     "setMyFeatureFlag",
     "setProviderAllowance",
     "setProviderHold",
@@ -341,7 +343,7 @@ export interface ManagementOps {
     }): Promise<any>;
 
     /**
-     * Create a session. Owner is the authenticated principal; visibility defaults to the deployment default. workspace { root, folder? } sets its working folder.
+     * Create a session. Owner is the authenticated principal; visibility defaults to the deployment default. workspace { root, folder? } sets its working folder. onBehalfOfOwner { subject, provider? }: the deployment's dispatcher only, for a user who allows it; that user owns the private session and the dispatcher gets a write share.
      * @remarks `POST /sessions` — access: `session:create`
      */
     createSession(params: {
@@ -351,10 +353,11 @@ export interface ManagementOps {
         groupId?: any;
         visibility?: any;
         workspace?: any;
+        onBehalfOfOwner?: any;
     }): Promise<any>;
 
     /**
-     * Create a session bound to a named agent. workspace { root, folder? } sets its working folder.
+     * Create a session bound to a named agent. workspace { root, folder? } sets its working folder. onBehalfOfOwner as in createSession.
      * @remarks `POST /sessions/for-agent` — access: `session:create`
      */
     createSessionForAgent(params: {
@@ -369,6 +372,7 @@ export interface ManagementOps {
         groupId?: any;
         visibility?: any;
         workspace?: any;
+        onBehalfOfOwner?: any;
     }): Promise<any>;
 
     /**
@@ -460,11 +464,14 @@ export interface ManagementOps {
     }): Promise<any>;
 
     /**
-     * Cancel and soft-delete a session.
+     * Cancel and soft-delete a session. With force: when the delete has not settled within settleTimeoutMs (0 to 65000, default 65000; 0 sends no command), delete its subtree directly, leaves first, and fail naming what failed so a retry can finish.
      * @remarks `DELETE /sessions/:sessionId` — access: `session:destroy`
      */
     deleteSession(params: {
         sessionId: string;
+        reason?: string;
+        force?: boolean;
+        settleTimeoutMs?: number;
     }): Promise<any>;
 
     /**
@@ -733,6 +740,12 @@ export interface ManagementOps {
         motdId: string;
         mobile?: boolean;
     }): Promise<any>;
+
+    /**
+     * Whether you let the deployment's dispatcher create sessions for you and end the ones it created: { enabled, dispatcherConfigured }.
+     * @remarks `GET /me/dispatcher-delegation` — access: `authed`
+     */
+    getMyDispatcherDelegation(params?: Record<string, never>): Promise<any>;
 
     /**
      * Read my feature preferences and effective values.
@@ -1565,6 +1578,14 @@ export interface ManagementOps {
     }): Promise<any>;
 
     /**
+     * Turn your dispatcher delegation on or off (enabled: boolean). Off keeps the dispatcher's shares but refuses it on your sessions (403 DELEGATION_REVOKED) until you turn it back on.
+     * @remarks `PUT /me/dispatcher-delegation` — access: `authed`
+     */
+    setMyDispatcherDelegation(params: {
+        enabled?: any;
+    }): Promise<any>;
+
+    /**
      * Set my preference; locked cluster policy still takes precedence.
      * @remarks `PUT /management/users/me/features/:featureKey` — access: `authed`
      */
@@ -1922,6 +1943,7 @@ export function createManagementOps(
         getModelDefaults: (params: Record<string, unknown> = {}) => callOp("getModelDefaults", params),
         getModelsByProvider: (params: Record<string, unknown> = {}) => callOp("getModelsByProvider", params),
         getMotdImage: (params: Record<string, unknown> = {}) => callOp("getMotdImage", params),
+        getMyDispatcherDelegation: (params: Record<string, unknown> = {}) => callOp("getMyDispatcherDelegation", params),
         getMyFeatureFlags: (params: Record<string, unknown> = {}) => callOp("getMyFeatureFlags", params),
         getOrchestrationStats: (params: Record<string, unknown> = {}) => callOp("getOrchestrationStats", params),
         getProviderStatus: (params: Record<string, unknown> = {}) => callOp("getProviderStatus", params),
@@ -2016,6 +2038,7 @@ export function createManagementOps(
         setCurrentUserProfileSettings: (params: Record<string, unknown> = {}) => callOp("setCurrentUserProfileSettings", params),
         setModelDefault: (params: Record<string, unknown> = {}) => callOp("setModelDefault", params),
         setMyDefault: (params: Record<string, unknown> = {}) => callOp("setMyDefault", params),
+        setMyDispatcherDelegation: (params: Record<string, unknown> = {}) => callOp("setMyDispatcherDelegation", params),
         setMyFeatureFlag: (params: Record<string, unknown> = {}) => callOp("setMyFeatureFlag", params),
         setProviderAllowance: (params: Record<string, unknown> = {}) => callOp("setProviderAllowance", params),
         setProviderHold: (params: Record<string, unknown> = {}) => callOp("setProviderHold", params),

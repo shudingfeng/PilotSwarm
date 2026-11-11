@@ -96,6 +96,21 @@ test("move/assign alias wrappers return the per-root result array", async () => 
     assert.deepEqual(await transport.assignSessionsToGroup("g1", ["a"]), results);
 });
 
+test("dispatcher delegation reads and sets the caller's own opt-in, sending only a boolean", async () => {
+    const status = { enabled: true, dispatcherConfigured: true };
+    const { transport, calls } = createTransport({ responses: [
+        jsonResponse({ ok: true, result: status }),
+        jsonResponse({ ok: true, result: { ...status, enabled: false } }),
+    ] });
+    assert.deepEqual(await transport.getMyDispatcherDelegation(), status);
+    assert.deepEqual(await transport.setMyDispatcherDelegation({ enabled: "yes", principal: { subject: "someone-else" } }),
+        { ...status, enabled: false });
+    assert.equal(calls[0].url, `https://portal.example.com${API_PREFIX}/me/dispatcher-delegation`);
+    assert.equal(calls[0].options.method, "GET");
+    assert.equal(calls[1].options.method, "PUT");
+    assert.deepEqual(JSON.parse(calls[1].options.body), { enabled: false }, "no principal on the wire, and only a real true turns it on");
+});
+
 test("Stop and Steer forward every option, including the request id, unchanged", async () => {
     const { transport, calls } = createTransport({ responses: [
         jsonResponse({ ok: true, result: { outcome: "accepted", steerId: 9, turn: 2 } }),

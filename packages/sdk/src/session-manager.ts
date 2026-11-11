@@ -14,12 +14,13 @@ import { MotdError, MOTD_IMAGE_MAX_BYTES } from "./motd-store.js";
 import { FeatureFlagError, isAlwaysOn, type FeatureOwner } from "./feature-flags.js";
 import type { FeatureViewer } from "./feature-store.js";
 import { CopilotClient, type CopilotSession, type SectionOverride, type SessionConfig, type SystemMessageConfig, type Tool } from "@github/copilot-sdk";
-import { BYOK_CLIENT_PREFIX, createCopilotClient, needsByokRequestCompatibility } from "./copilot-client.js";
+import { BYOK_CLIENT_PREFIX, createCopilotClient, needsByokRequestCompatibility, withCliProgramSessionOptions } from "./copilot-client.js";
 import { ManagedSession } from "./managed-session.js";
+import { killProcessTree } from "./process-tree.js";
 import type { SessionStateStore } from "./session-store.js";
 import { callChangesWorkingFolder, sameFolder, sameWorkingFolder } from "./workspace-check.js";
 import { workspaceReleaseReason } from "./workspace.js";
-import { SESSION_STATE_MISSING_PREFIX, type AbortTurnResult, type ManagedSessionConfig, type SerializableSessionConfig, type WorkspaceAdopt, type WorkspaceProvider } from "./types.js";
+import { SESSION_STATE_MISSING_PREFIX, type AbortTurnResult, type ManagedSessionConfig, type OwnerCapacityRequester, type SerializableSessionConfig, type SessionAdmission, type WorkspaceAdopt, type WorkspaceProvider } from "./types.js";
 import type { ModelProviderRegistry, ToolCatalogCapability } from "./model-providers.js";
 import { applyReasoningEffortToProviderConfig, providerTypeUsesWorkloadIdentity } from "./model-providers.js";
 import { clipDescription } from "./skills.js";
@@ -28,6 +29,14 @@ import { createToolFactsAccessor } from "./tool-facts-accessor.js";
 import { createGraphTools } from "./graph-tools.js";
 import { createInspectTools, NO_VIEWER, type InspectViewer } from "./inspect-tools.js";
 import { createProviderTools, holdsProviderTools } from "./provider-tools.js";
+import { requiresFineGrainedGitHubTokens } from "./provider-store.js";
+import {
+    PersonalCredentialError,
+    type ExternalSecretRef,
+    type PersonalCredentialAnswer,
+    type PersonalCredentialResolver,
+} from "./personal-secret-store.js";
+import { isAuthFailureError } from "./orchestration/utils.js";
 import { attachWorkloadIdentity } from "./wif-credentials.js";
 import { pinToolsNeverDefer } from "./tool-pinning.js";
 import type { SessionCatalog } from "./cms.js";
@@ -309,10 +318,22 @@ export interface WorkerDefaults {
     };
     /** Multi-provider model registry. Takes precedence over `provider`. */
     modelProviders?: ModelProviderRegistry;
+    /**
+     * The provider TYPE catalog (the model-providers file), read at call time
+     * so a reload is seen. `modelProviders` above is keyed by provider name.
+     */
+    getModelProviderTypes?: () => ModelProviderRegistry | null | undefined;
     /** Wall-clock turn cap in ms. 0 = no cap; undefined = 20-minute default. */
     turnTimeoutMs?: number;
     /** Turn inactivity watchdog in ms. 0 = disabled; undefined = 5-minute default. */
     turnInactivityTimeoutMs?: number;
+    /**
+     * How long a turn guard waits for the CLI to answer its abort, in ms
+     * (PILOTSWARM_CLI_ABORT_TIMEOUT_MS). When the CLI gives no answer in
+     * time, its process tree is ended and its client stopped. Undefined = no
+     * limit.
+     */
+    cliAbortTimeoutMs?: number;
 }
 
 /** Resolve every part of a bound agent using the same authorized package copy. */
@@ -375,7 +396,8 @@ export interface WorkspaceFingerprintPart {
  * CLI handle at the next turn boundary. Pure, so tests can check it (test C3
  * in docs/proposals/session-workspaces.md). The key order is part of the
  * digest. A session without a workspace gets no workspace key at all, so its
- * digest is the same as before workspaces existed.
+ * digest is the same as before workspaces existed. Likewise, only a limited
+ * system session gets a systemSessionLimits key.
  */
 export function buildBindingFingerprintInput(parts: {
     capabilityFingerprint: unknown;
@@ -387,6 +409,7 @@ export function buildBindingFingerprintInput(parts: {
     boundAgentCopy: unknown;
     mcpServers: unknown;
     excludedTools: unknown;
+    systemSessionLimits?: Record<string, unknown>;
     tools: unknown;
     workspace?: WorkspaceFingerprintPart;
 }): Record<string, unknown> {
@@ -399,6 +422,7 @@ export function buildBindingFingerprintInput(parts: {
         boundAgentCopy: parts.boundAgentCopy,
         mcpServers: parts.mcpServers,
         excludedTools: parts.excludedTools,
+        ...(parts.systemSessionLimits ? { systemSessionLimits: parts.systemSessionLimits } : {}),
         tools: parts.tools,
         ...(parts.workspace ? {
             workspace: {
@@ -412,6 +436,52 @@ export function buildBindingFingerprintInput(parts: {
 
 export function bindingFingerprintDigest(input: Record<string, unknown>): string {
     return createHash("sha256").update(JSON.stringify(input)).digest("hex");
+}
+
+/**
+ * The Copilot session options of a system session when
+ * PILOTSWARM_LIMIT_SYSTEM_SESSION_TOOLS is `1`, on create and on resume. Its
+ * tools are the PilotSwarm tools, which reach the CLI as SDK tools, and the
+ * CLI's skill tool: no shell, file, web, MCP or task tool. It neither writes
+ * to nor reads the CLI's cross-session store, and skips embedding retrieval,
+ * whose cache other sessions share.
+ */
+export function limitedSystemSessionOptions(): { availableTools: string[]; enableSessionStore: false; skipEmbeddingRetrieval: true } {
+    return { availableTools: ["custom:*", "builtin:skill"], enableSessionStore: false, skipEmbeddingRetrieval: true };
+}
+
+/** The fields of a session catalog row that tell whether it is a system session. */
+export interface SystemSessionRow {
+    isSystem?: boolean | null;
+    owner?: { provider?: string | null; subject?: string | null } | null;
+    rootSessionId?: string | null;
+}
+
+function isSystemOrSystemOwned(row: SystemSessionRow | null | undefined): boolean {
+    return row?.isSystem === true || (row?.owner?.provider === SYSTEM_USER_PRINCIPAL.provider
+        && row?.owner?.subject === SYSTEM_USER_PRINCIPAL.subject);
+}
+
+/**
+ * Whether PILOTSWARM_LIMIT_SYSTEM_SESSION_TOOLS applies to a session: it is
+ * marked system, the system user owns it, or the root of its tree is either.
+ * The sessions that system sessions spawn are owned by the system user but
+ * are not marked system. The root's row is read only when the session's own
+ * row does not decide; a root that cannot be read counts as system.
+ */
+export async function countsAsSystemSession(
+    sessionId: string,
+    row: SystemSessionRow | null | undefined,
+    getSession: (sessionId: string) => Promise<SystemSessionRow | null | undefined>,
+): Promise<boolean> {
+    if (isSystemOrSystemOwned(row)) return true;
+    const rootSessionId = row?.rootSessionId;
+    if (!rootSessionId || rootSessionId === sessionId) return false;
+    try {
+        return isSystemOrSystemOwned(await getSession(rootSessionId));
+    } catch {
+        return true;
+    }
 }
 
 /**
@@ -617,6 +687,13 @@ const WORKSPACE_RELEASE_DEADLINE_MS = 20_000;
 /** Bound on the task cancel a V4 Stop runs before it waits for the turn to unwind. */
 const STOP_TASK_CANCEL_DEADLINE_MS = 1_500;
 
+/**
+ * Bound on the task list that tells whether a session, or the worker, is busy
+ * (tryReleaseIdleWorkspace, getActiveWorkloadCount). A CLI frozen by a hung
+ * mount never answers.
+ */
+const TASK_LIST_DEADLINE_MS = 5_000;
+
 function withWorkspaceDeadline<T>(work: Promise<T>, what: string, ms = WORKSPACE_RELEASE_DEADLINE_MS): Promise<T> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const deadline = new Promise<never>((_, reject) => {
@@ -624,6 +701,24 @@ function withWorkspaceDeadline<T>(work: Promise<T>, what: string, ms = WORKSPACE
         (timer as { unref?: () => void }).unref?.();
     });
     return Promise.race([work, deadline]).finally(() => { if (timer) clearTimeout(timer); });
+}
+
+/**
+ * End the CLI process a pooled client started and every process below it
+ * (process-tree.ts): its shells, attached or detached, and anything else it
+ * started. The pinned SDK keeps that process in a private `cliProcess`.
+ * Nothing is killed without one (an injected stub, a runtime the client did
+ * not start) or once it has exited, since its pid may then belong to another
+ * process. Never throws.
+ */
+function killCliProcessTree(client: CopilotClient): boolean {
+    try {
+        const child = (client as unknown as { cliProcess?: { pid?: unknown; exitCode?: unknown; signalCode?: unknown } | null }).cliProcess;
+        if (!child || child.exitCode != null || child.signalCode != null) return false;
+        return killProcessTree(child.pid);
+    } catch {
+        return false;
+    }
 }
 
 function buildEffectivePromptLayers(
@@ -756,6 +851,14 @@ export class SessionManager {
      */
     private clientStarts = new WeakMap<CopilotClient, Promise<void>>();
     /**
+     * Clients stopped because their CLI left a turn guard's abort
+     * unanswered (`cliAbortTimeoutMs`). They are out of the pool and never
+     * start again.
+     */
+    private stoppedClients = new WeakSet<CopilotClient>();
+    /** The client each warm handle runs on; recorded only with `cliAbortTimeoutMs`. */
+    private handleClients = new WeakMap<ManagedSession, CopilotClient>();
+    /**
      * Backward-compat accessor for the default-token CopilotClient.
      *
      * The internal pool is keyed by transport and GitHub Copilot token (so
@@ -803,8 +906,11 @@ export class SessionManager {
     private turnControlHub: import("./turn-control.js").TurnControlHub | null = null;
     /** Session workspaces: the application's provider, or the built-in one. Null when neither is set. */
     private workspaceProvider: WorkspaceProvider | null = null;
+    private sessionAdmission: SessionAdmission | null = null;
     /** The worker's own ID, for releases this manager starts itself (eviction). */
     private workspaceWorkerNodeId: string | undefined;
+    /** Owner routing: the worker's capacity requester, asked by the requestOwnerCapacity activity. */
+    private ownerCapacityRequester: OwnerCapacityRequester | null = null;
     private unsubscribeFeatureFlags: (() => void) | null = null;
 
     /** Live in-memory session count — worker-registry health reporting. */
@@ -821,6 +927,15 @@ export class SessionManager {
      * created/resumed in `_getOrCreateUnlocked`.
      */
     private sessionClientKeys = new Map<string, string>();
+    /**
+     * External personal secrets: the deployment's resolver
+     * (`worker.setPersonalCredentialResolver`), the tokens it returned by
+     * secret store, name and version, and the cache entry each session last
+     * used, so a 401 drops it. Kept in memory only.
+     */
+    private personalCredentialResolver: PersonalCredentialResolver | null = null;
+    private personalCredentials = new Map<string, string>();
+    private sessionPersonalCredentialKeys = new Map<string, string>();
     private sessionStore: SessionStateStore | null = null;
     /** In-memory configs with non-serializable fields (tools, hooks). */
     private sessionConfigs = new Map<string, ManagedSessionConfig>();
@@ -880,6 +995,9 @@ export class SessionManager {
         sessionStateDir?: string,
     ) {
         this.adminScope = validateAdminScope(process.env);
+        // A malformed PILOTSWARM_REQUIRE_FINE_GRAINED_GH_PAT stops the worker
+        // here, not at the first credential an agent saves.
+        requiresFineGrainedGitHubTokens();
         this.sessionStore = sessionStore ?? null;
         this.workerDefaults = workerDefaults ?? {};
         this.sessionStateDir = sessionStateDir ?? DEFAULT_SESSION_STATE_DIR;
@@ -1056,9 +1174,12 @@ export class SessionManager {
         let sdkModelName = String(modelRef || "").trim();
         // Hoisted out of the try: the declared-capability check below needs it.
         let descriptor: ReturnType<NonNullable<typeof this.workerDefaults.modelProviders>["getDescriptor"]> | undefined;
+        // A key in the deployment's secret store: only that key may ask.
+        let externalSecret = false;
         try {
             const normalized = this.normalizeModelRef(modelRef || undefined);
             descriptor = this.workerDefaults.modelProviders?.getDescriptor(normalized);
+            externalSecret = Boolean(this.workerDefaults.modelProviders?.resolve(normalized)?.externalSecret);
             if (descriptor?.modelName) sdkModelName = descriptor.modelName;
             else if (normalized) sdkModelName = normalized.includes(":") ? normalized.split(":").slice(1).join(":") : normalized;
         } catch {
@@ -1104,6 +1225,7 @@ export class SessionManager {
                     const normalizedRef = this.normalizeModelRef(modelRef || undefined);
                     key = (await this._resolveSessionGitHubToken(opts.sessionId, {} as ManagedSessionConfig, normalizedRef || "")) || "";
                 } catch {
+                    if (externalSecret) return { modelId: sdkModelName, known: false, vision: false };
                     key = "";
                 }
             }
@@ -1114,6 +1236,9 @@ export class SessionManager {
                 client = undefined;
             }
         }
+        // The worker's own client never asks for a model that runs on a key
+        // from the secret store.
+        if (!client && externalSecret) return { modelId: sdkModelName, known: false, vision: false };
         if (!client) {
             client = this.client;
             cacheKey = "";
@@ -1189,8 +1314,133 @@ export class SessionManager {
         if (workerNodeId) this.workspaceWorkerNodeId = workerNodeId;
     }
 
+    /** External personal secrets: who resolves a provider's token. Replacing it empties the cache. */
+    setPersonalCredentialResolver(resolver: PersonalCredentialResolver | null): void {
+        this.personalCredentialResolver = resolver;
+        this.personalCredentials.clear();
+    }
+
+    /**
+     * Drop the cached token this session's turn ran with, after the model
+     * refused it: the session's next turn asks the resolver again.
+     */
+    forgetPersonalCredential(sessionId: string): void {
+        const key = this.sessionPersonalCredentialKeys.get(sessionId);
+        if (key) this.personalCredentials.delete(key);
+    }
+
+    /**
+     * Resolve this turn's key when the session's model runs on a key kept in
+     * the deployment's secret store; otherwise do nothing. Throws a
+     * PersonalCredentialError the turn must act on. Called before anything is
+     * attached or created, so the session's own resolution finds it cached.
+     */
+    async preparePersonalCredential(sessionId: string, model: string | undefined, preloadedRow?: any): Promise<void> {
+        let effectiveModel = "";
+        try {
+            effectiveModel = this.normalizeModelRef(model) || "";
+        } catch {
+            return;
+        }
+        if (!effectiveModel || !this.workerDefaults.modelProviders?.resolve(effectiveModel)?.externalSecret) return;
+        await this._resolveSessionGitHubToken(sessionId, {} as ManagedSessionConfig, effectiveModel, preloadedRow);
+    }
+
+    /**
+     * The token behind a provider's secret-store reference, from the cache
+     * when this exact secret version was fetched before, otherwise from the
+     * resolver. It is the provider's only credential: anything but a token
+     * throws a PersonalCredentialError, and nothing else stands in for it.
+     */
+    private async _resolvePersonalCredential(
+        sessionId: string,
+        provider: string,
+        secret: ExternalSecretRef,
+        preloadedRow?: any,
+    ): Promise<string> {
+        const key = [secret.store, secret.name, secret.version].join("\u0000");
+        this.sessionPersonalCredentialKeys.set(sessionId, key);
+        const cached = this.personalCredentials.get(key);
+        if (cached) return cached;
+
+        const resolver = this.personalCredentialResolver;
+        if (!resolver) {
+            throw new PersonalCredentialError("unavailable", provider,
+                `The key of provider "${provider}" is in the deployment's secret store, and this worker has no credential resolver; the turn will be retried.`);
+        }
+        let row = preloadedRow ?? null;
+        if (!row && this.sessionCatalog) {
+            row = await this.sessionCatalog.getSession(sessionId).catch(() => null);
+        }
+        let answer: PersonalCredentialAnswer;
+        try {
+            answer = await resolver({
+                sessionId,
+                rootSessionId: row?.rootSessionId ?? sessionId,
+                provider,
+                secret: { ...secret },
+            });
+        } catch (err: any) {
+            answer = { status: "unavailable", message: String(err?.message ?? err) };
+        }
+        const said = (message: unknown) => (typeof message === "string" && message.trim() ? `: ${message.trim()}` : "");
+        switch (answer?.status) {
+            case "ok":
+                if (typeof answer.token === "string" && answer.token.trim()) {
+                    // A newer version replaces the cached ones of the same secret.
+                    const secretPrefix = `${secret.store}\u0000${secret.name}\u0000`;
+                    for (const cachedKey of this.personalCredentials.keys()) {
+                        if (cachedKey.startsWith(secretPrefix)) this.personalCredentials.delete(cachedKey);
+                    }
+                    this.personalCredentials.set(key, answer.token);
+                    return answer.token;
+                }
+                throw new PersonalCredentialError("unavailable", provider,
+                    `The credential resolver returned no key for provider "${provider}"; the turn will be retried.`);
+            case "refused":
+                // "Authentication failed" makes the orchestration end the turn
+                // without a retry, as it does for a key the model refuses.
+                throw new PersonalCredentialError("refused", provider,
+                    `Authentication failed: the key of provider "${provider}" was refused${said(answer.message)}. `
+                    + "Update the provider's key, then send the prompt again.");
+            case "busy": {
+                const retryAfterMs = Number(answer.retryAfterMs);
+                throw new PersonalCredentialError("busy", provider,
+                    `The key of provider "${provider}" is not available right now${said(answer.message)}`,
+                    Number.isFinite(retryAfterMs) && retryAfterMs > 0 ? retryAfterMs : undefined);
+            }
+            default: {
+                // An outage is retried, so its message must not read as an
+                // authentication failure, which would end the turn instead.
+                const detail = said(answer?.status === "unavailable" ? answer.message : "the resolver gave no answer it knows");
+                if (detail && isAuthFailureError(detail)) {
+                    console.warn(`[SessionManager] session=${sessionId} credential resolver for provider "${provider}" is unavailable${detail}`);
+                }
+                throw new PersonalCredentialError("unavailable", provider,
+                    `The key of provider "${provider}" could not be fetched${detail && !isAuthFailureError(detail) ? detail : ""}; `
+                    + "the turn will be retried.");
+            }
+        }
+    }
+
     getWorkspaceProvider(): WorkspaceProvider | null {
         return this.workspaceProvider;
+    }
+
+    setSessionAdmission(admission: SessionAdmission | null): void {
+        this.sessionAdmission = admission;
+    }
+
+    getSessionAdmission(): SessionAdmission | null {
+        return this.sessionAdmission;
+    }
+
+    setOwnerCapacityRequester(requester: OwnerCapacityRequester | null): void {
+        this.ownerCapacityRequester = requester;
+    }
+
+    getOwnerCapacityRequester(): OwnerCapacityRequester | null {
+        return this.ownerCapacityRequester;
     }
 
     /** Session turn control: set by the worker after it starts the hub. */
@@ -1397,6 +1647,13 @@ export class SessionManager {
      * Returns null for an injected test stub that has no `start()`.
      */
     private _startClient(client: CopilotClient): Promise<void> | null {
+        // A create or resume that took this client from the pool before it
+        // was stopped must not start it again: nothing would stop it later.
+        if (this.stoppedClients.has(client)) {
+            return Promise.reject(new Error(
+                "Connection is closed: this Copilot CLI client was stopped after it left an abort unanswered",
+            ));
+        }
         if (typeof client.start !== "function") return null;
         const inFlight = this.clientStarts.get(client);
         if (inFlight) return inFlight;
@@ -1418,7 +1675,8 @@ export class SessionManager {
     /** `client.createSession`, after the client's shared start. */
     private _createCopilotSession(client: CopilotClient, config: SessionConfig): Promise<CopilotSession> {
         const starting = this._startClient(client);
-        return starting ? starting.then(() => client.createSession(config)) : client.createSession(config);
+        const options = withCliProgramSessionOptions(config);
+        return starting ? starting.then(() => client.createSession(options)) : client.createSession(options);
     }
 
     /** `client.resumeSession`, after the client's shared start. */
@@ -1428,9 +1686,10 @@ export class SessionManager {
         config: Parameters<CopilotClient["resumeSession"]>[1],
     ): Promise<CopilotSession> {
         const starting = this._startClient(client);
+        const options = withCliProgramSessionOptions(config);
         return starting
-            ? starting.then(() => client.resumeSession(sessionId, config))
-            : client.resumeSession(sessionId, config);
+            ? starting.then(() => client.resumeSession(sessionId, options))
+            : client.resumeSession(sessionId, options);
     }
 
     /**
@@ -1453,11 +1712,17 @@ export class SessionManager {
         effectiveModel: string,
         preloadedRow?: any,
     ): Promise<string | undefined> {
+        const registry = this.workerDefaults.modelProviders;
+        const resolved = registry && effectiveModel ? registry.resolve(effectiveModel) : undefined;
+        // A key kept in the deployment's secret store is resolved for this
+        // turn, and nothing stands in for it: not the legacy or System key,
+        // not the worker's GITHUB_TOKEN, not another provider.
+        if (resolved?.type === "github" && resolved.externalSecret) {
+            return this._resolvePersonalCredential(sessionId, resolved.providerId, resolved.externalSecret, preloadedRow);
+        }
         if (!this.sessionCatalog) return undefined;
 
-        const registry = this.workerDefaults.modelProviders;
         if (!registry || !effectiveModel) return undefined;
-        const resolved = registry.resolve(effectiveModel);
         const legacyGithubReference = effectiveModel.startsWith("github-copilot:");
         if (resolved && resolved.type !== "github") return undefined;
         if (!resolved && !legacyGithubReference) return undefined;
@@ -1852,6 +2117,20 @@ export class SessionManager {
     }
 
     /**
+     * PILOTSWARM_LIMIT_SYSTEM_SESSION_TOOLS: the options of a limited system
+     * session (countsAsSystemSession), or undefined for any other session.
+     * A session whose own row can't be read is limited too, as one whose root
+     * can't be read is: the limit fails closed. Callers check the setting
+     * first, so a worker without it reads nothing.
+     */
+    private async _systemSessionLimits(sessionId: string, row: SystemSessionRow | null | undefined, rowUnreadable = false) {
+        const catalog = this.sessionCatalog;
+        if (!catalog) return undefined;
+        return rowUnreadable || await countsAsSystemSession(sessionId, row, (id) => catalog.getSession(id))
+            ? limitedSystemSessionOptions() : undefined;
+    }
+
+    /**
      * Get existing session or create/resume one.
      * Merges: worker defaults → serializable config (from client) → in-memory config (tools/hooks).
      */
@@ -1877,6 +2156,11 @@ export class SessionManager {
         options?: { turnIndex?: number; trace?: SessionTraceWriter; lockHeld?: boolean; transcriptEpoch?: number; epochStart?: boolean },
     ): Promise<ManagedSession> {
         this.sessionLastTouchedAt.set(sessionId, Date.now());
+        // The warm handle's CLI was stopped after it left an abort
+        // unanswered: the handle has no connection left, so resume afresh.
+        const warmHandle = this.sessions.get(sessionId);
+        const warmClient = warmHandle ? this.handleClients.get(warmHandle) : undefined;
+        if (warmClient && this.stoppedClients.has(warmClient)) this._forgetWarmSession(sessionId);
         const turnIndex = options?.turnIndex;
         const trace = options?.trace;
         const transcriptEpoch = options?.transcriptEpoch ?? 0;
@@ -2039,10 +2323,14 @@ export class SessionManager {
         // below means requiresModelRebind() also recreates a warm CLI
         // session that was frozen on the wrong model.
         let catalogRow: any = null;
+        let catalogRowUnreadable = false;
         if (this.sessionCatalog) {
             try {
                 catalogRow = await this.sessionCatalog.getSession(sessionId);
-            } catch { /* row not readable — fall through to configured model */ }
+            } catch {
+                // Row not readable: fall through to the configured model.
+                catalogRowUnreadable = true;
+            }
             const catalogModel = String(catalogRow?.model || "").trim();
             const configuredModel = String(config.model || "").trim();
             if (config.admittedModel && catalogModel !== config.admittedModel) {
@@ -2135,7 +2423,8 @@ export class SessionManager {
         // is wired in. Skipping the await on the no-catalog path matters
         // for the SessionManager unit tests that exercise lock ordering
         // by counting microtasks before the first `resumeSession()` call.
-        const userGithubToken = this.sessionCatalog
+        // A key in the deployment's secret store is resolved either way.
+        const userGithubToken = this.sessionCatalog || resolvedProvider?.externalSecret
             ? await this._resolveSessionGitHubToken(sessionId, config, effectiveModel, catalogRow)
             : undefined;
         if (resolvedProvider?.type === "github" && !userGithubToken && !this.githubToken && !resolvedProvider.githubToken) {
@@ -2351,6 +2640,17 @@ export class SessionManager {
                         ?.getModelsByProvider()
                         .find((group) => group.providerId === providerName)
                         ?.type),
+                // The fine-grained GitHub token gate asks about a TYPE (the
+                // create's own, or the stored row's on an update), and the
+                // runtime registry above is keyed by provider name, so this
+                // reads the type catalog. Without one it is left unset, and
+                // the tools refuse a credential rather than skip the gate.
+                ...(this.workerDefaults.getModelProviderTypes ? {
+                    isGitHubProviderType: (typeId: string) => this.workerDefaults.getModelProviderTypes?.()
+                        ?.getModelsByProvider()
+                        .find((group) => group.providerId === typeId)
+                        ?.type === "github",
+                } : {}),
             })
             : [];
         // Service sessions (tree-scoped machinery, e.g. the regen distiller)
@@ -2398,8 +2698,15 @@ export class SessionManager {
         const nativeOwnerKnown = !this.sessionCatalog || Boolean(nativeOwner?.provider && nativeOwner?.subject);
         config.nativeFeatureAllowed = () => isAlwaysOn("copilot.native_tasks") || (nativeOwnerKnown
             && (this.featureFlags?.resolve("copilot.native_tasks", nativeOwner, { fallback: false }).enabled ?? false));
+        // PILOTSWARM_LIMIT_SYSTEM_SESSION_TOOLS=1: a system session keeps its
+        // PilotSwarm tools and the CLI's skill tool, gets no native tasks,
+        // whose task tool runs a shell, and stays out of the CLI's
+        // cross-session store and embedding retrieval. Off by default: an
+        // application's own system agents may need other tools.
+        const systemSessionLimits = process.env.PILOTSWARM_LIMIT_SYSTEM_SESSION_TOOLS === "1"
+            ? await this._systemSessionLimits(sessionId, catalogRow, catalogRowUnreadable) : undefined;
         const nativeEnabled = this.workerDefaults.nativeSubagents === "sync" && config.nativeFeatureAllowed()
-            && !catalogRow?.isSystem && !isServiceSession && !isTunerSession
+            && !catalogRow?.isSystem && !isServiceSession && !isTunerSession && !systemSessionLimits
             && config.promptLayering?.kind !== "pilotswarm-system-agent";
         config.nativeSubagents = nativeEnabled ? "sync" : "off";
         config.baseAgentPolicy = resolveBaseAgentPolicy(this.featureFlags, nativeOwnerKnown ? nativeOwner : null, nativeEnabled);
@@ -2635,6 +2942,7 @@ export class SessionManager {
             boundAgentCopy,
             mcpServers: effectiveMcpServers,
             excludedTools,
+            systemSessionLimits,
             tools: allTools.map(toolDeclarationForFingerprint),
             ...(workspaceAttach ? { workspace: {
                 path: workspaceAttach.path,
@@ -2726,6 +3034,8 @@ export class SessionManager {
             // Native workers are explicitly scoped: built-ins inherit external
             // tools, and loaded PilotSwarm agents expect durable child contracts.
             excludedTools,
+            // A limited system session: its tools, session store and embedding retrieval.
+            ...systemSessionLimits,
             ...(nativeEnabled ? {
                 customAgents: repoAdoption?.customAgents.length
                     ? [...nativeSubagentDefinitions(sdkModelName, nativeTaskAccess), ...repoAdoption.customAgents]
@@ -2889,6 +3199,14 @@ export class SessionManager {
         if (nativeTaskAccess) copilotSession.on(event => nativeTaskAccess.observe(event));
         if (repoAgentAccess) copilotSession.on(event => repoAgentAccess.observe(event));
         const managed = new ManagedSession(sessionId, copilotSession, config);
+        const abortTimeoutMs = this.workerDefaults.cliAbortTimeoutMs;
+        if (abortTimeoutMs) {
+            this.handleClients.set(managed, client);
+            managed.setAbortLimit({
+                timeoutMs: abortTimeoutMs,
+                onUnanswered: () => { void this._stopUnansweredClient(sessionId, client, abortTimeoutMs); },
+            });
+        }
         // The `load_skill` catalog (progressive discovery) — held on the
         // managed session, NEVER in the CLI's session config. Shared skills
         // plus this session owner's own private ones.
@@ -2947,6 +3265,40 @@ export class SessionManager {
             try { await existing.destroy(); } catch {}
         }
         this._forgetWarmSession(sessionId);
+    }
+
+    /**
+     * A turn guard's abort got no answer from the CLI that serves this
+     * session within `cliAbortTimeoutMs`: the CLI is wedged, and so is every
+     * session on it. Drop its client from the pool, end the CLI's process
+     * tree, then force-stop the client, the fallback shutdown() uses when
+     * stop() hangs. The turn settles as a lost connection. Its retry, and the
+     * next turn of any other session that ran on this client, resume on a
+     * fresh CLI (see the check at the top of _getOrCreateUnlocked).
+     */
+    private async _stopUnansweredClient(sessionId: string, client: CopilotClient, timeoutMs: number): Promise<void> {
+        this._forgetWarmSession(sessionId);
+        if (this.stoppedClients.has(client)) return;
+        this.stoppedClients.add(client);
+        for (const [key, pooled] of this.clients) {
+            if (pooled === client) this.clients.delete(key);
+        }
+        emitSessionManagerTrace(
+            sessionId,
+            `Copilot CLI did not answer an abort within ${timeoutMs} ms; force-stopping its client`,
+            { level: "warn" },
+        );
+        // forceStop() kills only the CLI process, and the CLI's shells outlive
+        // it (CLI 1.0.83). A wedged CLI can neither list nor cancel them, and
+        // no later handle sees them, so they would keep writing into the
+        // checkout the retry runs in. End the whole tree first. That also
+        // stops the shells of the other sessions on this CLI; they lose the
+        // CLI anyway.
+        if (killCliProcessTree(client)) {
+            emitSessionManagerTrace(sessionId, "ended the Copilot CLI's process tree, its shells included");
+        }
+        try { await client.forceStop(); }
+        catch { console.warn("[SessionManager] Copilot force-stop failed."); }
     }
 
     /**
@@ -3055,9 +3407,19 @@ export class SessionManager {
                         try {
                             const client = await this._ensureClientForSession(sessionId);
                             const config = this.sessionConfigs.get(sessionId) ?? {};
+                            let limitsRow: SystemSessionRow | null | undefined = null;
+                            let limitsRowUnreadable = false;
+                            if (process.env.PILOTSWARM_LIMIT_SYSTEM_SESSION_TOOLS === "1") {
+                                try { limitsRow = await this.sessionCatalog?.getSession(sessionId); }
+                                catch { limitsRowUnreadable = true; }
+                            }
+                            const systemSessionLimits = process.env.PILOTSWARM_LIMIT_SYSTEM_SESSION_TOOLS === "1"
+                                ? await this._systemSessionLimits(sessionId, limitsRow, limitsRowUnreadable)
+                                : undefined;
                             const copilotSession = await this._resumeCopilotSession(client, sessionId, {
                                 tools: [...ManagedSession.systemToolDefs(), ...ManagedSession.subAgentToolDefs()],
                                 onPermissionRequest: approvePermissionForSession,
+                                ...systemSessionLimits,
                             });
                             const managed = new ManagedSession(sessionId, copilotSession, config);
         // The `load_skill` catalog (progressive discovery) — held on the
@@ -3424,8 +3786,60 @@ export class SessionManager {
         return [...all.values()];
     }
 
-    /** Session workspaces: release every idle workspace session held here (graceful shutdown). Busy sessions are skipped. */
-    async releaseIdleWorkspaces(opts: { reason: string; workerNodeId: string; deadlineMs?: number }): Promise<number> {
+    /**
+     * Session workspaces: release one session's folders now, unless a lock, a
+     * running turn or a background task holds the session (`busy`). Never
+     * waits for the lock. For a provider that needs a folder back, such as one
+     * another session asks for. `notHeld`: nothing of the session is held on
+     * this worker, so the caller cleans up anything left over itself.
+     */
+    async tryReleaseIdleWorkspace(
+        sessionId: string,
+        opts: { reason: string; workerNodeId?: string; releaseTimeoutMs?: number },
+    ): Promise<{ released: boolean; busy?: boolean; notHeld?: boolean; detail?: string }> {
+        // _withSessionLock takes a free lock before its first await, so no other
+        // operation can take it between this check and that call.
+        if (this.sessionLocks.has(sessionId)) return { released: false, busy: true };
+        return this._withSessionLock(sessionId, "tryReleaseIdleWorkspace", async () => {
+            const managed = this.sessions.get(sessionId);
+            if (managed?.hasActiveTurn()) return { released: false, busy: true };
+            // A task list that fails or does not answer counts as no task, as for
+            // a load (busyForLoad); releaseWorkspace then bounds the cancel and the
+            // disconnect of a CLI that hangs.
+            const tasksRun = managed
+                && await withWorkspaceDeadline(managed.hasActiveBackgroundTasks(), "task list", TASK_LIST_DEADLINE_MS).catch(() => false);
+            if (tasksRun) return { released: false, busy: true };
+            const result = await this.releaseWorkspace(sessionId, {
+                reason: opts.reason,
+                workerNodeId: opts.workerNodeId ?? this.workspaceWorkerNodeId ?? os.hostname(),
+                lockHeld: true,
+                // The provider asked for this folder back, so its own release
+                // may take longer than the 5 s that each one gets at shutdown.
+                releaseTimeoutMs: opts.releaseTimeoutMs ?? 60_000,
+            });
+            if (!result.released) return { released: false, notHeld: true };
+            return { released: true, ...(result.detail ? { detail: result.detail } : {}) };
+        });
+    }
+
+    /**
+     * Held session locks (running turns and other session operations) plus the
+     * background shells and agent tasks of the other warm sessions here. A task
+     * list that fails or takes over 5 s counts as one task, so a worker whose
+     * sessions cannot be read never looks idle.
+     */
+    async getActiveWorkloadCount(): Promise<number> {
+        const idle = [...this.sessions].filter(([sessionId]) => !this.sessionLocks.has(sessionId));
+        const tasks = await Promise.all(idle.map(([, managed]) => withWorkspaceDeadline(managed.activeBackgroundTasks(), "task list", TASK_LIST_DEADLINE_MS)
+            .then((list) => list.length, () => 1)));
+        return this.sessionLocks.size + tasks.reduce((sum, count) => sum + count, 0);
+    }
+
+    /**
+     * Session workspaces: release every idle workspace session held here (graceful shutdown). Busy sessions are skipped.
+     * `releaseTimeoutMs` bounds each provider release (default 5 s).
+     */
+    async releaseIdleWorkspaces(opts: { reason: string; workerNodeId: string; deadlineMs?: number; releaseTimeoutMs?: number }): Promise<number> {
         // In parallel: one frozen CLI must not stop the others (review R9).
         // Each release has its own deadline, so this ends within about one.
         const ids = new Set<string>([
@@ -3447,6 +3861,7 @@ export class SessionManager {
         this._forgetWarmSession(sessionId);
         this.sessionApplicationTools.delete(sessionId);
         this.sessionConfigs.delete(sessionId);
+        this.sessionPersonalCredentialKeys.delete(sessionId);
     }
 
     /**
@@ -3514,6 +3929,8 @@ export class SessionManager {
         this.sessionApplicationTools.clear();
         this.sessionConfigs.clear();
         this.sessionClientKeys.clear();
+        this.personalCredentials.clear();
+        this.sessionPersonalCredentialKeys.clear();
         // Each process gets the same deadline concurrently; one stuck client
         // cannot block another or multiply the worker's termination budget.
         // This is final cleanup only, not the individual-session eviction path.

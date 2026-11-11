@@ -831,6 +831,9 @@ function toggleOwnerFilterItem(currentFilter, item, principal) {
 // extra; the server (management-client MAX_SESSION_TITLE_LENGTH) keeps the same
 // limit. Folders keep their own, shorter one.
 export const RENAME_SESSION_MAX_LENGTH = 100;
+
+/** Shown before the caller turns dispatcher delegation off, in the portal and the TUI. */
+export const DISPATCHER_DELEGATION_OFF_WARNING = "Turn off dispatcher delegation? The deployment's dispatcher loses access to the sessions it runs for you, including work in progress, until you turn it back on.";
 const RENAME_FOLDER_MAX_LENGTH = 60;
 
 function comparableAgentTitle(value) {
@@ -3449,6 +3452,7 @@ export class PilotSwarmUiController {
         if (this.getState().admin?.section === "motd") void this.refreshAdminMotds();
         void this.refreshAdminModelProviders().catch(() => {});
         void this.refreshAdminAgentPackages().catch(() => {});
+        void this.refreshDispatcherDelegation();
     }
 
     /** Close the Admin Console and return to the standard workspace. */
@@ -3538,6 +3542,89 @@ export class PilotSwarmUiController {
     setAdminGhcpKeyStoreAsSystem(value) {
         if (value && !this.getState().admin?.profile?.isAdmin) return;
         this.dispatch({ type: "admin/ghcpKey/setSystemTarget", value: Boolean(value) });
+    }
+
+    // ── Dispatcher delegation ───────────────────────────────────
+
+    /**
+     * Load the caller's opt-in to the deployment's dispatcher. Hidden (not an
+     * error) on transports or deployments without one.
+     */
+    async refreshDispatcherDelegation() {
+        if (typeof this.transport.getMyDispatcherDelegation !== "function") return null;
+        try {
+            const status = await this.transport.getMyDispatcherDelegation();
+            this.dispatch({ type: "admin/dispatcherDelegation", patch: {
+                loaded: true,
+                available: status?.dispatcherConfigured === true,
+                enabled: status?.enabled === true,
+                error: null,
+            } });
+            return status || null;
+        } catch (error) {
+            this.dispatch({ type: "admin/dispatcherDelegation", patch: { error: error?.message || String(error) } });
+            return null;
+        }
+    }
+
+    /** Turn the caller's dispatcher delegation on or off; the confirmation, if any, has happened. */
+    async setDispatcherDelegation(enabled) {
+        if (typeof this.transport.setMyDispatcherDelegation !== "function") {
+            const error = "Dispatcher delegation is not available on this transport.";
+            this.dispatch({ type: "admin/dispatcherDelegation", patch: { error } });
+            return { ok: false, error };
+        }
+        this.dispatch({ type: "admin/dispatcherDelegation", patch: { saving: true, error: null } });
+        try {
+            const status = await this.transport.setMyDispatcherDelegation({ enabled: Boolean(enabled) });
+            this.dispatch({ type: "admin/dispatcherDelegation", patch: {
+                loaded: true,
+                available: status?.dispatcherConfigured === true,
+                enabled: status?.enabled === true,
+                saving: false,
+            } });
+            this.setStatus(status?.enabled
+                ? "Dispatcher delegation is on"
+                : "Dispatcher delegation is off: the dispatcher cannot reach your sessions until you turn it back on");
+            return { ok: true, error: null };
+        } catch (error) {
+            const message = error?.message || String(error);
+            this.dispatch({ type: "admin/dispatcherDelegation", patch: { saving: false, error: message } });
+            this.setStatus(`Dispatcher delegation was not changed: ${message}`);
+            return { ok: false, error: message };
+        }
+    }
+
+    /**
+     * The TUI command: turning delegation on happens at once; turning it off
+     * asks first, because the dispatcher loses access to work it is running.
+     */
+    async toggleDispatcherDelegation() {
+        let current = this.getState().admin?.dispatcherDelegation;
+        if (!current?.loaded) {
+            await this.refreshDispatcherDelegation();
+            current = this.getState().admin?.dispatcherDelegation;
+        }
+        if (!current?.available) {
+            this.setStatus("This deployment has no dispatcher to delegate to");
+            return;
+        }
+        if (current.saving) return;
+        if (!current.enabled) {
+            await this.setDispatcherDelegation(true);
+            return;
+        }
+        this.dispatch({
+            type: "ui/modal",
+            modal: {
+                type: "confirm",
+                title: "Turn Off Dispatcher Delegation",
+                message: DISPATCHER_DELEGATION_OFF_WARNING,
+                confirmLabel: "Turn Off",
+                action: "disableDispatcherDelegation",
+                previousFocus: FOCUS_REGIONS.ADMIN,
+            },
+        });
     }
 
     async refreshAdminModelProviders() {
@@ -9445,6 +9532,8 @@ export class PilotSwarmUiController {
                 await this.deleteMarkedArtifacts({ confirmed: true });
             } else if (modal.action === "deleteAdminProvider") {
                 await this.deleteSelectedAdminProvider();
+            } else if (modal.action === "disableDispatcherDelegation") {
+                await this.setDispatcherDelegation(false);
             }
             return;
         }

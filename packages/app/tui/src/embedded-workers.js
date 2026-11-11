@@ -36,6 +36,7 @@ export async function startEmbeddedWorkers({ count, store }) {
                 workerNodeId: `local-${index}`,
                 systemMessage: workerModuleConfig.systemMessage || process.env._TUI_SYSTEM_MESSAGE || undefined,
                 pluginDirs,
+                sessionMessageScope: process.env.PILOTSWARM_SESSION_MESSAGE_SCOPE || undefined,
                 // Bicep-deploy MI flow (set in worker-env ConfigMap by the
                 // overlay .env). Unset for legacy `scripts/deploy-aks.sh`,
                 // local Docker, and CI — those keep using the password

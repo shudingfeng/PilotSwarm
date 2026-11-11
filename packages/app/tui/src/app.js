@@ -480,6 +480,11 @@ export function PilotSwarmTuiApp({ controller, platform, onRequestExit }) {
                     controller.toggleSelectedAdminProviderSystemUse().catch(() => {});
                     return;
                 }
+                // Dispatcher delegation: on at once, off after a confirmation.
+                if (plainShortcut && input === "g" && providerPage === "mine") {
+                    controller.toggleDispatcherDelegation().catch(() => {});
+                    return;
+                }
                 if (plainShortcut && input === "o" && providerPage === "shared" && adminState?.profile?.isAdmin) {
                     controller.cycleSelectedAdminSystemAgentOverride().catch(() => {});
                     return;

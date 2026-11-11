@@ -85,3 +85,64 @@ export function routeTurnControlActivity(task: any): any {
 export function registerTurnControlActivity(runtime: any, name: keyof typeof TURN_CONTROL_ACTIVITY_NAMES, handler: any): void {
     runtime.registerActivity(TURN_CONTROL_ACTIVITY_NAMES[name], handler);
 }
+
+/**
+ * Owner routing (1.0.83): every session-scoped activity of an owner-tagged
+ * session carries the owner's tag, `owner.<subject>`, so only that owner's
+ * workers run it. duroxide gives an activity one tag, so on the turn and the
+ * two workspace activities the owner tag replaces the capability tag. It
+ * stands for those capabilities as well: only a release that has them lets a
+ * worker declare an owner tag.
+ */
+export function routeOwnerActivity(task: any, ownerTag: string): any {
+    if (typeof task.withTag !== "function") {
+        throw new Error("Owner routing requires Duroxide activity tag routing support");
+    }
+    return task.withTag(ownerTag);
+}
+
+/**
+ * Owner routing (1.0.83): the requestOwnerCapacity activity goes only to
+ * workers that have a capacity requester, which declare this tag.
+ */
+export const OWNER_CAPACITY_CAPABILITY = "pilotswarm.owner-capacity.v1";
+
+export function routeOwnerCapacityActivity(task: any): any {
+    if (typeof task.withTag !== "function") {
+        throw new Error("Owner capacity requests require Duroxide activity tag routing support");
+    }
+    return task.withTag(OWNER_CAPACITY_CAPABILITY);
+}
+
+/**
+ * A worker's tag filter: untagged work and the capability tags, plus the
+ * owner's tag when the worker has one and the capacity tag when it has a
+ * capacity requester. That is at most five tags, duroxide's MAX_WORKER_TAGS,
+ * which duroxide-node does not check when the runtime starts.
+ *
+ * An owner-only worker names its owner's tag alone, so it claims only that
+ * owner's session-scoped activities: no untagged work, no capability-tagged
+ * activity and no capacity request, whose tag is not owner-scoped. duroxide
+ * applies the filter to activities only, so every worker still runs
+ * orchestration turns; their ctx.utcNow() and ctx.newGuid() are untagged
+ * duroxide activities, which another worker must run.
+ */
+export function workerTagFilter(
+    opts: { ownerTag?: string; ownerCapacity?: boolean; ownerOnly?: boolean } = {},
+): { defaultAnd: string[] } | { tags: string[] } {
+    if (opts.ownerOnly) {
+        // duroxide-node passes { tags: [] } on without duroxide's check for an
+        // empty list, and the worker would then claim nothing.
+        if (!opts.ownerTag) throw new TypeError("an owner-only worker needs an owner tag");
+        return { tags: [opts.ownerTag] };
+    }
+    return {
+        defaultAnd: [
+            AGENT_HANDOFF_CAPABILITY,
+            WORKSPACE_CAPABILITY,
+            TURN_CONTROL_CAPABILITY,
+            ...(opts.ownerTag ? [opts.ownerTag] : []),
+            ...(opts.ownerCapacity ? [OWNER_CAPACITY_CAPABILITY] : []),
+        ],
+    };
+}

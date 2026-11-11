@@ -52,6 +52,8 @@ const GOLDEN_SURFACE = [
     "runtime.manager.loadKnowledgeIndex",
     "runtime.manager.recordRegenerated",
     "runtime.manager.recordSessionEvent",
+    // 1.0.83 (owner routing): before each turn and each set-workspace check.
+    "runtime.manager.requestOwnerCapacity",
     "runtime.manager.resolveAgentConfig",
     "runtime.manager.runRegenArchive",
     "runtime.manager.runRegenCancelDistiller",

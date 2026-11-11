@@ -6,6 +6,7 @@ import type { PromptAttachmentRef } from "../types.js";
 import type { OrchestrationInput, TurnResult } from "../types.js";
 import { SESSION_STATE_MISSING_PREFIX, sanitizePromptAttachmentRefs } from "../types.js";
 import { createSessionProxy } from "../session-proxy.js";
+import { CAPACITY_UNAVAILABLE } from "../owner-routing.js";
 import { sameWorkspace, validateWorkspaceText } from "../workspace-check.js";
 import { planHoldRelease } from "../wait-affinity.js";
 import {
@@ -33,6 +34,7 @@ import {
     maybeSummarize,
     publishStatus,
     releaseAffinity,
+    requestOwnerCapacity,
     versionedContinueAsNew,
     wrapWithResumeContext,
     writeCommandResponse,
@@ -46,8 +48,11 @@ import {
     MAX_RETRIES,
     SHUTDOWN_POLL_INTERVAL_MS,
     SHUTDOWN_TIMEOUT_MS,
+    WORKSPACE_BUSY_RETRY_SCHEDULE_SECONDS,
     WORKSPACE_CHANGED_CONTINUE_PROMPT,
     WORKSPACE_RETRY_WAKE_PROMPT,
+    createdSessionRouting,
+    sessionRouting,
     timerGate,
     workspaceChangedNote,
     extraFoldersChangedNote,
@@ -440,6 +445,35 @@ export function* processPrompt(
 
     ctx.traceInfo(`[turn ${state.iteration}] session=${runtime.input.sessionId} prompt="${prompt.slice(0, 80)}"`);
 
+    // 1.0.83: an owner-tagged session asks for capacity before each turn,
+    // also when it keeps its worker: that worker may be gone. `deny` ends
+    // the turn without a retry; `busy` holds the prompt on the busy timer,
+    // as a WORKSPACE_BUSY refusal does. Neither runs a turn, so neither
+    // takes a turn index.
+    if (runtime.options.ownerTag) {
+        const capacity = yield* requestOwnerCapacity(runtime);
+        if (capacity.decision !== "ok") {
+            state.config.turnSystemPrompt = undefined;
+            if (capacity.decision === "deny") {
+                yield* projectNonRetryableTurnFailure(runtime, capacity.message);
+                return;
+            }
+            const refusal = {
+                type: "wait",
+                seconds: Math.ceil((capacity.retryAfterMs ?? 30_000) / 1000),
+                reason: capacity.message,
+                gate: "workspace",
+                code: capacity.code,
+                ...(capacity.retryAfterMs ? { retryAfterMs: capacity.retryAfterMs } : {}),
+            } as TurnResult;
+            yield* holdForWorkspace(runtime, refusal, prompt, clientMessageIds, promptIsBootstrap, requiredTool, sender, attachments, {
+                countsAsFailure: capacity.code !== CAPACITY_UNAVAILABLE,
+            });
+            yield runtime.manager.updateCmsState(runtime.input.sessionId, "waiting", null, capacity.message);
+            return;
+        }
+    }
+
     if (state.needsHydration && state.blobEnabled) {
         let hydrateAttempts = 0;
         while (true) {
@@ -447,7 +481,7 @@ export function* processPrompt(
                 if (!state.preserveAffinityOnHydrate) {
                     state.affinityKey = yield ctx.newGuid();
                 }
-                runtime.session = createSessionProxy(ctx, runtime.input.sessionId, state.affinityKey, state.config, "turn-control-v1");
+                runtime.session = createSessionProxy(ctx, runtime.input.sessionId, state.affinityKey, state.config, "turn-control-v1", sessionRouting(runtime.options));
                 yield runtime.session.hydrate();
                 state.needsHydration = false;
                 state.preserveAffinityOnHydrate = false;
@@ -561,6 +595,8 @@ export function* processPrompt(
                 : {}),
             ...(sender ? { sender } : {}),
             ...(attachments && attachments.length > 0 ? { attachments } : {}),
+            // 1.0.83: what a session this turn creates takes from it.
+            ...createdSessionRouting(runtime.options),
             // Store-wins (1.0.59): send only the turnKey. expectedVersion is
             // retired from the wire — the store-wins worker reconciles against
             // the store's own version, never the orchestration's belief.
@@ -1114,7 +1150,7 @@ function* applyAgentWorkspaceChange(runtime: DurableSessionRuntime, result: Turn
     const extraPaths = action.extraPaths && typeof action.extraPaths === "object" ? action.extraPaths as Record<string, string> : null;
     if (next) state.config.workspace = next;
     else delete state.config.workspace;
-    runtime.session = createSessionProxy(ctx, runtime.input.sessionId, state.affinityKey, state.config, "turn-control-v1");
+    runtime.session = createSessionProxy(ctx, runtime.input.sessionId, state.affinityKey, state.config, "turn-control-v1", sessionRouting(runtime.options));
     state.workspaceRevision = revision;
     state.workspaceNotice = [workspaceChangedNote(previous, next, path), next ? extraFoldersChangedNote(previous, next, extraPaths) : undefined]
         .filter(Boolean).join(" ");
@@ -1164,6 +1200,11 @@ function holdRefusedTurnNote(runtime: DurableSessionRuntime, sourcePrompt: strin
  * model was not called. Hold the prompt, pick the next attempt from the
  * schedule, and let another worker try after two failures in a row on one
  * worker (docs/proposals/session-workspaces.md, section 4.7).
+ *
+ * 1.0.83: a capacity `busy` answer holds the prompt the same way. With the
+ * fast busy policy, a WORKSPACE_BUSY refusal releases the worker at once and
+ * retries follow WORKSPACE_BUSY_RETRY_SCHEDULE_SECONDS. A hold that is not a
+ * failure (`countsAsFailure: false`, no capacity answer) releases nothing.
  */
 function* holdForWorkspace(
     runtime: DurableSessionRuntime,
@@ -1174,6 +1215,7 @@ function* holdForWorkspace(
     requiredTool?: string,
     sender?: MessageSender,
     attachments?: PromptAttachmentRef[],
+    opts: { countsAsFailure?: boolean } = {},
 ): Generator<any, void, any> {
     const { ctx, state, options } = runtime;
     const wait = result as any;
@@ -1190,10 +1232,19 @@ function* holdForWorkspace(
     const failedOn = typeof wait.workerNodeId === "string" ? wait.workerNodeId : "";
     const code = typeof wait.code === "string" ? wait.code : undefined;
     const previous = state.workspaceRetry ?? { step: 0, failures: { workerNodeId: "", count: 0 } };
-    const failures = failedOn && previous.failures.workerNodeId === failedOn
-        ? { workerNodeId: failedOn, count: previous.failures.count + 1 }
-        : { workerNodeId: failedOn, count: 1 };
-    const delayMs = workspaceRetryDelayMs(previous.step, wait.retryAfterMs, state.workspaceRetryScheduleMs);
+    const countsAsFailure = opts.countsAsFailure !== false;
+    const fastBusy = options.workspaceBusyFastRelease === true && code === "WORKSPACE_BUSY";
+    const failures = !countsAsFailure
+        ? { ...previous.failures }
+        : failedOn && previous.failures.workerNodeId === failedOn
+            ? { workerNodeId: failedOn, count: previous.failures.count + 1 }
+            : { workerNodeId: failedOn, count: 1 };
+    const delayMs = workspaceRetryDelayMs(
+        previous.step,
+        wait.retryAfterMs,
+        state.workspaceRetryScheduleMs,
+        fastBusy ? WORKSPACE_BUSY_RETRY_SCHEDULE_SECONDS : undefined,
+    );
     state.workspaceRetry = { step: previous.step + 1, failures };
     state.workspaceStatus = { state: "unavailable", ...(code ? { code } : {}) };
     ctx.traceInfo(
@@ -1201,16 +1252,19 @@ function* holdForWorkspace(
         + `attempt ${state.workspaceRetry.step}, ${failures.count} in a row there; retry in ${delayMs}ms`,
     );
 
-    // Two failures in a row on one worker: release affinity so the next
-    // attempt may land elsewhere. The count is not reset by the release, so
-    // every further failure there releases again, until a check passes.
-    if (failures.count >= 2 && state.blobEnabled) {
+    // Two failures in a row on one worker, or one WORKSPACE_BUSY under the
+    // fast policy: release affinity so the next attempt may land elsewhere.
+    // The count is not reset by the release, so every further failure there
+    // releases again, until a check passes. A capacity request that got no
+    // answer is no failure and releases nothing.
+    const releaseThreshold = fastBusy ? 1 : 2;
+    if (countsAsFailure && failures.count >= releaseThreshold && state.blobEnabled) {
         yield* releaseAffinity(runtime, "workspace_unavailable", {
             ...(code ? { code } : {}),
-            workerNodeId: failedOn,
+            ...(failedOn ? { workerNodeId: failedOn } : {}),
             failures: failures.count,
         });
-    } else {
+    } else if (countsAsFailure) {
         const plan = planHoldRelease({
             blobEnabled: state.blobEnabled,
             seconds: Math.ceil(delayMs / 1000),
@@ -1307,6 +1361,15 @@ export function* handleTurnResult(
             eventType: "session.workspace_available",
             data: { revision: Math.max(1, state.workspaceRevision) },
         }]);
+    }
+    // 1.0.83: a session without a workspace is held on the same timer by a
+    // capacity request's busy answer, and by any turn result with the
+    // workspace gate, such as a busy answer from an admission hook or a
+    // credential resolver. A turn got past the gates, so that hold is over:
+    // the next one starts the schedule again, and no retry count is carried.
+    if (pastGates && !state.config.workspace && state.workspaceStatus?.state === "unavailable") {
+        state.workspaceStatus = null;
+        state.workspaceRetry = null;
     }
 
     switch (result.type) {

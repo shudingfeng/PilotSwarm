@@ -102,15 +102,9 @@ export function createConnectionHandler(runtime, { allowThemeMessages = false } 
                     for (const sessionId of ids) {
                         try {
                             await runtime.authorizeSessionSubscribe(sessionId, auth);
-                        } catch {
-                            sessionSubscriptions.get(sessionId)?.();
-                            sessionSubscriptions.delete(sessionId);
-                            canvasSubscriptions.get(sessionId)?.();
-                            canvasSubscriptions.delete(sessionId);
-                            liveSubscriptions.get(sessionId)?.unsubscribe();
-                            liveSubscriptions.delete(sessionId);
-                            liveSubscriptionGeneration.set(sessionId, (liveSubscriptionGeneration.get(sessionId) || 0) + 1);
-                            send({ type: "error", scope: "session", sessionId, code: "ACCESS_REVOKED", error: "Session not found." });
+                        } catch (error) {
+                            dropSessionSubscriptions(sessionId);
+                            sendAccessRevoked("session", sessionId, error);
                         }
                     }
                 } finally { accessCheckPending = false; }
@@ -123,10 +117,69 @@ export function createConnectionHandler(runtime, { allowThemeMessages = false } 
                 ws.send(JSON.stringify(message));
             }
         };
+        const dropSessionSubscriptions = (sessionId) => {
+            sessionSubscriptions.get(sessionId)?.();
+            sessionSubscriptions.delete(sessionId);
+            canvasSubscriptions.get(sessionId)?.();
+            canvasSubscriptions.delete(sessionId);
+            liveSubscriptions.get(sessionId)?.unsubscribe();
+            liveSubscriptions.delete(sessionId);
+            liveSubscriptionGeneration.set(sessionId, (liveSubscriptionGeneration.get(sessionId) || 0) + 1);
+        };
+        // The dispatcher learns that the owner turned delegation off, which
+        // is not the "gone" a deleted or unshared session reports.
+        const sendAccessRevoked = (scope, sessionId, error) => {
+            send(error?.code === "DELEGATION_REVOKED"
+                ? { type: "error", scope, sessionId, code: "DELEGATION_REVOKED", error: error.message }
+                : { type: "error", scope, sessionId, code: "ACCESS_REVOKED", error: "Session not found." });
+        };
         const sendSubscriptionError = (scope, sessionId, error) => {
+            if (error?.code === "DELEGATION_REVOKED") {
+                sendAccessRevoked(scope, sessionId, error);
+                return;
+            }
             const denied = [403, 404].includes(error?.status) || ["FORBIDDEN", "NOT_FOUND"].includes(error?.code);
             send({ type: "error", scope, sessionId, ...(denied ? { code: "ACCESS_REVOKED" } : {}),
                 error: denied ? "Session not found." : error?.message || String(error) });
+        };
+        // The dispatcher's deliveries from another user's session wait for a
+        // fresh check of that user's opt-in. What arrives during one check
+        // goes out after the next, in order; nothing goes out once it is off.
+        const delegatedDelivery = async (sessionId, deliver) => {
+            const check = typeof runtime.dispatcherDeliveryCheck === "function"
+                ? await runtime.dispatcherDeliveryCheck(sessionId, auth)
+                : null;
+            if (!check) return deliver;
+            let pending = [];
+            let draining = false;
+            let revoked = false;
+            return (item) => {
+                if (revoked) return;
+                pending.push(item);
+                if (draining) return;
+                draining = true;
+                void (async () => {
+                    try {
+                        while (pending.length > 0 && !revoked) {
+                            const batch = pending;
+                            pending = [];
+                            if (!(await check().catch(() => false))) {
+                                revoked = true;
+                                pending = [];
+                                dropSessionSubscriptions(sessionId);
+                                sendAccessRevoked("session", sessionId, {
+                                    code: "DELEGATION_REVOKED",
+                                    message: "This session's owner does not allow the deployment's dispatcher to act for them.",
+                                });
+                                return;
+                            }
+                            for (const entry of batch) deliver(entry);
+                        }
+                    } finally {
+                        draining = false;
+                    }
+                })();
+            };
         };
 
         send({ type: "ready" });
@@ -200,9 +253,10 @@ export function createConnectionHandler(runtime, { allowThemeMessages = false } 
                     if (typeof runtime.authorizeSessionSubscribe === "function") {
                         await runtime.authorizeSessionSubscribe(sessionId, auth);
                     }
-                    const unsubscribe = runtime.subscribeSession(sessionId, (event) => {
+                    const deliver = await delegatedDelivery(sessionId, (event) => {
                         send({ type: "sessionEvent", sessionId, event });
                     });
+                    const unsubscribe = runtime.subscribeSession(sessionId, deliver);
                     sessionSubscriptions.set(sessionId, unsubscribe);
                     send({ type: "subscribedSession", sessionId });
                 } catch (error) {
@@ -236,9 +290,10 @@ export function createConnectionHandler(runtime, { allowThemeMessages = false } 
                     if (typeof runtime.authorizeSessionSubscribe === "function") {
                         await runtime.authorizeSessionSubscribe(sessionId, auth);
                     }
-                    const unsubscribe = plane.subscribe(sessionId, (update) => {
+                    const deliver = await delegatedDelivery(sessionId, (update) => {
                         send({ type: "canvasLive", sessionId, ...update });
                     });
+                    const unsubscribe = plane.subscribe(sessionId, deliver);
                     canvasSubscriptions.set(sessionId, unsubscribe);
                     send({ type: "subscribedCanvas", sessionId });
                 } catch (error) {
@@ -285,6 +340,10 @@ export function createConnectionHandler(runtime, { allowThemeMessages = false } 
                         await runtime.authorizeSessionSubscribe(sessionId, auth);
                     }
                     if (liveSubscriptionGeneration.get(sessionId) !== generation) return;
+                    const sendLive = await delegatedDelivery(sessionId, (update) => {
+                        if (liveSubscriptionGeneration.get(sessionId) === generation) send({ type: "live", ...update });
+                    });
+                    if (liveSubscriptionGeneration.get(sessionId) !== generation) return;
 
                     // Subscribe before reading the burst so no notification is
                     // lost in between. Buffer until the snapshot is sent to
@@ -300,7 +359,7 @@ export function createConnectionHandler(runtime, { allowThemeMessages = false } 
                             return;
                         }
                         if (bursting) queued.push(update);
-                        else send({ type: "live", ...update });
+                        else sendLive(update);
                     });
                     liveSubscriptions.set(sessionId, { generation, unsubscribe });
                     const rows = typeof runtime.getLive === "function"

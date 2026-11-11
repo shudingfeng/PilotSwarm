@@ -20,6 +20,21 @@ import type { SessionBlobStore } from "./blob-store.js";
 import type { Tool } from "@github/copilot-sdk";
 
 /**
+ * `PILOTSWARM_EVENT_RETENTION_MINUTES`: an extra floor, in minutes, under
+ * which `purge_old_events` never deletes events. Unset or empty: no extra
+ * floor. Anything but a positive whole number is refused, so a typo can't
+ * quietly let events be purged sooner than a deployment keeps them.
+ */
+export function eventRetentionMinutesFromEnv(raw: string | undefined): number | undefined {
+    if (raw === undefined || raw.trim() === "") return undefined;
+    const value = raw.trim();
+    if (!/^\d+$/.test(value) || Number(value) <= 0) {
+        throw new Error(`PILOTSWARM_EVENT_RETENTION_MINUTES must be a positive whole number of minutes (got "${raw}")`);
+    }
+    return Number(value);
+}
+
+/**
  * Create resource manager tools bound to the given dependencies.
  */
 export function createResourceManagerTools(opts: {
@@ -28,10 +43,15 @@ export function createResourceManagerTools(opts: {
     blobStore: SessionBlobStore | null;
     duroxideSchema?: string;
     cmsSchema?: string;
+    /** Extra floor for `purge_old_events`, in minutes (`PILOTSWARM_EVENT_RETENTION_MINUTES`). */
+    eventRetentionMinutes?: number;
+    /** `scale_workers` refuses (`PILOTSWARM_DISABLE_K8S_SCALING=1`), for workers it must not scale. */
+    k8sScalingDisabled?: boolean;
 }): Tool<any>[] {
     const { catalog, duroxideClient, blobStore } = opts;
     const duroxideSchema = opts.duroxideSchema ?? "ps_duroxide";
     const cmsSchema = opts.cmsSchema ?? "copilot_sessions";
+    const minimumEventAgeMinutes = Math.max(60, opts.eventRetentionMinutes ?? 0);
 
     async function getOptionalInstanceStatusCount(status: string): Promise<number | null> {
         if (!duroxideClient || typeof duroxideClient.listInstancesByStatus !== "function") {
@@ -529,13 +549,13 @@ export function createResourceManagerTools(opts: {
         description:
             "Delete CMS session_events rows older than N minutes. Events are write-once " +
             "diagnostic logs — safe to prune after consumption. The events table is the " +
-            "fastest-growing table. Minimum age: 60 minutes (enforced).",
+            `fastest-growing table. Minimum age: ${minimumEventAgeMinutes} minutes (enforced).`,
         parameters: {
             type: "object" as const,
             properties: {
                 olderThanMinutes: {
                     type: "number",
-                    description: "Delete events older than this many minutes. Default: 1440 (24h). Minimum: 60.",
+                    description: `Delete events older than this many minutes. Default: ${Math.max(1440, minimumEventAgeMinutes)}${minimumEventAgeMinutes > 1440 ? "" : " (24h)"}. Minimum: ${minimumEventAgeMinutes}.`,
                 },
             },
         },
@@ -544,7 +564,7 @@ export function createResourceManagerTools(opts: {
                 const pool = (catalog as any).pool;
                 if (!pool) return { error: "Database pool not available." };
 
-                const minutes = Math.max(args.olderThanMinutes ?? 1440, 60);
+                const minutes = Math.max(args.olderThanMinutes ?? 1440, minimumEventAgeMinutes);
                 const cutoff = new Date(Date.now() - minutes * 60 * 1000);
 
                 const result = await pool.query(
@@ -614,7 +634,8 @@ export function createResourceManagerTools(opts: {
     const scaleWorkersTool = defineTool("scale_workers", {
         description:
             "Scale the AKS worker deployment to a specified number of replicas. " +
-            "Min: 1, Max: 12. Requires kubectl access.",
+            "Min: 1, Max: 12. Requires kubectl access." +
+            (opts.k8sScalingDisabled ? " Disabled on this deployment." : ""),
         parameters: {
             type: "object" as const,
             properties: {
@@ -634,6 +655,9 @@ export function createResourceManagerTools(opts: {
             required: ["replicas"],
         },
         handler: async (args: { replicas: number; namespace?: string; deployment?: string }) => {
+            if (opts.k8sScalingDisabled) {
+                return { error: "Scaling workers is disabled on this deployment (PILOTSWARM_DISABLE_K8S_SCALING=1)." };
+            }
             const replicas = Math.round(args.replicas);
             if (replicas < 1 || replicas > 12) {
                 return { error: `Replica count must be 1-12 (got ${replicas}).` };
