@@ -107,7 +107,7 @@ connection and also looks every 5 s while a turn runs.
 | `session_groups` / `session_group_owners` | session groups + per-user ownership (groups are private per-user organization) |
 | `user_session_group_placements` | migration 0034: `(user_id, root_session_id) → group_id` — each viewer's private placement of a session tree in one of their own groups; composite FK into `session_group_owners` makes cross-user placement structurally impossible |
 | `session_child_outcomes` | terminal outcomes of sub-agents for parent digests |
-| `users` / `session_owners` | principals, per-user profile/keys, session ownership |
+| `users` / `session_owners` | principals, per-user profile/keys, the dispatcher-delegation opt-in (`allow_dispatcher_delegation`, migration `0088`), session ownership |
 
 ## The catalog client
 

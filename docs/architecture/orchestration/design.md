@@ -11,9 +11,9 @@ It does **not** own tool implementations or Copilot SDK session state. Those
 live in worker activities and the session manager.
 
 Primary source: [`packages/sdk/src/orchestration/`](../../../packages/sdk/src/orchestration).
-The current latest version is `1.0.82`. Frozen prior versions live as siblings
+The current latest version is `1.0.83`. Frozen prior versions live as siblings
 (single files `packages/sdk/src/orchestration_1_0_47.ts` … `_1_0_51.ts`, then
-directories `orchestration_1_0_52/` … `orchestration_1_0_81/`) and run
+directories `orchestration_1_0_52/` … `orchestration_1_0_82/`) and run
 unchanged for any in-flight execution that started against them.
 
 In 1.0.81, Stop and Steer are handled inside the worker's turn activity through
@@ -25,6 +25,16 @@ In 1.0.82, queued work no longer waits behind a timer (issue 192): `drain` runs
 queued prompts and answers at once whatever timer is armed, and `decide` merges
 every queued prompt past timer items into one turn. The KV FIFO compacts
 instead of dropping items. Version 1.0.81 and older keep the old queue.
+
+In 1.0.83, a session can be bound to its owner's workers (owner routing), and
+a session can use a faster policy for `WORKSPACE_BUSY` refusals. Both come from
+two optional orchestration inputs, `ownerTag` and `workspaceBusyFastRelease`,
+which the client sets only when it is configured to (see
+[§10](#owner-routing-and-capacity-requests-1083)). Without them, 1.0.83
+schedules exactly what 1.0.82 schedules, with one fix: a session without a
+workspace that a workspace-gate wait held starts the busy schedule again after
+a turn runs (see [handleTurnResult](#handleturnresult)). Version 1.0.82 and
+older ignore both inputs.
 
 ---
 
@@ -83,9 +93,11 @@ interface DurableSessionRuntime {
 
 `options` holds per-execution thresholds derived from input
 (`idleTimeout`, `inputGracePeriod`, `isSystem`, `parentSessionId`,
-`nestingLevel`, `baseSystemMessage`). These do not change inside an execution.
-Legacy `dehydrateThreshold` and `checkpointInterval` inputs are accepted but
-ignored.
+`nestingLevel`, `baseSystemMessage`, and in 1.0.83 `ownerTag` and
+`workspaceBusyFastRelease`, each only when the input sets it). These do not
+change inside an execution, and continue-as-new carries the two 1.0.83 fields
+when set. Legacy `dehydrateThreshold` and `checkpointInterval` inputs are
+accepted but ignored.
 
 ### Key state fields
 
@@ -414,6 +426,9 @@ sequenceDiagram
     Decide->>Turn: prompt, bootstrap?, requiredTool?, clientMessageIds?
     Turn->>Life: wrapWithResumeContext for legacy hydration input
     Turn->>Turn: normalize prompt and trailing system context
+    opt ownerTag set (1.0.83)
+        Turn->>Manager: requestOwnerCapacity: deny ends the turn, busy holds the prompt
+    end
     Turn->>Session: hydrate (with retry) if needed
     Turn->>Manager: loadKnowledgeIndex (best-effort)
     Turn->>Life: publishStatus("running")
@@ -472,6 +487,16 @@ The big switch on `result.type`. Two pre-passes:
 | `stopped` | record `session.turn_stopped` with the turn index and client message ids, write idle, reset retry count, and resume timers/cron; no automatic turn retry and no legacy system Stop message |
 | `spawn_agent` / `message_agent` / `check_agents` / `list_sessions` / `wait_for_agents` / `complete_agent` / `cancel_agent` / `delete_agent` | `handleSubAgentAction(runtime, result)` |
 | `error` | retry classifier (above) |
+
+A result that gets past the gates ends a workspace hold. For a session with a
+workspace, the status returns to `ready`, `workspaceRetry` is cleared and
+`session.workspace_available` is recorded. In 1.0.83, a session without a
+workspace can also be held on the workspace timer: by a capacity request's
+`busy` answer, or by any other turn result with the workspace gate. Its status
+and `workspaceRetry` are cleared without an event, so the next hold starts the
+schedule again at its first step, with one failure on the worker, and a
+continue-as-new carries no retry count. Up to 1.0.82 such a session kept the
+status and the retry state, so every later hold went on up the schedule.
 
 ### Stop, Steer, and carried guidance (1.0.81)
 
@@ -549,6 +574,14 @@ sessions use 1.0.81; old sessions move to the latest version only through the
 existing continue-as-new mechanism. Disabling Steer is not an orchestration
 rollback. Retain V4-capable workers until 1.0.81 sessions drain, unless a
 separately authorized coordinated rollback restores both code and durable state.
+
+For 1.0.83, deploy the workers before turning on owner routing in any client.
+An owner-tagged activity runs only on a worker that declares the owner's tag,
+and a capacity request only on a worker with a capacity requester; until such
+a worker exists, the activity waits in the queue. A session started on 1.0.82
+keeps its routing: 1.0.82 does not carry `ownerTag` or
+`workspaceBusyFastRelease` across continue-as-new, so after its move to 1.0.83
+the session stays untagged.
 
 ### processTimer
 
@@ -660,6 +693,14 @@ For `delete`, `cancelSession` additionally enumerates descendants via
 `getDescendantSessionIds` and calls `deleteSession` on each before deleting
 self.
 
+In 1.0.83, the `destroySession` of an owner-tagged session (in
+`completeSession`, `cancelSession` and `failPendingShutdown`) is raced against
+`WORKSPACE_RELEASE_CAP_MS` (10 s), as `releaseAffinity` races
+`releaseWorkspace`. When no worker of the owner runs, the timer wins and the
+command finishes; duroxide never starts the losing destroy (one that is
+already running finishes on its worker), and the worker's idle eviction
+remains the backstop. An untagged session yields the destroy as before.
+
 ---
 
 ## 9. Continue-As-New
@@ -714,6 +755,7 @@ worker's preamble; they do not ask the orchestration for a hydration probe.
 | Connection-closed error during retry | `"error"` |
 | Connection-closed retries exhausted | `"lossy_handoff"` |
 | Two or more consecutive workspace failures on one worker | `"workspace_unavailable"` |
+| The first `WORKSPACE_BUSY` refusal under the fast busy policy (1.0.83) | `"workspace_unavailable"` |
 
 Before rotating the recorded affinity GUID, workspace sessions release their
 workspace through the worker activity, bounded by a durable cap. A cleared
@@ -738,6 +780,88 @@ storeless session cannot hand off: it writes the give-up error with
 
 The rotation uses `yield ctx.newGuid()` and rebuilds `runtime.session` with the
 turn-control routing contract. Workspace releases retain their capability tag.
+
+### Owner routing and capacity requests (1.0.83)
+
+A client with owner routing on (`ownerRouting`, or `PILOTSWARM_OWNER_ROUTING=1`)
+starts a top-level user session with `ownerTag: "owner.<subject>"`, from the
+owner on the session's row. A system session, or a session without an owner,
+gets no tag. A session created during a turn (a `spawn_agent` child, a
+`create_agent_session` session, a regeneration distiller) takes the tag and
+the busy policy of that turn, from the turn's input or from the orchestration's
+`spawnChildSession` input; a system child gets neither. Both fields ride every
+continue-as-new.
+
+With a tag, every session-scoped activity (`runTurnV4`, `runTurnEpochV4`,
+`hydrateSession`, `checkWorkspace`, `releaseWorkspace`, `destroySession`, and
+the rest of the session proxy) carries the owner tag instead of its capability
+tag, so only a worker started with that `ownerTag` runs it, also after an
+affinity rotation. Manager activities keep their routing. Duroxide holds an
+activity that no worker's filter admits until such a worker starts, and a
+worker keeps a session it holds until the session idles out or the worker
+stops.
+
+Before each turn of a tagged session, and before a set-workspace command's
+check, the orchestration yields `requestOwnerCapacity`, tagged
+`pilotswarm.owner-capacity.v1`, which only a worker with a capacity requester
+(`worker.setOwnerCapacityRequester(fn)`) runs. The first owner-tagged activity
+after creation or an affinity release always follows such a request, because
+only a turn or a set-workspace check schedules one; a release and a destroy are
+capped instead. The requester gets `{ sessionId, rootSessionId, ownerTag }` and
+answers:
+
+| Answer | Effect |
+|---|---|
+| `ok` (or anything else) | the turn runs |
+| `deny` | the turn ends as a refusal that is not retried: the session shows the requester's message, the prompt is dropped, a child reports the failure to its parent, and the next prompt asks again; no turn index is taken |
+| `busy` | the prompt is held on the workspace timer, as for a `WORKSPACE_BUSY` refusal, at least `retryAfterMs`, with the message as the session's wait reason, and the session asks again when the timer fires; `done`, `cancel` and `delete` reach it meanwhile |
+| no answer within 15 s, a failed request, or no row for the session | `busy` with code `CAPACITY_UNAVAILABLE` and a one-minute wait; it is not counted as a failure, so it releases no affinity, even under the fast policy |
+
+A set-workspace command of a tagged session answers a `deny` or `busy` with
+that refusal and keeps the workspace. Otherwise it races `checkWorkspace`
+against `WORKSPACE_CHECK_CAP_MS` (20 minutes); when the cap wins it answers
+`WORKSPACE_BUSY` and keeps the workspace. An untagged session yields its check
+as before.
+
+### Owner-only workers
+
+A worker started with `ownerOnly` and its `ownerTag` declares the Duroxide
+filter `{ tags: [ownerTag] }` instead of `defaultAnd`, so it claims only the
+session-scoped activities of its owner's sessions. It claims no untagged
+activity (system sessions' turns, `summarizeSession`, `listModels`,
+`getWorkerSessionPolicy`, `loadKnowledgeIndex`, `recordSessionEvent`,
+`updateCmsState` and the other manager activities), no activity tagged with a
+capability (`spawnChildSession`, `resolveAgentConfig`, the turns and workspace
+activities of untagged sessions) and no `requestOwnerCapacity`, whose tag is
+not owner-scoped, even with a capacity requester. Without its `ownerTag` it
+refuses to start.
+
+Duroxide filters only the activity queue, so every worker, an owner-only one
+too, runs orchestration turns. But `ctx.utcNow()` and `ctx.newGuid()` are
+Duroxide system activities without a tag, which an owner-only worker never
+runs. A deployment with owner-only workers therefore needs another worker for
+every turn of every session. That worker resolves agents and checks the
+creation policy, so give it the same plugins, agents and session policy as the
+owners' workers. A user session's sub-agents are still created inside its turn
+(`spawn_agent`, `create_agent_session`), on its owner's worker, with the
+turn's tag. A complete, cancel or delete still ends at once while the owner's
+worker holds the session: that worker runs the destroy.
+
+### Fast busy policy (1.0.83)
+
+A session started with `workspaceBusyFastRelease` (client option
+`workspaceBusyFastRelease`, or `PILOTSWARM_WORKSPACE_BUSY_FAST_RELEASE=1`)
+treats a refusal with the code `WORKSPACE_BUSY` (from the workspace check, a
+capacity request, or any other gate that answers with that code) differently:
+
+| | Default policy | Fast busy policy (`WORKSPACE_BUSY` only) |
+|---|---|---|
+| Retry schedule | 30 s, 2 min, 5 min, then every 15 min | 10 s, 20 s, 1 min, then every 3 min |
+| Affinity release | after two failures in a row on one worker | after the first refusal |
+
+A provider's `retryAfterMs` still sets the least wait. Other codes keep the
+default policy. The flag rides continue-as-new and passes to the sessions the
+session creates.
 
 ### Hydrate retry
 
@@ -815,8 +939,8 @@ src/orchestration_1_0_53/     │ frozen — replay only (directory form)
 src/orchestration_1_0_54/     │
 src/orchestration_1_0_55/     │
 ...                          │
-src/orchestration_1_0_81/     ┘
-src/orchestration/            ← current latest (1.0.82)
+src/orchestration_1_0_82/     ┘
+src/orchestration/            ← current latest (1.0.83)
 ```
 
 All registered versions are listed in

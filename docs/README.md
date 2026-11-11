@@ -49,6 +49,7 @@ Building **on** PilotSwarm, deploying it, and contributing **to** it.
 
 **Deploying**
 - [Deploying to AKS](./developer/deploy/aks.md) (+ [topology](./developer/deploy/aks-topology.md))
+- [Windows workers](./developer/deploy/windows-workers.md) — an optional pool of Windows worker VMs, one owner each, with a Dev Drive per session tree, on Azure
 - [Portal Entra app roles](./developer/deploy/entra-app-roles.md) · [Knowledge harvester](./developer/deploy/harvester.md) · [Observability](./developer/deploy/observability.md)
 
 **Reference**
@@ -70,3 +71,6 @@ Building **on** PilotSwarm, deploying it, and contributing **to** it.
 - [Session workspaces](./proposals/session-workspaces.md) — proposed: an agent works in a git checkout on a separate repo pod, as on a dev box, across worker moves, with repo-native agents and a test plan.
 - [Session forking and merge-back](./proposals/session-forking.md) — approved: anyone who can watch a session forks it into their own copy with the same model context; sub-agents are optional; merge-back (P1) proposes results to the source owner.
 - [Queued prompts behind timer items](./proposals/queued-prompts-timer-stall.md) — approved: queued user prompts never wait for a timer, one turn takes the whole backlog, schedules keep their time, and the session queue never drops work silently (issue \#192).
+- [Windows worker pool](./proposals/windows-worker-pool.md) — proposed: optional Windows worker VMs that each serve one owner, with a managed workspace drive per session tree, a disk controller and an Azure deployment profile; everything is off by default and lands as a series of small changes.
+- [No tools for the title session by default](./proposals/title-session-without-tools.md) — proposed: the session that writes titles reads other sessions' messages, so its model gets no tool and every permission request is refused unless a deployment opts out.
+- [Cap the destroy wait for every session](./proposals/destroy-wait-cap.md) — proposed: complete, cancel and delete stop waiting without a limit for the session's destroy, which a dead, busy or hung worker can hold back, as the owner-tagged sessions of orchestration `1.0.83` already do.

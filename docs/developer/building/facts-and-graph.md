@@ -165,6 +165,10 @@ Today's model is binary, and deliberately conservative for non-admins:
 - `deleteFact` never honors a client `unrestricted` flag and refuses
   `scope: "all"` for non-admins; cross-cutting purges go through the admin-gated
   `forcePurgeFacts`.
+- With `PILOTSWARM_SESSION_MESSAGE_SCOPE=owner`, a non-admin cannot store or
+  delete shared facts under `skills/`, `asks/` or `config/facts-manager/`,
+  including with a pattern delete that could match them (`403`). See
+  [Configuration](../reference/configuration.md#session-message-scope).
 
 > Per-user facts scoping (beyond shared-vs-private) is intentionally future work.
 > The role check on reads is the seam where it will land.

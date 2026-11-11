@@ -96,18 +96,20 @@ its stream. See [live-plane architecture](../architecture/live-plane.md).
 
 Operations tagged **[admin]** require the `admin` role. Session operations are
 also authorized by access class: read/write may be delegated by visibility or
-targeted grants; manage/destroy/share remain owner/admin only. Inaccessible
-sessions return not-found to avoid an existence oracle.
+targeted grants; manage/destroy/share remain owner/admin only (the deployment's
+dispatcher may also complete, cancel and delete sessions delegated to it — see
+[Dispatcher delegation](#dispatcher-delegation)). Inaccessible sessions return
+not-found to avoid an existence oracle.
 
 ### Sessions
 
 | Operation | Route | Parameters | Summary |
 |---|---|---|---|
 | listSessions | `GET /api/v1/sessions` | — | List session summaries. |
-| createSession | `POST /api/v1/sessions` | model (body), reasoningEffort (body), contextTier (body), groupId (body), visibility (body) | Create a session. Owner is the authenticated principal; visibility defaults to the deployment default. `groupId` is an initial placement into one of **your** groups — `403` if the group is missing or not yours. |
-| createSessionForAgent | `POST /api/v1/sessions/for-agent` | agentName (body), model (body), reasoningEffort (body), contextTier (body), title (body), splash (body), initialPrompt (body), groupId (body), visibility (body) | Create a session bound to a named agent. Same `groupId` placement rule as createSession. |
+| createSession | `POST /api/v1/sessions` | model (body), reasoningEffort (body), contextTier (body), groupId (body), visibility (body), onBehalfOfOwner (body) | Create a session. Owner is the authenticated principal; visibility defaults to the deployment default. `groupId` is an initial placement into one of **your** groups — `403` if the group is missing or not yours. `onBehalfOfOwner: { subject, provider? }` is for the deployment's dispatcher only: the named user owns the private session — and `groupId` must be one of theirs — and the dispatcher gets a write share (see [Dispatcher delegation](#dispatcher-delegation)). |
+| createSessionForAgent | `POST /api/v1/sessions/for-agent` | agentName (body), model (body), reasoningEffort (body), contextTier (body), title (body), splash (body), initialPrompt (body), groupId (body), visibility (body), onBehalfOfOwner (body) | Create a session bound to a named agent. Same `groupId` placement and `onBehalfOfOwner` rules as createSession. |
 | getSession | `GET /api/v1/sessions/:sessionId` | sessionId (path) | Get one session view (live orchestration status). |
-| deleteSession | `DELETE /api/v1/sessions/:sessionId` | sessionId (path) | Cancel and soft-delete a session. |
+| deleteSession | `DELETE /api/v1/sessions/:sessionId` | sessionId (path), reason (query), force (query, boolean), settleTimeoutMs (query, number) | Cancel and soft-delete a session. With `force`, a delete that has not settled within `settleTimeoutMs` (0 to 65000, default 65000; 0 sends no command) deletes the session's subtree directly, from the leaves up with the session last, and fails naming what failed, so a retry can finish. A session that no worker has started yet never runs afterwards. Only the owner, an admin or the delegated dispatcher may pass `force` (`403` otherwise, whatever `AUTHZ_ENFORCE_OWNERSHIP` says). A forced delete of a session that is already deleted finishes what is left of its subtree. With `AUTHZ_ENFORCE_OWNERSHIP=true` only the tree's owner and admins may do that, and the delegated dispatcher while a live session is left in the tree; everyone else gets `404`, as for any deleted session. Without enforcement the call passes, like any call on a session the portal can't find. |
 | sendMessage | `POST /api/v1/sessions/:sessionId/messages` | sessionId (path), prompt (body), options (body) | Send a prompt (options: { enqueueOnly?, clientMessageIds? }). |
 | sendAnswer | `POST /api/v1/sessions/:sessionId/answers` | sessionId (path), answer (body), options (body) | Answer a pending question. `options.expectedQuestion: { question, iteration? }` binds to the observed `pendingQuestion`; omitted options bind to the current question when enqueued. A stale binding preserves the text as an ordinary message. |
 | sendSessionEvent | `POST /api/v1/sessions/:sessionId/events` | sessionId (path), eventName (body), data (body) | Send a custom event into the session. |
@@ -312,6 +314,12 @@ data or reveals anyone else's grouping.
 | setProviderHold **[admin]** | `PUT /api/v1/management/providers/:name/hold` | name (path), untilUtc?, release? (body) | Hold or release new turns against a provider. |
 | listPausedSessions | `GET /api/v1/providers/paused` | — | Sessions waiting on a provider, limit, allowance, or hold; fleet-wide for admins, own sessions otherwise. |
 
+With `PILOTSWARM_PERSONAL_SECRETS=external`, `createMyProvider` and
+`updateMyProviderCredential` hand a GitHub-type key to the deployment's secret
+store and save only a reference to it; other personal types are refused, and a
+store that fails answers `503` with code `PROVIDER_SECRET_STORE_UNAVAILABLE`.
+See [Personal Keys in an External Secret Store](../developer/reference/configuration.md#personal-keys-in-an-external-secret-store).
+
 Trusted session creation resolves `explicit → user default → cluster default →
 first usable provider/model`, validates capabilities, and writes the exact
 qualified model before orchestration starts. System sessions resolve
@@ -329,6 +337,8 @@ while the selected daily chart offers 14-, 30-, and 90-day history ranges.
 |---|---|---|---|
 | getCurrentUserProfile | `GET /api/v1/me/profile` | — | Profile of the authenticated principal. |
 | setCurrentUserProfileSettings | `PATCH /api/v1/me/profile/settings` | settings (body) | Replace profile settings. |
+| getMyDispatcherDelegation | `GET /api/v1/me/dispatcher-delegation` | — | `{ enabled, dispatcherConfigured }`: whether you let the deployment's dispatcher create and end sessions for you, and whether the deployment has one. |
+| setMyDispatcherDelegation | `PUT /api/v1/me/dispatcher-delegation` | enabled (body, boolean) | Turn your dispatcher delegation on or off; returns the same shape. Off keeps the dispatcher's shares but refuses it on your sessions until you turn it back on. |
 | setCurrentUserGitHubCopilotKey **[legacy]** | `PUT /api/v1/me/github-copilot-key` | key (body) | Legacy rollback API. New users add a private GitHub Copilot runtime provider in Admin Console. |
 
 ### System
@@ -337,6 +347,51 @@ while the selected daily chart offers 14-, 30-, and 90-day history ranges.
 |---|---|---|---|
 | getLogConfig | `GET /api/v1/system/log-config` | — | Log tail availability. |
 | getWorkerCount | `GET /api/v1/system/workers` | — | Live worker count. |
+
+## Dispatcher delegation
+
+A deployment may name a **dispatcher** with `DISPATCHER_SP_OBJECT_ID` (see
+[Configuration](../developer/reference/configuration.md#dispatcher-delegation)):
+an application that signs in with its own token and creates and ends sessions
+for the users who allow it. Unset, none of this applies and `onBehalfOfOwner`
+is refused.
+
+- **Opt-in.** `getMyDispatcherDelegation` / `setMyDispatcherDelegation` read
+  and change the signed-in caller's own choice, never another user's. It is off
+  until the user turns it on.
+- **Creating.** `createSession` and `createSessionForAgent` accept
+  `onBehalfOfOwner: { subject, provider? }` (`provider` defaults to the
+  caller's) from the dispatcher only; any other caller, an admin included, gets
+  `403 FORBIDDEN`, and a user who has not opted in gives
+  `403 DELEGATION_REVOKED`. The named user owns the session; its visibility
+  must be `private` or omitted (`400` otherwise); the dispatcher receives a
+  targeted `write` share, the session's only share.
+- **Ending.** On a session it holds that write share on, while the owner's
+  opt-in is on, the dispatcher may also call `completeSession`,
+  `cancelSession` and `deleteSession` (including `force` and
+  `settleTimeoutMs`). With ownership enforced, a forced delete of a session
+  that is already deleted passes only while a live session is left in its
+  tree, because the share is read through that session; with none left it
+  answers `404`.
+- **Revocation.** While the owner's opt-in is off, the dispatcher gets
+  `403 DELEGATION_REVOKED` on that owner's sessions it could otherwise reach
+  (sessions it never had still answer `404`), those sessions leave its
+  `listSessions` and `listSessionsPage` results, and its WebSocket
+  subscriptions on them end with
+  `error { scope, sessionId, code: "DELEGATION_REVOKED" }` before the next
+  event. The shares are kept: turning the opt-in back on restores the same
+  access.
+- **Audit.** Each delegated creation and end of work records its
+  authorization audit entry (decision `delegated`) before the response. When
+  that write fails, the call fails with `503 AUDIT_UNAVAILABLE` and does not
+  happen (a session just created is deleted again).
+
+With `AUTHZ_ENFORCE_OWNERSHIP=false`, revocation is only audited
+(`would_deny`), like every other session rule in that mode; the rules for
+`onBehalfOfOwner`, `force` and the audited end of work apply in both modes.
+The exception is a forced delete of a session that is already deleted: in
+that mode it passes unchecked, recorded only as `would_deny`, like any call
+on a session the portal can't find.
 
 ## Long polling
 

@@ -165,6 +165,7 @@ The Admin Console takes over the workspace until you press `Esc` to close it. Wh
 | `Tab` | On Shared Providers, switch between providers and system-agent overrides |
 | `j` / `k` | Move the selected personal provider or system agent |
 | `t` | Toggle system-session use for the selected admin-owned personal provider |
+| `g` | On My Providers, turn dispatcher delegation on or off (only on deployments that name a dispatcher; turning it off asks for confirmation) |
 | `o` | Cycle the selected system-agent override; automatic clears it to inherit |
 | `r` | Refresh providers and defaults (or the active Agents/Workers section) |
 | `Esc` | Close the console and return to the workspace |

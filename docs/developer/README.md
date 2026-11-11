@@ -21,6 +21,7 @@ Building a **UI** rather than an app? That's the API section:
 ## Deploying
 
 - [Deploying to AKS](./deploy/aks.md) — the full rollout workflow (+ [topology](./deploy/aks-topology.md))
+- [Windows workers](./deploy/windows-workers.md) — an optional pool of Windows worker VMs, one owner each, with a Dev Drive per session tree, on Azure
 - [Portal Entra app roles](./deploy/entra-app-roles.md) — auth setup for Entra deployments
 - [Knowledge harvester](./deploy/harvester.md) — a `crawler: true` ingestion service
 - [Observability](./deploy/observability.md) — OpenTelemetry/SigNoZ wiring

@@ -113,6 +113,7 @@ kustomizationPath: 'overlays/${edgeMode}-${
 | `globalinfra`, `afd`     | `EDGE_MODE != afd`                                   |
 | `cert-manager`           | `TLS_SOURCE != letsencrypt`                          |
 | `cert-manager-issuers`   | `TLS_SOURCE != letsencrypt`                          |
+| `disk-controller`        | `WIN_WORKERS_ENABLED != true`                        |
 
 Both single-service runs (`deploy.mjs <svc>`) and `deploy.mjs all` honor
 these gates.
@@ -383,6 +384,98 @@ inputs fail loudly at preflight with a single named diagnostic.
   prompts, and the post-scaffold reminder.
 - `pilotswarm-aks-deploy` skill — legacy bash deploy path; surfaces VPN
   cost / time as operator context but does not orchestrate VPN itself.
+
+### Optional: policy-restricted subscriptions
+
+Some subscriptions enforce an Azure Policy set that requires a network
+security perimeter, denies Storage shared keys and denies ARM deployment
+scripts. A default stamp fails there. Set `SFI_COMPLIANT=true` in the
+stamp's env file to deploy a stamp that such a subscription accepts.
+Unset or `false`, nothing changes: the deploy renders no new parameter,
+and every new resource is conditional on the setting.
+
+The profile supports `EDGE_MODE=afd` with `TLS_SOURCE=letsencrypt`, and
+the deploy refuses other combinations before any step, also on a run that
+only publishes manifests:
+
+- `TLS_SOURCE=akv` and `akv-selfsigned` issue and bind the portal
+  certificate with deployment scripts;
+- `EDGE_MODE=private` needs one of those TLS sources;
+- `EDGE_MODE=public` has no stamp VNet to hold the blob private endpoint.
+
+With the stamp's own PostgreSQL server (`DEPLOY_POSTGRES=true`), it also
+requires `PILOTSWARM_USE_MANAGED_IDENTITY=1`. Because Storage refuses
+shared keys, it requires `PILOTSWARM_BLOB_USE_MANAGED_IDENTITY=1` too, the
+default on this deploy path, so the workers and the portal reach Blob with
+their managed identity.
+
+| Area | With `SFI_COMPLIANT=true` |
+|---|---|
+| Network security perimeter | `<prefix>-nsp` with one profile, `stamp`. The stamp Key Vault and the main storage account join it in Enforced mode, with `publicNetworkAccess: SecuredByPerimeter`. Its inbound rules admit the cluster's egress IP as a `/32` together with `PERIMETER_OPERATOR_IP_PREFIXES`, and any managed identity of the stamp subscription. An admitted caller still needs an RBAC role for any data. |
+| Logs | A perimeter resource's logs must stay inside the perimeter, so the perimeter's access logs go to a second workspace, `<prefix>-log-nsp`, which joins the profile in Transition mode and keeps its own network settings. `<prefix>-log` is unchanged. |
+| Storage | `allowSharedKeyAccess: false` and `defaultToOAuthAuthentication: true`. Requests from inside the region reach Storage from private addresses that IP rules can't match, so the account gets a blob private endpoint at `10.20.33.4` in a new `pe-subnet` (`10.20.33.0/26`), and the `privatelink.blob.core.windows.net` zone is linked to the stamp VNet with `resolutionPolicy: NxDomainRedirect`. Flux and the workers use the endpoint. |
+| Cluster egress | The pinned egress IP `<prefix>-hdb-egress` (named when only HorizonDB used it) is the cluster's outbound address in every edge mode. |
+| PostgreSQL | Entra sign-in only, a passwordless `DATABASE_URL`, and a firewall that admits only the cluster's egress IP (`AllowClusterEgress`). The deploy deletes an existing `AllowAllAzureServices` rule, which admits every Azure address. |
+| Subnet NSGs | `aks-subnet`, `appgw-subnet`, `appgw-pls-subnet` and `pe-subnet` get their own NSGs, so network automation that attaches an NSG to a subnet without one adds its rules to these. The App Gateway subnet's NSG allows inbound `GatewayManager` TCP 65200-65535 (priority 200), `AzureLoadBalancer` (210) and internet TCP 80 for the ACME HTTP-01 challenge (220). A base-infra deploy resets these NSGs to their declared rules. |
+| Deployment scripts | None. `deploy/providers/azure/deploy-steps/sfi.mjs` runs as the deploying principal: it probes for the App Gateway before base-infra, and approves Front Door's Private Link connection after the portal module, polling for up to 15 minutes. |
+
+Turning the profile on for an existing stamp changes the cluster's
+outbound address and turns off PostgreSQL password sign-in.
+
+**The deployer's path into the perimeter.** Management-plane calls (ARM
+deployments, AKS credentials, `kubectl`) are not affected. The steps that
+use the vault's or Storage's data plane are: `seed-secrets` (Key Vault),
+`manifests` (the Blob upload) and the Key Vault version lookup for a
+bring-your-own database. They need a source that the perimeter admits:
+
+- a managed identity of the stamp subscription, for example on a
+  self-hosted runner, which the subscription rule admits. A user or a
+  service principal, such as a GitHub OIDC login, is not a managed
+  identity;
+- an operator address in `PERIMETER_OPERATOR_IP_PREFIXES`
+  (comma-separated IPv4 addresses or CIDR prefixes). Add only an address
+  that the perimeter actually sees as the source: a network that leaves
+  through a proxy or a tunnel may present one you don't know;
+- a runner inside the stamp VNet. It reaches Blob through the private
+  endpoint, and Key Vault from its egress IP, which the perimeter must
+  admit.
+
+**Image builds.** A device that can't reach the public npm registry from
+inside a Docker build sets `NPM_REGISTRY` to a registry it can reach. The
+worker and portal Dockerfiles take it as a build argument.
+
+### Optional: Windows worker pool
+
+`WIN_WORKERS_ENABLED=true` adds a pool of Windows worker VMs beside the
+cluster, for codebases that build only on Windows: a Flexible scale set with a
+standby pool, outside AKS, whose VMs each serve one owner, a Dev Drive per
+session tree, and the `disk-controller` service, which sizes the pool, moves
+the drives and releases each owner's model token only to that owner's VMs.
+Unset or `false`, nothing changes: the rendered parameters and staged
+manifests are those of a stamp without it, and `disk-controller` is skipped.
+
+The pool needs `EDGE_MODE=afd` or `private`, the stamp's own PostgreSQL server
+with `PILOTSWARM_USE_MANAGED_IDENTITY=1`, the portal's Entra app set up with
+`Setup-PortalAuth.ps1 -WorkerRoles`, and at least one receiver in
+`WIN_WORKER_ALERT_EMAILS`; the deploy refuses anything else before any step.
+So the **Deploy Azure stamp** workflow, whose stamp is `EDGE_MODE=public` with
+an external database, can't deploy a pool. The first deploy creates the
+gallery, the network, the stores and the identities but no VM; a second, with
+`WIN_WORKER_IMAGE_VERSION` set, creates the scale set.
+
+With the pool, the portal's rollout step also runs the database role Job,
+which applies the migrations and grants the workers' database group. With the
+coordination host (`WIN_WORKER_COORDINATION_HOST=true`), `deploy all` deploys
+`worker` just after `portal` instead of before it, so the Job has run before
+the host's pods sign in; deploying the services one at a time, deploy `portal`
+before `worker` the first time you turn the coordination host on. Turning it
+off takes several single-service deploys in a fixed order, never one
+`deploy all`: see
+[Turning the coordination host off](./windows-workers.md#turning-the-coordination-host-off).
+
+[Windows workers](./windows-workers.md) is the manual: the pieces and how they
+fit together, the step-by-step deployment, upgrades, the security model and
+every setting.
 
 ### Model Providers (LLM catalog)
 
@@ -684,7 +777,11 @@ same deployment slot without changing the portal shell contract.
 > portal engine is deny-by-default for any signed-in principal without
 > a role claim. Full operator docs:
 > `deploy/scripts/auth/README.md`. Agent-driven invocation:
-> `pilotswarm-portal-app-reg` skill.
+> `pilotswarm-portal-app-reg` skill. A further opt-in switch,
+> `-WorkerRoles`, adds app roles for application identities that call
+> the deployment's own services (`worker`, `deployer`, `coordinator`) and
+> switches the app to v2.0 access tokens; see
+> [Portal Entra app roles](./entra-app-roles.md#roles-for-application-identities).
 
 Use the canonical `PORTAL_AUTH_*` / `PORTAL_AUTHZ_*` keys only. The portal no
 longer reads legacy `ENTRA_*` aliases.

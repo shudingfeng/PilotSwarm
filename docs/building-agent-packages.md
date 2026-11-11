@@ -272,6 +272,10 @@ export default {
   the server source in `mcp-servers/` and reference it with a relative path.
 - `${VAR}` placeholders expand from the worker's environment at load time,
   never at validation.
+- A stdio server on a worker with `PILOTSWARM_SCRUB_CLI_ENV=1` inherits only
+  the allowlisted environment ([Copilot CLI Environment](developer/reference/configuration.md#copilot-cli-environment)),
+  so pass any other setting it needs in its `env` block. A variable named in
+  `PILOTSWARM_CLI_SECRET_ENV_VARS` never reaches it.
 - Server JS in `mcp-servers/` is syntax-checked like the worker module, and
   the same no-bare-imports rule applies.
 - Named agents opt in by listing the server name under `mcpServers:`, and an
