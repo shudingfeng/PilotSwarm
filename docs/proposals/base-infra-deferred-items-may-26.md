@@ -174,6 +174,16 @@ The active base-infrastructure proposal starts with fleet-wide discovery and
 messaging. That keeps the first implementation simple and makes it easier to
 observe real coordination patterns before locking down policy.
 
+Phase 2's owner policy is available as opt-in enforcement: with
+`PILOTSWARM_SESSION_MESSAGE_SCOPE=owner` on the workers, `send_session_message`
+and `reply_session_message` deliver only between sessions with the same user
+owner, or between system sessions, and return `policy_denied` otherwise. With
+the same setting the portal lets only admins write or delete the shared
+`skills/`, `asks/` and `config/facts-manager/` facts. The default `fleet`
+scope is unchanged and does no extra work, so it logs no would-be denials.
+`list_sessions` filtering and group, spawn-tree and agent-role policies remain
+open. See [Configuration](../developer/reference/configuration.md#session-message-scope).
+
 ### Proposed behavior
 
 Future policy should be explicit and explainable. Possible default scopes after
