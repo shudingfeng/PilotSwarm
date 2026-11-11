@@ -19,6 +19,7 @@ export async function buildImage({
   imageTag,
   stagingDir: stage,
   npmRegistry,
+  buildArgs = {},
 }) {
   const info = SERVICE_IMAGE_INFO[service];
   if (!info) {
@@ -62,6 +63,7 @@ export async function buildImage({
     localTag,
     dockerfileAbs,
     npmRegistry,
+    buildArgs,
   });
   await runForeground("docker", invocation.args, {
     env: { ...process.env, ...invocation.envOverrides },
@@ -74,7 +76,10 @@ export async function buildImage({
   return outPath;
 }
 
-export function dockerBuildInvocation({ localTag, dockerfileAbs, npmRegistry }) {
+// `buildArgs` are plain NAME=value build arguments, such as the worker's
+// COPILOT_PKG_CACHE_HOME with the coordination host (lib/coordination-host.mjs);
+// none holds a secret.
+export function dockerBuildInvocation({ localTag, dockerfileAbs, npmRegistry, buildArgs = {} }) {
   const args = [
     "buildx",
     "build",
@@ -86,6 +91,9 @@ export function dockerBuildInvocation({ localTag, dockerfileAbs, npmRegistry }) 
     "-f",
     dockerfileAbs,
   ];
+  for (const [name, value] of Object.entries(buildArgs)) {
+    args.push("--build-arg", `${name}=${value}`);
+  }
   const registry = npmRegistry?.trim();
   if (registry) {
     args.push("--build-arg", "NPM_REGISTRY");

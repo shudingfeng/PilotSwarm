@@ -1,0 +1,45 @@
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+# The coordination host (WIN_WORKER_COORDINATION_HOST=true, with the Windows
+# worker pool): the Linux worker runs the orchestrations, durable timers,
+# system agents, title generator and every turn's bookkeeping, and sends every
+# capacity request to the disk controller, while the Windows workers run only
+# their owner's turns. It runs no user turn
+# (deploy/providers/azure/linux-worker/README.md). The deploy tool adds this
+# component to the staged worker overlay and sets the replica count
+# (deploy/scripts/lib/coordination-host.mjs), and stages the worker with the
+# host's own identity.
+#
+#   deployment-patch.yaml          the CLI home's placeholders and settings, the
+#                                  host's settings, the controller's CA, 4 GiB,
+#                                  spread across nodes, no Key Vault secret
+#   pod-disruption-budget.yaml     one replica stays up through a node drain
+#   network-policy.yaml            egress: DNS, the controller's port 3005,
+#                                  Blob, and 443 and 5432 outside the VNet
+#   coordination-host.properties   the stamp's values, rewritten by the deploy
+#                                  (an env file; the repository ignores *.env)
+#
+# The pod-template annotation pilotswarm.dev/spc-keys-hash stays:
+# worker-replacements still writes it, and a replacement fails when its target
+# field is missing.
+
+resources:
+  - pod-disruption-budget.yaml
+  - network-policy.yaml
+
+patches:
+  - path: deployment-patch.yaml
+  # The database URL is passwordless, and Blob and Foundry take the host's
+  # identity, so it loads no secret from the stamp vault.
+  - patch: |-
+      apiVersion: secrets-store.csi.x-k8s.io/v1
+      kind: SecretProviderClass
+      metadata:
+        name: copilot-worker-secrets
+      $patch: delete
+
+configMapGenerator:
+  - name: coordination-host-env
+    envs:
+      - coordination-host.properties

@@ -224,6 +224,7 @@ for (const [edge, tls, overlay] of [
     const policy = {
       AUTHZ_ENFORCE_OWNERSHIP: "true", AUTHZ_ADMIN_SCOPE: "cluster",
       SESSIONS_DEFAULT_VISIBILITY: "private", SESSIONS_SYSTEM_VISIBILITY: "admin",
+      DISPATCHER_SP_OBJECT_ID: "00000000-0000-4000-8000-0000000000d1",
     };
     const root = stageManifests({ service: "portal", envName: "testenv", stagingDir,
       env: makePortalEnv({ EDGE_MODE: edge, TLS_SOURCE: tls, ...policy }) });
@@ -232,7 +233,11 @@ for (const [edge, tls, overlay] of [
     const legacy = stageManifests({ service: "portal", envName: "testenv", stagingDir,
       env: makePortalEnv({ EDGE_MODE: edge, TLS_SOURCE: tls }) });
     const legacyText = readFileSync(join(legacy, "overlays", overlay, ".env"), "utf8");
-    for (const key of Object.keys(policy)) assert.match(legacyText, new RegExp(`^${key}=__PS_UNSET__$`, "m"));
+    for (const key of Object.keys(policy)) {
+      // Unset, the dispatcher's ID stays out: the overlay is as before delegation existed.
+      if (key === "DISPATCHER_SP_OBJECT_ID") assert.doesNotMatch(legacyText, new RegExp(`^${key}=`, "m"));
+      else assert.match(legacyText, new RegExp(`^${key}=__PS_UNSET__$`, "m"));
+    }
   });
 }
 

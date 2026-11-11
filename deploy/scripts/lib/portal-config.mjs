@@ -49,4 +49,7 @@ export const PORTAL_CONFIG_KEYS = [
   { env: "SESSIONS_DEFAULT_VISIBILITY" },
   // Whether non-admin users may read system sessions.
   { env: "SESSIONS_SYSTEM_VISIBILITY" },
+  // Object ID of the deployment's dispatcher, which users may let create and
+  // end sessions for them. Unset turns delegation off.
+  { env: "DISPATCHER_SP_OBJECT_ID" },
 ];

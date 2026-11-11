@@ -89,6 +89,38 @@ COPY packages/horizon-store/migrations/ ./packages/horizon-store/migrations/
 # one-time compatibility seed.
 COPY deploy/config/model_providers.ghcp.json ./.model_providers.json
 
+# The coordination host's extension module, without its tests: the capacity
+# requester and admission hook of a Linux worker beside a pool of owner-only
+# Windows workers. Nothing loads it unless PILOTSWARM_EXTENSION_MODULES names
+# it; see deploy/providers/azure/linux-worker/README.md.
+COPY deploy/providers/azure/linux-worker/*.mjs ./deploy/providers/azure/linux-worker/
+
+# Optional: the Copilot CLI program unpacked once, as root, into a folder the
+# worker's account can only read. With PILOTSWARM_PERSONAL_SECRETS=external a
+# worker starts only with such a copy, named by COPILOT_PKG_CACHE_HOME
+# (docs/developer/reference/configuration.md). A build that passes
+# COPILOT_PKG_CACHE_HOME, an absolute path in a folder the node user cannot
+# write, such as /app/copilot-pkg, runs the program with that setting, as its
+# first start would, checks that the copy holds the marker and the files the
+# program's loader checks, and leaves the copy owned by root and read-only.
+# Set the same COPILOT_PKG_CACHE_HOME on the worker. Without the argument
+# nothing is unpacked, and the program unpacks itself into the node user's
+# ~/.cache at its first start, as before.
+ARG COPILOT_PKG_CACHE_HOME
+RUN set -eu; if [ -n "${COPILOT_PKG_CACHE_HOME:-}" ]; then \
+        case "$COPILOT_PKG_CACHE_HOME" in /*) ;; *) echo "COPILOT_PKG_CACHE_HOME must be an absolute path" >&2; exit 1 ;; esac; \
+        platform="linux-$(node -p process.arch)"; \
+        program="$(node -p 'require("node:module").createRequire(require.resolve("@github/copilot/package.json")).resolve(`@github/copilot-${process.argv[1]}`)' "$platform")"; \
+        version="$(node -p 'require(process.argv[1]).version' "$(dirname "$program")/package.json")"; \
+        COPILOT_PKG_CACHE_HOME="$COPILOT_PKG_CACHE_HOME" "$program" --no-auto-update --version; \
+        copy="$COPILOT_PKG_CACHE_HOME/pkg/$platform/$version"; \
+        for file in .extraction-complete index.js app.js "prebuilds/$platform/runtime.node"; do \
+            test -f "$copy/$file" || { echo "the Copilot CLI program's copy has no $copy/$file" >&2; exit 1; }; \
+        done; \
+        chown -R root:root "$COPILOT_PKG_CACHE_HOME"; \
+        chmod -R a+rX,a-w "$COPILOT_PKG_CACHE_HOME"; \
+    fi
+
 # Run as the built-in node user (non-root)
 USER node
 

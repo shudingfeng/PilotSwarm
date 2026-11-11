@@ -1,0 +1,32 @@
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+# EDGE_MODE=afd with TLS_SOURCE=letsencrypt. The portal's certificate is the
+# cert-manager Secret `pilotswarm-portal-tls-le` that the portal Ingress asks
+# for, and AGIC imports it into the listener the two Ingresses share. This
+# Ingress names the same Secret and removes the Key Vault certificate
+# annotation that edge-appgw adds, exactly as the portal's tls-letsencrypt
+# component does. It adds no cert-manager.io/cluster-issuer annotation, so the
+# portal's certificate is not issued twice. JSON6902 `op: remove` is the only
+# reliable removal: a strategic-merge `null` gets stringified by kustomize.
+
+patches:
+  - target:
+      kind: Ingress
+      name: pilotswarm-disk-controller-dispatcher
+    patch: |-
+      - op: remove
+        path: /metadata/annotations/appgw.ingress.kubernetes.io~1appgw-ssl-certificate
+  - target:
+      kind: Ingress
+      name: pilotswarm-disk-controller-dispatcher
+    patch: |-
+      apiVersion: networking.k8s.io/v1
+      kind: Ingress
+      metadata:
+        name: pilotswarm-disk-controller-dispatcher
+      spec:
+        tls:
+          - secretName: pilotswarm-portal-tls-le
+            hosts:
+              - __PORTAL_HOSTNAME__

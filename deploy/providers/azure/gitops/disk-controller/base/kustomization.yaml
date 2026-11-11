@@ -1,0 +1,31 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# The disk controller and credential broker for the Windows worker pool
+# (deploy/providers/azure/disk-controller/README.md). The deploy tool's
+# disk-controller service publishes this tree, only with WIN_WORKERS_ENABLED=true.
+#
+# Like the portal's base, this base is inert: no env-specific values, no
+# configMapGenerator and no replacements. Each overlay generates the
+# `disk-controller-env` ConfigMap from its `.env`; the controller reads its
+# settings from it, and the components fill the placeholders below from it.
+#
+# It runs in the portal's namespace: its Ingress joins the portal's host and
+# can name the portal's TLS Secret only from there.
+#
+#   pilotswarm-disk-controller               internal load balancer, 3003:
+#                                            worker and admin routes
+#   pilotswarm-disk-controller-dispatcher    ClusterIP, 3004: dispatcher routes,
+#                                            behind the Ingress of that name
+#   pilotswarm-disk-controller-coordination  ClusterIP, 3005: capacity requests
+#                                            from the coordination host
+
+resources:
+  - service-account.yaml
+  - secret-provider-class.yaml
+  - deployment.yaml
+  - service-worker.yaml
+  - service-dispatcher.yaml
+  - service-coordination.yaml
+  - network-policy.yaml
+  - ingress.yaml

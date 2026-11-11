@@ -1,0 +1,41 @@
+# Who may reach the controller pod; AKS enforces NetworkPolicy here with Calico.
+# Several policies select the pod, and Kubernetes admits what any of them
+# admits; the edge component adds the dispatcher port's policy.
+#
+#   3003 (worker, admin)  the worker subnet only, a second layer behind the load
+#                         balancer's source ranges. A port-forwarded admin call
+#                         enters through the kubelet, which no policy applies
+#                         to; the admin routes still need an admin or deployer
+#                         token.
+#   3005 (coordination)   the coordination host's pods: the worker Deployment in
+#                         this namespace, which the coordination host's
+#                         component turns into the coordination host.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: pilotswarm-disk-controller
+  labels:
+    app.kubernetes.io/name: pilotswarm
+    app.kubernetes.io/component: disk-controller
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: pilotswarm
+      app.kubernetes.io/component: disk-controller
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 3003
+      from:
+        - ipBlock:
+            cidr: 10.20.32.0/24
+    - ports:
+        - protocol: TCP
+          port: 3005
+      from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: pilotswarm
+              app.kubernetes.io/component: worker

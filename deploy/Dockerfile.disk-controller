@@ -1,0 +1,42 @@
+# Disk controller image: the disk controller and credential broker for the
+# Windows worker pool on Azure (deploy/providers/azure/disk-controller/README.md).
+# deploy.mjs builds and deploys it only with WIN_WORKERS_ENABLED=true.
+#
+# Build with: docker buildx build --platform linux/amd64 -f deploy/Dockerfile.disk-controller .
+#
+# The controller is a package of its own, with its own lockfile: it needs the
+# Azure SDKs and `jose`, and none of the workspaces. The image carries its
+# server and modules only: not its tests, and not the TLS deploy step
+# (tls.mjs), which runs on the deploying machine.
+FROM node:24.22.1-trixie-slim AS build
+
+WORKDIR /app
+
+# NPM_REGISTRY lets a build that cannot reach registry.npmjs.org (corporate
+# networks routinely block it) install from a mirror instead. It defaults to
+# the public registry, so an unset build arg installs from there. npm's
+# replace-registry-host (default `npmjs`) rewrites the lockfile's
+# registry.npmjs.org `resolved` URLs onto the configured registry, so the
+# lockfile stays authoritative and the image stays reproducible.
+ARG NPM_REGISTRY=https://registry.npmjs.org/
+ENV npm_config_registry=${NPM_REGISTRY}
+COPY deploy/providers/azure/disk-controller/package.json deploy/providers/azure/disk-controller/package-lock.json ./
+RUN npm ci --omit=dev
+
+FROM node:24.22.1-trixie-slim
+
+WORKDIR /app
+
+COPY --from=build /app/node_modules/ ./node_modules/
+COPY deploy/providers/azure/disk-controller/package.json ./
+COPY deploy/providers/azure/disk-controller/server.mjs ./
+COPY deploy/providers/azure/disk-controller/lib/ ./lib/
+
+# 3003 worker and admin routes, 3004 dispatcher routes and health, 3005
+# coordination; all HTTPS with the certificate the deployment mounts.
+EXPOSE 3003 3004 3005
+
+# Run as non-root
+USER node
+
+ENTRYPOINT ["node", "server.mjs"]

@@ -86,6 +86,9 @@ param privateLinkConfigurationName string
 @description('UAMI resource id used by the approve-private-endpoint deployment script. Must have Network Contributor on the AppGW.')
 param approvalManagedIdentityId string
 
+@description('SFI_COMPLIANT profile: skip the Private Link approval deployment script, which needs Storage shared keys. deploy/providers/azure/deploy-steps/sfi.mjs approves the connection after this module instead.')
+param sfiCompliant bool = false
+
 // -----------------------------------------------------------------------------
 // GlobalInfra references
 // -----------------------------------------------------------------------------
@@ -372,10 +375,13 @@ module afdOrigin '../../common/bicep/frontdoor-origin-route.bicep' = if (edgeMod
 // -----------------------------------------------------------------------------
 // Auto-approve pending PLS connection on the AppGW side. Only meaningful when
 // AFD owns the Private Endpoint (afd mode). In private mode there's no
-// no AFD-side PE to approve.
+// no AFD-side PE to approve. With SFI_COMPLIANT the deploy step approves it
+// instead (a deployment script needs Storage shared keys).
 // -----------------------------------------------------------------------------
 
-module plApprove '../../common/bicep/approve-private-endpoint.bicep' = if (edgeMode == 'afd') {
+var approvesPrivateEndpointHere = edgeMode == 'afd' && !sfiCompliant
+
+module plApprove '../../common/bicep/approve-private-endpoint.bicep' = if (approvesPrivateEndpointHere) {
   name: 'portal-approve-pe-${dTime}'
   params: {
     location: location
@@ -412,9 +418,9 @@ output PrivateLinkServiceId string = privateLinkServiceId
 #disable-next-line BCP318
 output RouteName string = edgeMode == 'afd' ? afdOrigin.outputs.routeName : ''
 
-@description('Count of PLS connections auto-approved in this deployment. Zero when edgeMode is not afd.')
+@description('Count of PLS connections auto-approved in this deployment. Zero when edgeMode is not afd, or with SFI_COMPLIANT, where the deploy step approves. Reads the approval module only under its own condition: reading a skipped module fails the deployment with DeploymentNotFound.')
 #disable-next-line BCP318
-output ApprovedPrivateEndpointCount int = edgeMode == 'afd' ? plApprove.outputs.approvedCount : 0
+output ApprovedPrivateEndpointCount int = approvesPrivateEndpointHere ? plApprove.outputs.approvedCount : 0
 
 @description('Portal manifest container name (consumed by OSS deploy script as DEPLOYMENT_STORAGE_CONTAINER_NAME via FR-022 alias).')
 output manifestsContainerName string = portalManifestsContainer.name

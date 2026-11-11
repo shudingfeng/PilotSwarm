@@ -158,9 +158,9 @@ test("old local env accepts a process override for newly introduced database key
   }
 });
 
-test("an old local env without the node-pool and workspaces keys gets their defaults", () => {
+test("an old local env without the node-pool, workspaces and SFI_COMPLIANT keys gets their defaults", () => {
   cleanup();
-  const keys = ["WORKSPACES_ENABLED", "USER_POOL_MIN_COUNT"];
+  const keys = ["WORKSPACES_ENABLED", "USER_POOL_MIN_COUNT", "SFI_COMPLIANT"];
   const before = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
   try {
     for (const key of keys) delete process.env[key];
@@ -169,6 +169,7 @@ test("an old local env without the node-pool and workspaces keys gets their defa
     const { env } = loadEnv(TEST_NAME);
     assert.equal(env.WORKSPACES_ENABLED, "false");
     assert.equal(env.USER_POOL_MIN_COUNT, "1");
+    assert.equal(env.SFI_COMPLIANT, "false");
     // A value in the file wins over the default.
     writeFileSync(TEST_FILE, "RESOURCE_PREFIX=pststenv\nWORKSPACES_ENABLED=true\nUSER_POOL_MIN_COUNT=2\n");
     const loaded = loadEnv(TEST_NAME).env;

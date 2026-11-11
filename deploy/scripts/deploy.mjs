@@ -11,7 +11,6 @@
 // step. Real stages (build/push/bicep/manifests/rollout) are wired in later phases.
 
 import {
-  loadEnv,
   log,
   assertCli,
   assertSubscription,
@@ -24,16 +23,26 @@ import { resolveSteps, defaultPipelineFor } from "./lib/stages.mjs";
 import { buildImage } from "./lib/build-image.mjs";
 import { pushImage, refreshAzureOidcLogin } from "./lib/push-image.mjs";
 import { deployBicep } from "./lib/deploy-bicep.mjs";
-import { loadCache as loadBicepOutputsCache } from "./lib/bicep-outputs-cache.mjs";
 import { composeDerivedEnv } from "./lib/compose-env.mjs";
+import { loadStampEnv } from "./lib/stamp-env.mjs";
 import { stageManifests } from "./lib/stage-manifests.mjs";
 import { publishManifests } from "./lib/publish-manifests.mjs";
 import { waitRollout } from "./lib/wait-rollout.mjs";
 import { seedSecrets } from "./lib/seed-secrets.mjs";
-import { SERVICE_IMAGE_INFO, ALL_SEQUENCE, ALL_MODE_MODULES } from "./lib/service-info.mjs";
+import { SERVICE_IMAGE_INFO, SERVICE_TO_MODULES, ALL_SEQUENCE, ALL_MODE_MODULES } from "./lib/service-info.mjs";
 import { validateRequiredEnv, applyStubKeys } from "./lib/overlay-contracts.mjs";
 import { resolveDatabaseSecretVersions } from "./lib/database-secrets.mjs";
 import { WORKSPACES_SERVICE, workspacesEnabled } from "./lib/workspaces.mjs";
+import { sfiCompliant, winWorkersEnabled, DISK_CONTROLLER_SERVICE } from "./lib/aks-env.mjs";
+import { coordinationHostSequence, workerImageBuildArgs } from "./lib/coordination-host.mjs";
+import { beforeBicep as sfiBeforeBicep, afterBicep as sfiAfterBicep } from "../providers/azure/deploy-steps/sfi.mjs";
+import {
+  beforeBicep as winWorkersBeforeBicep,
+  afterBicep as winWorkersAfterBicep,
+  beforeManifests as winWorkersBeforeManifests,
+  beforeWorkerManifests as winWorkersBeforeWorkerManifests,
+} from "../providers/azure/deploy-steps/win-workers.mjs";
+import { runStagedDbRoleJob } from "../providers/azure/deploy-steps/db-role-job.mjs";
 
 // ───────────────────────── Arg parsing ─────────────────────────
 
@@ -90,7 +99,7 @@ function parseArgs(argv) {
   if (positional.length < 2) {
     throw new Error(
       "Usage: npm run deploy -- <service> <env> [flags]\n" +
-        "  <service>    worker | repo-cache | portal | baseinfra | globalinfra | horizondb | pls-anchor | cert-manager | cert-manager-issuers | all\n" +
+        "  <service>    worker | repo-cache | portal | disk-controller | baseinfra | globalinfra | horizondb | pls-anchor | cert-manager | cert-manager-issuers | all\n" +
         "  <env>        local env name created with `npm run deploy:new-env`\n" +
         "Flags: --steps, --region, --image-tag, --clean, --force, --help",
     );
@@ -110,13 +119,14 @@ function printHelp() {
       "Usage:",
       "  npm run deploy -- <service> <env> [flags]",
       "",
-      "Services:  worker | repo-cache | portal | baseinfra | globalinfra | horizondb | pls-anchor | cert-manager | cert-manager-issuers | all",
+      "Services:  worker | repo-cache | portal | disk-controller | baseinfra | globalinfra | horizondb | pls-anchor | cert-manager | cert-manager-issuers | all",
       "           ('all' runs the canonical end-to-end sequence:",
-      "            globalinfra → baseinfra → pls-anchor → cert-manager → cert-manager-issuers → worker → repo-cache → portal,",
+      "            globalinfra → baseinfra → pls-anchor → cert-manager → cert-manager-issuers → worker → repo-cache → portal → disk-controller,",
       "            applying --steps to each as appropriate. pls-anchor is skipped",
       "            on the EDGE_MODE=private path; cert-manager services are skipped",
       "            on the akv (enterprise) TLS_SOURCE path; repo-cache is skipped",
-      "            unless WORKSPACES_ENABLED=true.)",
+      "            unless WORKSPACES_ENABLED=true; disk-controller is skipped",
+      "            unless WIN_WORKERS_ENABLED=true.)",
       "Envs:      a local env name created with `npm run deploy:new-env`",
       "",
       "Flags:",
@@ -176,6 +186,9 @@ async function runStage(name, ctx) {
         imageTag: ctx.imageTag,
         stagingDir: ctx.stagingDir,
         npmRegistry: ctx.env.NPM_REGISTRY,
+        // The coordination host's worker image holds the Copilot CLI
+        // program's unpacked copy, which the worker can only read.
+        buildArgs: workerImageBuildArgs(ctx.service, ctx.env),
       });
       return;
     case "push":
@@ -192,7 +205,17 @@ async function runStage(name, ctx) {
         stagingDir: ctx.stagingDir,
       });
       return;
-    case "bicep":
+    case "bicep": {
+      // SFI_COMPLIANT=true: the Azure provider's deploy step does the work of
+      // the Bicep deployment scripts, which that profile's subscriptions deny.
+      // WIN_WORKERS_ENABLED=true: the Windows worker deploy step prepares and
+      // finishes what Bicep can't do for the pool (custom role lookups, the
+      // VMs' administrator password, the scale set model, stale grants).
+      const sfi = sfiCompliant(ctx.env);
+      const winWorkers = winWorkersEnabled(ctx.env);
+      const modules = ctx.moduleListOverride ?? SERVICE_TO_MODULES[ctx.service] ?? [];
+      if (sfi) sfiBeforeBicep({ env: ctx.env, modules });
+      const winWorkerStep = winWorkers ? winWorkersBeforeBicep({ env: ctx.env, modules }) : null;
       await deployBicep({
         service: ctx.service,
         envName: ctx.envName,
@@ -202,7 +225,10 @@ async function runStage(name, ctx) {
         moduleListOverride: ctx.moduleListOverride,
         force: ctx.force,
         forceModules: ctx.forceModules,
+        secureParameters: winWorkerStep?.secureParameters,
       });
+      if (sfi) await sfiAfterBicep({ env: ctx.env, modules });
+      if (winWorkers) await winWorkersAfterBicep({ env: ctx.env, modules });
       // Re-run composition: a fresh `all` run starts with an empty outputs
       // cache, so the startup pass at line ~258 had nothing to compose.
       // Now that bicep merged BaseInfra outputs (POSTGRES_FQDN /
@@ -211,6 +237,7 @@ async function runStage(name, ctx) {
       // subsequent manifests stage finds them.
       composeDerivedEnv(ctx.env);
       return;
+    }
     case "seed-secrets":
       await seedSecrets({
         service: ctx.service,
@@ -221,6 +248,20 @@ async function runStage(name, ctx) {
     case "manifests": {
       if (ctx.service === "worker" || ctx.service === "portal") {
         resolveDatabaseSecretVersions(ctx.env);
+      }
+      // The controller's TLS certificate, and its CA in every place that must
+      // trust it, before its manifests reach Flux.
+      if (ctx.service === DISK_CONTROLLER_SERVICE) {
+        await refreshAzureOidcLogin(ctx.env, "the Windows worker deploy step");
+        winWorkersBeforeManifests({ env: ctx.env, stagingDir: ctx.stagingDir });
+      }
+      // With the Windows worker pool, the worker signs in as the coordination
+      // host's own identity or runs no pod: the portal identity's credential
+      // for the worker's service account goes first, and with the host the
+      // controller's CA is in the cluster before the host's pods.
+      if (ctx.service === "worker" && winWorkersEnabled(ctx.env)) {
+        await refreshAzureOidcLogin(ctx.env, "the Windows worker deploy step");
+        winWorkersBeforeWorkerManifests({ env: ctx.env, stagingDir: ctx.stagingDir });
       }
       // Compose the IMAGE env var (the only image-related key consumed by
       // the overlay `.env`/replacements chain). Derived from build/push
@@ -258,6 +299,13 @@ async function runStage(name, ctx) {
         imageTag: ctx.imageTag,
         stagingDir: ctx.stagingDir,
       });
+      // WIN_WORKERS_ENABLED=true: once the portal runs, the database role Job
+      // (its image, service account and identity) migrates and grants the
+      // Windows workers' group, before the disk controller starts any VM and,
+      // with the coordination host, before `all` deploys the worker.
+      if (ctx.service === "portal" && winWorkersEnabled(ctx.env)) {
+        await runStagedDbRoleJob({ env: ctx.env, stagingDir: ctx.stagingDir });
+      }
       return;
     default:
       throw new Error(`Unknown stage: ${name}`);
@@ -297,17 +345,13 @@ async function main() {
 
   // 2) Load env (FR-004) — single shared map so Bicep outputs cascade across
   // services in `all` mode (e.g. BaseInfra → Worker/Portal).
-  const { env, sources } = loadEnv(envName);
-  if (region) env.LOCATION = region; // CLI override
-  log("info", `Loaded env: ${sources.local}`);
-
+  //
   // 3a) Load any cached Bicep outputs from previous runs in this env. This lets
   // single-service runs (e.g. `worker mytestenv`) re-use upstream
   // GlobalInfra/BaseInfra outputs without re-deploying the whole chain
   // in-process. Cached values do NOT override env-file or CLI values.
   // `--clean` (or deleting deploy/.tmp/<env>/bicep-outputs.cache.json) busts it.
-  loadBicepOutputsCache(envName, env);
-
+  //
   // 3b) Compose derived env values (DATABASE_URL, AZURE_STORAGE_ACCOUNT_URL,
   // PILOTSWARM_CMS_FACTS_DATABASE_URL, PILOTSWARM_DB_AAD_USER) from
   // BaseInfra Bicep outputs already in env. This handles single-service
@@ -315,7 +359,9 @@ async function main() {
   // runs the cache starts empty; composeDerivedEnv is invoked again after
   // each successful bicep stage in runStage() so manifests-stage env
   // substitution sees the composed values.
-  composeDerivedEnv(env);
+  //
+  // lib/stamp-env.mjs does all three, for the operator commands too.
+  const env = loadStampEnv(envName, { region });
 
   // 4) Preflight CLIs (EC-1)
   assertCli("az", "https://aka.ms/azcli (winget install Microsoft.AzureCLI / brew install azure-cli)");
@@ -407,6 +453,12 @@ async function main() {
   // The repo pod exists only for session workspaces (lib/workspaces.mjs).
   if (service === WORKSPACES_SERVICE && !workspacesEnabled(env)) {
     log("ok", `WORKSPACES_ENABLED=false — '${WORKSPACES_SERVICE}' is not deployed for this stamp.`);
+    return;
+  }
+
+  // The disk controller exists only for the Windows worker pool.
+  if (service === DISK_CONTROLLER_SERVICE && !winWorkersEnabled(env)) {
+    log("ok", `WIN_WORKERS_ENABLED=false — '${DISK_CONTROLLER_SERVICE}' is not deployed for this stamp.`);
     return;
   }
 
@@ -597,7 +649,9 @@ async function runAll({ envName, env, steps, imageTag, clean, force, forceModule
   // + cert-manager-issuers are dropped on the akv (enterprise) path for the same
   // reason — those services exist only to serve the OSS Let's Encrypt path.
   const tlsSource = (env.TLS_SOURCE || "letsencrypt").toLowerCase();
-  const sequence = ALL_SEQUENCE.filter(
+  // With the coordination host, the worker follows the portal, whose rollout
+  // runs the database role Job the host's identity needs (coordination-host.mjs).
+  const sequence = coordinationHostSequence(ALL_SEQUENCE.filter(
     (svc) => !(svc === "global-infra" && edgeMode !== "afd"),
   ).filter(
     (svc) => !(svc === "pls-anchor" && edgeMode !== "afd"),
@@ -606,9 +660,11 @@ async function runAll({ envName, env, steps, imageTag, clean, force, forceModule
   ).filter(
     (svc) => !(svc === WORKSPACES_SERVICE && !workspacesEnabled(env)),
   ).filter(
+    (svc) => !(svc === DISK_CONTROLLER_SERVICE && !winWorkersEnabled(env)),
+  ).filter(
     (svc) =>
       !((svc === "cert-manager" || svc === "cert-manager-issuers") && tlsSource !== "letsencrypt"),
-  );
+  ), env);
   log("info", `=== Bring-up sequence: ${sequence.join(" → ")} ===`);
   for (const svc of sequence) {
     await runOneService({

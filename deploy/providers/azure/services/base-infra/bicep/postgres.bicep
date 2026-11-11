@@ -4,7 +4,9 @@
 // No schema creation happens here. The worker runs its own migrations at
 // startup (FR-012). This module only provisions the server + one database
 // and wires an "allow Azure services" firewall rule so AKS pods can reach
-// it over the public endpoint.
+// it over the public endpoint. Given `clusterEgressIpAddress` (SFI_COMPLIANT
+// profile or the Windows worker pool), the firewall admits only that address
+// instead, plus the worker subnet's NAT gateway address with the pool.
 // ==============================================================================
 
 @description('Azure region.')
@@ -19,8 +21,14 @@ param databaseName string = 'pilotswarm'
 @description('Admin login name.')
 param administratorLogin string = 'pilotswarm'
 
-@description('Use Microsoft Entra authentication exclusively. Required for the public, AKS-managed-network topology. The CSI workload identity is assigned as PostgreSQL administrator.')
+@description('Use Microsoft Entra authentication exclusively. Required for the public, AKS-managed-network topology and the SFI_COMPLIANT profile. The CSI workload identity is assigned as PostgreSQL administrator.')
 param aadOnly bool = false
+
+@description('The cluster\'s pinned egress IPv4 address (SFI_COMPLIANT profile). When set, the firewall admits only this address and no longer declares AllowAllAzureServices, which admits every Azure address, other customers\' included. An incremental deployment never deletes that rule from an existing server; the SFI deploy step does. Empty keeps AllowAllAzureServices.')
+param clusterEgressIpAddress string = ''
+
+@description('The Windows worker subnet\'s NAT gateway IPv4 address (Windows worker pool). With clusterEgressIpAddress, the firewall also admits it, so the workers sign in from their own egress address. The Windows worker deploy step deletes an existing AllowAllAzureServices rule too. Empty adds no rule.')
+param winWorkerEgressIpAddress string = ''
 
 // TODO: Replace with Entra (AAD) authentication + workload identity. Until
 // then we hardcode a deterministic placeholder password so enterprise deployments
@@ -120,12 +128,13 @@ resource postgres 'Microsoft.DBforPostgreSQL/flexibleServers@2023-12-01-preview'
 // stamps where aadAdminPrincipalId is empty so the legacy
 // `scripts/deploy-aks.sh` flow stays unaffected.
 //
-// We force a dependency on the `database` and `allowAzureServices`
-// children so the AAD admin write fires only after the flexible server
-// has accepted at least one data-plane and one control-plane child
-// resource — a working proxy for "server is fully accessible". Without
-// this, `flexibleServers/administrators` racy and intermittently fails
-// with `AadAuthOperationCannotBePerformedWhenServerIsNotAccessible`.
+// We force a dependency on the `database` and firewall-rule children so the
+// AAD admin write fires only after the flexible server has accepted at least
+// one data-plane and one control-plane child resource — a working proxy for
+// "server is fully accessible". Without this, `flexibleServers/administrators`
+// racy and intermittently fails with
+// `AadAuthOperationCannotBePerformedWhenServerIsNotAccessible`. Only one of
+// the two firewall rules is declared; ARM ignores the dependency on the other.
 resource aadPrimaryAdmin 'Microsoft.DBforPostgreSQL/flexibleServers/administrators@2023-12-01-preview' = if (!empty(aadAdminPrincipalId)) {
   parent: postgres
   name: aadAdminPrincipalId
@@ -137,6 +146,7 @@ resource aadPrimaryAdmin 'Microsoft.DBforPostgreSQL/flexibleServers/administrato
   dependsOn: [
     database
     allowAzureServices
+    allowClusterEgress
   ]
 }
 
@@ -165,13 +175,35 @@ resource database 'Microsoft.DBforPostgreSQL/flexibleServers/databases@2023-12-0
   }
 }
 
-resource allowAzureServices 'Microsoft.DBforPostgreSQL/flexibleServers/firewallRules@2023-12-01-preview' = {
+resource allowAzureServices 'Microsoft.DBforPostgreSQL/flexibleServers/firewallRules@2023-12-01-preview' = if (empty(clusterEgressIpAddress)) {
   parent: postgres
   name: 'AllowAllAzureServices'
   properties: {
     startIpAddress: '0.0.0.0'
     endIpAddress: '0.0.0.0'
   }
+}
+
+resource allowClusterEgress 'Microsoft.DBforPostgreSQL/flexibleServers/firewallRules@2023-12-01-preview' = if (!empty(clusterEgressIpAddress)) {
+  parent: postgres
+  name: 'AllowClusterEgress'
+  properties: {
+    startIpAddress: clusterEgressIpAddress
+    endIpAddress: clusterEgressIpAddress
+  }
+}
+
+// Written after the cluster's rule: one firewall change on the server at a time.
+resource allowWinWorkerEgress 'Microsoft.DBforPostgreSQL/flexibleServers/firewallRules@2023-12-01-preview' = if (!empty(winWorkerEgressIpAddress)) {
+  parent: postgres
+  name: 'AllowWinWorkerEgress'
+  properties: {
+    startIpAddress: winWorkerEgressIpAddress
+    endIpAddress: winWorkerEgressIpAddress
+  }
+  dependsOn: [
+    allowClusterEgress
+  ]
 }
 
 output serverId string = postgres.id

@@ -1,0 +1,21 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# EDGE_MODE=afd, TLS_SOURCE=letsencrypt: the dispatcher Ingress joins the
+# portal's App Gateway listener, which serves the portal's cert-manager
+# certificate. Same namespace as the portal; the dispatcher DNS name in
+# edge-appgw and the TLS step's leaf follow it.
+namespace: pilotswarm
+
+resources:
+  - ../../base
+
+components:
+  - ../../components/edge-appgw
+  - ../../components/tls-letsencrypt
+  - ../../components/replacements
+
+configMapGenerator:
+  - name: disk-controller-env
+    envs:
+      - .env

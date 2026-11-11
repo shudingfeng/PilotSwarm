@@ -1,0 +1,19 @@
+{
+  "name": "pilotswarm-azure-disk-controller",
+  "private": true,
+  "type": "module",
+  "description": "Disk controller and credential broker for PilotSwarm's Windows worker pool on Azure.",
+  "license": "MIT",
+  "engines": {
+    "node": "^24.22.1 || >=26.12.1"
+  },
+  "dependencies": {
+    "@azure/arm-compute": "^25.2.0",
+    "@azure/arm-monitor": "^8.0.0",
+    "@azure/arm-network": "^39.1.0",
+    "@azure/identity": "^4.14.1",
+    "@azure/keyvault-secrets": "^4.11.2",
+    "@azure/storage-blob": "^12.33.0",
+    "jose": "^6.2.13"
+  }
+}

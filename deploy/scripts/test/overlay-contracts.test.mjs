@@ -7,10 +7,14 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, readFileSync as _read } from "node:fs";
-import { join, dirname } from "node:path";
+import { mkdirSync, mkdtempSync, readFileSync, readFileSync as _read, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
+import { join, dirname, delimiter } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PORTAL_CONFIG_KEYS } from "../lib/portal-config.mjs";
+import { DATABASE_INPUT_KEYS } from "../lib/database-env.mjs";
+import { parseEnvFile, templateEnvPath } from "../lib/common.mjs";
 
 import {
   OVERLAY_CONTRACTS,
@@ -18,6 +22,8 @@ import {
   getContract,
   validateRequiredEnv,
   validateVpnGatewayCombo,
+  validateSfiCombo,
+  validateWinWorkersCombo,
   applyStubKeys,
   EDGE_MODES,
   TLS_SOURCES,
@@ -100,6 +106,7 @@ for (const overlay of ["afd-akv", "afd-letsencrypt", "private-akv", "public-lets
       ...c.composedEnvKeys,
       ...c.stubKeys,
       ...c.bicepOutputKeys,
+      ...c.settingKeys,
     ]);
     const missing = envKeys.filter((k) => !allRoles.has(k));
     assert.deepEqual(
@@ -414,4 +421,325 @@ test("VPN combo-error hints never reference the nonexistent deploy/docs/ tree", 
     !src.includes("deploy/docs/"),
     "overlay-contracts.mjs still contains a deploy/docs/ reference",
   );
+});
+
+// === SFI_COMPLIANT combo checks =============================================
+
+const SFI_ENV = Object.freeze({
+  SFI_COMPLIANT: "true",
+  ACME_EMAIL: "operator@example.com",
+  SSL_CERT_DOMAIN_SUFFIX: "portal.example.com",
+  HOST: "portal",
+  PRIVATE_DNS_ZONE: "example.internal",
+  AKS_VNET_ID: "vnet",
+  PILOTSWARM_USE_MANAGED_IDENTITY: "1",
+});
+
+function sfiErrors(edgeMode, tlsSource, extra = {}) {
+  const { combo } = validateRequiredEnv({ edgeMode, tlsSource, env: { ...SFI_ENV, ...extra } });
+  return combo;
+}
+const codes = (errors) => errors.map((e) => e.code);
+
+test("SFI_COMPLIANT refuses the akv TLS sources, which issue the certificate with deployment scripts", () => {
+  for (const tlsSource of ["akv", "akv-selfsigned"]) {
+    const errors = sfiErrors("afd", tlsSource);
+    assert.deepEqual(codes(errors), ["sfi-requires-letsencrypt"], tlsSource);
+    assert.match(errors[0].message, new RegExp(`TLS_SOURCE='${tlsSource}'.*deployment scripts`));
+    // Off, the same settings pass: the setting gates every check.
+    for (const flag of [undefined, "", "false", "FALSE"]) {
+      const env = { ...SFI_ENV, SFI_COMPLIANT: flag, PERIMETER_OPERATOR_IP_PREFIXES: "nope", PILOTSWARM_USE_MANAGED_IDENTITY: "0" };
+      assert.deepEqual(validateSfiCombo({ edgeMode: "afd", tlsSource, env }), [], `SFI_COMPLIANT=${flag}`);
+    }
+  }
+  assert.deepEqual(sfiErrors("afd", "letsencrypt"), []);
+});
+
+test("SFI_COMPLIANT supports EDGE_MODE=afd only", () => {
+  // private mode has only akv TLS sources, so both refusals apply.
+  assert.deepEqual(codes(sfiErrors("private", "akv")), ["sfi-requires-afd", "sfi-requires-letsencrypt"]);
+  assert.deepEqual(codes(sfiErrors("private", "akv-selfsigned")), ["sfi-requires-afd", "sfi-requires-letsencrypt"]);
+  const publicMode = sfiErrors("public", "letsencrypt");
+  assert.deepEqual(codes(publicMode), ["sfi-requires-afd"]);
+  assert.match(publicMode[0].message, /public mode has no stamp VNet/);
+});
+
+test("SFI_COMPLIANT refuses bad operator prefixes and password sign-in to the stamp's database", () => {
+  const prefixes = sfiErrors("afd", "letsencrypt", { PERIMETER_OPERATOR_IP_PREFIXES: "203.0.113.7, 198.51.100.1/24" });
+  assert.deepEqual(codes(prefixes), ["sfi-operator-prefixes"]);
+  assert.match(prefixes[0].message, /'198\.51\.100\.1\/24' has host bits set/);
+
+  for (const value of ["0", "", "maybe"]) {
+    assert.deepEqual(codes(sfiErrors("afd", "letsencrypt", { PILOTSWARM_USE_MANAGED_IDENTITY: value })),
+      ["sfi-requires-database-identity"], `PILOTSWARM_USE_MANAGED_IDENTITY=${value}`);
+  }
+  // A bring-your-own database keeps its own sign-in.
+  assert.deepEqual(sfiErrors("afd", "letsencrypt", { DEPLOY_POSTGRES: "false", PILOTSWARM_USE_MANAGED_IDENTITY: "0" }), []);
+
+  for (const e of [...prefixes, ...sfiErrors("private", "akv")]) {
+    assert.ok(e.message && e.hint, e.code);
+    assert.ok(!/new-env|deploy:new-env/i.test(e.hint), `combo hint for ${e.code} must not point at the scaffolder`);
+  }
+});
+
+test("SFI_COMPLIANT refuses a Blob client without managed identity, judged as the runtime judges it", () => {
+  // Storage shared keys are off, so a Blob flag that isn't truthy is refused,
+  // even with database managed identity on.
+  for (const value of ["0", "false", "no", "off", "maybe"]) {
+    assert.deepEqual(codes(sfiErrors("afd", "letsencrypt", { PILOTSWARM_BLOB_USE_MANAGED_IDENTITY: value })),
+      ["sfi-requires-blob-identity"], `PILOTSWARM_BLOB_USE_MANAGED_IDENTITY=${value}`);
+  }
+  const [refused] = sfiErrors("afd", "letsencrypt", { PILOTSWARM_BLOB_USE_MANAGED_IDENTITY: "0" });
+  assert.match(refused.message, /denies Storage shared keys.*PILOTSWARM_BLOB_USE_MANAGED_IDENTITY must be 1/);
+  assert.ok(!/new-env|deploy:new-env/i.test(refused.hint));
+
+  // Without the key the deploy path's default (1) applies; truthy values pass.
+  for (const value of [undefined, "1", "true", " YES ", "on"]) {
+    assert.deepEqual(sfiErrors("afd", "letsencrypt", { PILOTSWARM_BLOB_USE_MANAGED_IDENTITY: value }), [], `${value}`);
+  }
+  assert.deepEqual(validateSfiCombo({
+    edgeMode: "afd", tlsSource: "letsencrypt", env: { ...parseEnvFile(templateEnvPath()), SFI_COMPLIANT: "true" },
+  }), [], "an env scaffolded from template.env passes");
+
+  // An empty Blob flag falls back to the database flag, as at runtime. A
+  // bring-your-own database keeps password sign-in apart from Blob.
+  const byo = { DEPLOY_POSTGRES: "false" };
+  assert.deepEqual(codes(sfiErrors("afd", "letsencrypt", {
+    ...byo, PILOTSWARM_BLOB_USE_MANAGED_IDENTITY: "", PILOTSWARM_USE_MANAGED_IDENTITY: "0",
+  })), ["sfi-requires-blob-identity"]);
+  assert.deepEqual(sfiErrors("afd", "letsencrypt", {
+    ...byo, PILOTSWARM_BLOB_USE_MANAGED_IDENTITY: " ", PILOTSWARM_USE_MANAGED_IDENTITY: "1",
+  }), []);
+  assert.deepEqual(sfiErrors("afd", "letsencrypt", {
+    ...byo, PILOTSWARM_BLOB_USE_MANAGED_IDENTITY: "1", PILOTSWARM_USE_MANAGED_IDENTITY: "0",
+  }), []);
+
+  // The setting off never refuses.
+  for (const flag of [undefined, "", "false"]) {
+    const env = { ...SFI_ENV, SFI_COMPLIANT: flag, PILOTSWARM_BLOB_USE_MANAGED_IDENTITY: "0" };
+    assert.deepEqual(validateSfiCombo({ edgeMode: "afd", tlsSource: "letsencrypt", env }), [], `SFI_COMPLIANT=${flag}`);
+  }
+});
+
+// Runs `deploy.mjs portal <env> --steps manifests` with `settings` as the env
+// file and an Azure CLI on PATH that answers only `--version` and logs every
+// call. Returns the process result and the logged calls.
+let manifestsRuns = 0;
+function manifestsOnlyPortalRun(t, settings) {
+  const name = `sfim${process.pid.toString(36)}${manifestsRuns++}`;
+  const local = join(REPO_ROOT, "deploy", "envs", "local", name);
+  const dir = mkdtempSync(join(tmpdir(), "ps-sfi-combo-"));
+  t.after(() => {
+    rmSync(local, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+  });
+  mkdirSync(local, { recursive: true });
+  writeFileSync(join(local, ".env"), Object.entries(settings).map(([key, value]) => `${key}=${value}`).join("\n") + "\n");
+
+  const calls = join(dir, "calls.jsonl");
+  writeFileSync(calls, "");
+  writeFileSync(join(dir, "az.cjs"), [
+    "const fs = require('node:fs');",
+    "const args = process.argv.slice(2);",
+    "fs.appendFileSync(process.env.SFI_TEST_CALLS, JSON.stringify(args) + '\\n');",
+    "process.exit(args[0] === '--version' ? 0 : 9);",
+  ].join("\n"));
+  if (process.platform === "win32") {
+    writeFileSync(join(dir, "az.cmd"), `@"${process.execPath}" "%~dp0az.cjs" %*\r\n`);
+  } else {
+    writeFileSync(join(dir, "az"), `#!/bin/sh\nexec "${process.execPath}" "$(dirname "$0")/az.cjs" "$@"\n`, { mode: 0o755 });
+  }
+
+  const env = { ...process.env, SFI_TEST_CALLS: calls };
+  const ambient = [...Object.keys(settings), ...DATABASE_INPUT_KEYS, "TLS_SOURCE", "ACME_EMAIL", "SSL_CERT_DOMAIN_SUFFIX",
+    "PERIMETER_OPERATOR_IP_PREFIXES", "WORKSPACES_ENABLED", "USER_POOL_MIN_COUNT", "PILOTSWARM_NATIVE_SUBAGENTS",
+    "NPM_REGISTRY", "DEPLOY_PROVIDER"];
+  for (const key of ambient) delete env[key];
+  const pathKey = Object.keys(env).find((key) => key.toUpperCase() === "PATH") ?? "PATH";
+  env[pathKey] = `${dir}${delimiter}${env[pathKey] ?? ""}`;
+  const result = spawnSync(process.execPath, [
+    join(REPO_ROOT, "deploy", "scripts", "deploy.mjs"), "portal", name, "--steps", "manifests", "--image-tag", "fixture",
+  ], { cwd: REPO_ROOT, encoding: "utf8", env });
+  const logged = readFileSync(calls, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
+  return { result, logged };
+}
+
+const SFI_STAMP = Object.freeze({
+  SUBSCRIPTION_ID: "00000000-0000-0000-0000-000000000003",
+  EDGE_MODE: "afd",
+  PILOTSWARM_USE_MANAGED_IDENTITY: "1",
+  SFI_COMPLIANT: "true",
+});
+
+test("SFI_COMPLIANT refuses an akv TLS source on a portal run that only publishes manifests, before any step", (t) => {
+  const { result, logged } = manifestsOnlyPortalRun(t, {
+    ...SFI_STAMP, TLS_SOURCE: "akv", SSL_CERT_DOMAIN_SUFFIX: "portal.example.com",
+  });
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stderr, /\[sfi-requires-letsencrypt\] SFI_COMPLIANT=true refuses TLS_SOURCE='akv'/);
+  assert.deepEqual(logged, [["--version"]], "no Azure call besides the CLI check");
+});
+
+test("SFI_COMPLIANT refuses Blob without managed identity on a portal run that only publishes manifests, before any step", (t) => {
+  const { result, logged } = manifestsOnlyPortalRun(t, {
+    ...SFI_STAMP, TLS_SOURCE: "letsencrypt", ACME_EMAIL: "operator@example.com", PILOTSWARM_BLOB_USE_MANAGED_IDENTITY: "0",
+  });
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stderr, /\[sfi-requires-blob-identity\] SFI_COMPLIANT=true denies Storage shared keys/);
+  assert.deepEqual(logged, [["--version"]], "no Azure call besides the CLI check");
+});
+
+// === Windows worker pool combo checks =======================================
+
+const POOL_ENV = Object.freeze({
+  WIN_WORKERS_ENABLED: "true",
+  WIN_WORKER_ALERT_EMAILS: "ops@example.com",
+  PORTAL_AUTH_ENTRA_CLIENT_ID: "11111111-1111-1111-1111-111111111111",
+  PILOTSWARM_USE_MANAGED_IDENTITY: "1",
+  ACME_EMAIL: "operator@example.com",
+  SSL_CERT_DOMAIN_SUFFIX: "portal.example.com",
+  HOST: "portal",
+  PRIVATE_DNS_ZONE: "example.internal",
+  AKS_VNET_ID: "vnet",
+});
+
+function poolErrors(edgeMode, tlsSource, extra = {}) {
+  const env = { ...POOL_ENV, ...extra };
+  for (const [key, value] of Object.entries(extra)) if (value === undefined) delete env[key];
+  return validateRequiredEnv({ edgeMode, tlsSource, env }).combo;
+}
+
+test("the pool's settings at their defaults refuse nothing, whatever the edge", () => {
+  const template = parseEnvFile(templateEnvPath());
+  for (const [edgeMode, tlsSource] of [["afd", "letsencrypt"], ["afd", "akv"], ["private", "akv"], ["public", "letsencrypt"]]) {
+    assert.deepEqual(validateWinWorkersCombo({ edgeMode, tlsSource, env: {} }), [], `${edgeMode} empty env`);
+    assert.deepEqual(validateWinWorkersCombo({ edgeMode, tlsSource, env: template }), [], `${edgeMode} template.env`);
+  }
+  // A complete pool in afd and private mode passes too.
+  assert.deepEqual(poolErrors("afd", "letsencrypt"), []);
+  assert.deepEqual(poolErrors("private", "akv"), []);
+});
+
+test("WIN_WORKERS_ENABLED=true needs the stamp VNet: EDGE_MODE afd or private", () => {
+  const errors = poolErrors("public", "letsencrypt");
+  assert.deepEqual(codes(errors), ["win-workers-requires-vnet"]);
+  assert.match(errors[0].message, /needs EDGE_MODE='afd' or 'private', not 'public'/);
+  assert.ok(!/new-env|deploy:new-env/i.test(errors[0].hint), "the hint does not point at the scaffolder");
+});
+
+test("WIN_WORKERS_ENABLED=true needs at least one alert receiver, and refuses a malformed one", () => {
+  for (const emails of [undefined, "", "__PS_UNSET__", " , "]) {
+    assert.deepEqual(codes(poolErrors("afd", "letsencrypt", { WIN_WORKER_ALERT_EMAILS: emails })),
+      ["win-workers-requires-alert-emails"], `WIN_WORKER_ALERT_EMAILS=${emails}`);
+  }
+  const bad = poolErrors("afd", "letsencrypt", { WIN_WORKER_ALERT_EMAILS: "ops@example.com, not-an-address" });
+  assert.deepEqual(codes(bad), ["win-workers-settings"]);
+  assert.match(bad[0].message, /'not-an-address' is not an email address/);
+  assert.deepEqual(poolErrors("afd", "letsencrypt", { WIN_WORKER_ALERT_EMAILS: "a@example.com,b@example.com" }), []);
+});
+
+test("WIN_WORKER_MIN_RUNNING=0 needs the coordination host", () => {
+  const errors = poolErrors("afd", "letsencrypt", { WIN_WORKER_MIN_RUNNING: "0" });
+  assert.deepEqual(codes(errors), ["win-workers-min-running-requires-coordination-host"]);
+  assert.match(errors[0].message, /only the coordination host runs orchestrations and timers/);
+  // Without the pool, too: the coordination host itself needs the pool.
+  assert.deepEqual(codes(validateWinWorkersCombo({ edgeMode: "afd", tlsSource: "letsencrypt", env: { WIN_WORKER_MIN_RUNNING: "0" } })),
+    ["win-workers-min-running-requires-coordination-host"]);
+  assert.deepEqual(poolErrors("afd", "letsencrypt", {
+    WIN_WORKER_MIN_RUNNING: "0", WIN_WORKER_COORDINATION_HOST: "true", PILOTSWARM_OWNER_ROUTING: "1",
+  }), []);
+});
+
+test("the coordination host needs the pool and owner routing", () => {
+  const off = validateWinWorkersCombo({ edgeMode: "afd", tlsSource: "letsencrypt", env: { WIN_WORKER_COORDINATION_HOST: "true" } });
+  assert.deepEqual(codes(off), ["coordination-host-requires-win-workers", "coordination-host-requires-owner-routing"]);
+  const noTags = poolErrors("afd", "letsencrypt", { WIN_WORKER_COORDINATION_HOST: "true" });
+  assert.deepEqual(codes(noTags), ["coordination-host-requires-owner-routing"]);
+  assert.match(noTags[0].message, /without owner tags no user turn would run/);
+});
+
+test("the coordination host runs no session workspace, and its own settings are checked before any step", () => {
+  const host = { WIN_WORKER_COORDINATION_HOST: "true", PILOTSWARM_OWNER_ROUTING: "1" };
+  const errors = poolErrors("afd", "letsencrypt", { ...host, WORKSPACES_ENABLED: "true" });
+  assert.deepEqual(codes(errors), ["coordination-host-excludes-workspaces"]);
+  assert.match(errors[0].message, /needs WORKSPACES_ENABLED=false/);
+  assert.deepEqual(poolErrors("afd", "letsencrypt", { WORKSPACES_ENABLED: "true" }), [], "the pool alone does not refuse them");
+  for (const bad of [
+    { WIN_WORKER_COORDINATION_HOST_REPLICAS: "21" },
+    { WIN_WORKER_COORDINATION_HOST_PLUGIN_CONFIGMAP: "Not_A_Name" },
+    { WIN_WORKER_COORDINATION_HOST_REDACT_SECRET_PREFIXES: "x" },
+  ]) {
+    assert.deepEqual(codes(poolErrors("afd", "letsencrypt", { ...host, ...bad })), ["win-workers-settings"], JSON.stringify(bad));
+  }
+});
+
+test("owner routing needs the pool, and takes only 1 or 0", () => {
+  const errors = validateWinWorkersCombo({ edgeMode: "afd", tlsSource: "letsencrypt", env: { PILOTSWARM_OWNER_ROUTING: "1" } });
+  assert.deepEqual(codes(errors), ["owner-routing-requires-win-workers"]);
+  assert.match(errors[0].message, /only a bound Windows worker serves an owner tag/);
+  assert.deepEqual(poolErrors("afd", "letsencrypt", { PILOTSWARM_OWNER_ROUTING: "1" }), []);
+  for (const value of ["0", "", "__PS_UNSET__"]) {
+    assert.deepEqual(validateWinWorkersCombo({ edgeMode: "afd", tlsSource: "letsencrypt", env: { PILOTSWARM_OWNER_ROUTING: value } }), []);
+  }
+  // The portal records owner tags only for exactly 1; "true" would quietly be off.
+  assert.deepEqual(codes(validateWinWorkersCombo({ edgeMode: "afd", tlsSource: "letsencrypt", env: { PILOTSWARM_OWNER_ROUTING: "true" } })),
+    ["win-workers-settings"]);
+});
+
+test("the pool needs the portal's Entra app, the stamp's own database and database managed identity", () => {
+  assert.deepEqual(codes(poolErrors("afd", "letsencrypt", { PORTAL_AUTH_ENTRA_CLIENT_ID: "__PS_UNSET__" })),
+    ["win-workers-requires-entra-app"]);
+  assert.deepEqual(codes(poolErrors("afd", "letsencrypt", { DEPLOY_POSTGRES: "false" })),
+    ["win-workers-requires-stamp-database"]);
+  assert.deepEqual(codes(poolErrors("afd", "letsencrypt", { PILOTSWARM_USE_MANAGED_IDENTITY: "0" })),
+    ["win-workers-requires-database-identity"]);
+});
+
+test("the pool refuses unreadable settings and reserved WIN_WORKER_EXTRA_ENV names", () => {
+  for (const [key, value, message] of [
+    ["WIN_WORKERS_ENABLED", "yes", /WIN_WORKERS_ENABLED must be true or false/],
+    ["WIN_WORKER_COORDINATION_HOST", "1", /WIN_WORKER_COORDINATION_HOST must be true or false/],
+    ["WIN_WORKER_COUNT", "0", /WIN_WORKER_COUNT must be a whole number from 1 to 100/],
+    ["WIN_WORKER_MIN_RUNNING", "6", /WIN_WORKER_MIN_RUNNING must not be above WIN_WORKER_COUNT/],
+    ["WIN_WORKER_STANDBY_MIN", "-1", /WIN_WORKER_STANDBY_MIN must be a whole number/],
+    ["WIN_WORKER_VM_SIZE", "D16ds v5", /WIN_WORKER_VM_SIZE must be a VM size/],
+    ["WIN_WORKER_IMAGE_VERSION", "latest", /WIN_WORKER_IMAGE_VERSION must be a gallery image version/],
+    ["WIN_WORKER_FEED_ENDPOINTS", "http://feed.example.com/", /is not a plain https URL/],
+  ]) {
+    const errors = poolErrors("afd", "letsencrypt", { [key]: value });
+    assert.ok(errors.some((e) => e.code === "win-workers-settings" && message.test(e.message)), `${key}=${value}: ${JSON.stringify(errors)}`);
+  }
+  const reserved = poolErrors("afd", "letsencrypt", { WIN_WORKER_EXTRA_ENV: "EXAMPLE_URL=https://api.example.com;path=C:\\tools" });
+  assert.deepEqual(codes(reserved), ["win-workers-extra-env"]);
+  assert.match(reserved[0].message, /may not set path/);
+  assert.deepEqual(poolErrors("afd", "letsencrypt", { WIN_WORKER_EXTRA_ENV: "EXAMPLE_URL=https://api.example.com;EXAMPLE_MODE=on" }), []);
+});
+
+const POOL_STAMP = Object.freeze({
+  SUBSCRIPTION_ID: "00000000-0000-0000-0000-000000000003",
+  PILOTSWARM_USE_MANAGED_IDENTITY: "1",
+  TLS_SOURCE: "letsencrypt",
+  ACME_EMAIL: "operator@example.com",
+  PORTAL_AUTH_ENTRA_CLIENT_ID: "11111111-1111-1111-1111-111111111111",
+  WIN_WORKER_ALERT_EMAILS: "ops@example.com",
+  WIN_WORKER_MIN_RUNNING: "1",
+  WIN_WORKER_COORDINATION_HOST: "false",
+  PILOTSWARM_OWNER_ROUTING: "0",
+  WIN_WORKERS_ENABLED: "false",
+});
+
+test("the pool's refusals stop a portal run that only publishes manifests, before any step", (t) => {
+  for (const [settings, expected] of [
+    [{ EDGE_MODE: "public", WIN_WORKERS_ENABLED: "true" }, [/\[win-workers-requires-vnet\]/]],
+    [{ EDGE_MODE: "afd", WIN_WORKERS_ENABLED: "true", WIN_WORKER_ALERT_EMAILS: "" }, [/\[win-workers-requires-alert-emails\]/]],
+    [{ EDGE_MODE: "afd", WIN_WORKERS_ENABLED: "true", WIN_WORKER_MIN_RUNNING: "0" }, [/\[win-workers-min-running-requires-coordination-host\]/]],
+    [{ EDGE_MODE: "afd", WIN_WORKERS_ENABLED: "true", WIN_WORKER_COORDINATION_HOST: "true" }, [/\[coordination-host-requires-owner-routing\]/]],
+    [{ EDGE_MODE: "afd", WIN_WORKER_COORDINATION_HOST: "true", PILOTSWARM_OWNER_ROUTING: "1" },
+      [/\[coordination-host-requires-win-workers\]/, /\[owner-routing-requires-win-workers\]/]],
+  ]) {
+    const { result, logged } = manifestsOnlyPortalRun(t, { ...POOL_STAMP, ...settings });
+    assert.equal(result.status, 1, result.stderr);
+    for (const pattern of expected) assert.match(result.stderr, pattern, JSON.stringify(settings));
+    assert.deepEqual(logged, [["--version"]], "no Azure call besides the CLI check");
+  }
 });

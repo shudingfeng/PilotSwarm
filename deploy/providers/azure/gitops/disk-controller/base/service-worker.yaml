@@ -1,0 +1,39 @@
+# The worker port: an internal Azure load balancer at a fixed address that the
+# Windows workers reach, 10.20.15.250 in aks-subnet (Azure fills the subnet from
+# the bottom, so an address near the top stays free). HTTPS on 3003 carries the
+# worker routes and /v1/admin/*, which operators reach through
+# `kubectl port-forward` instead.
+#
+# Only the worker subnet may connect:
+#   - loadBalancerSourceRanges with the deny-all-except annotation makes the
+#     cloud provider write an allow rule for that range and a deny rule for
+#     every other source into the network security group AKS manages. Without
+#     the annotation, the default AllowVnetInBound rule would still admit the
+#     whole VNet;
+#   - externalTrafficPolicy: Local keeps the worker's source address, which the
+#     NetworkPolicy and the controller's source-IP check rely on;
+#   - the controller still checks the worker token and the source address.
+apiVersion: v1
+kind: Service
+metadata:
+  name: pilotswarm-disk-controller
+  labels:
+    app.kubernetes.io/name: pilotswarm
+    app.kubernetes.io/component: disk-controller
+  annotations:
+    service.beta.kubernetes.io/azure-load-balancer-internal: "true"
+    service.beta.kubernetes.io/azure-load-balancer-ipv4: "10.20.15.250"
+    service.beta.kubernetes.io/azure-deny-all-except-load-balancer-source-ranges: "true"
+spec:
+  type: LoadBalancer
+  externalTrafficPolicy: Local
+  loadBalancerSourceRanges:
+    - 10.20.32.0/24
+  selector:
+    app.kubernetes.io/name: pilotswarm
+    app.kubernetes.io/component: disk-controller
+  ports:
+    - name: https
+      protocol: TCP
+      port: 3003
+      targetPort: 3003

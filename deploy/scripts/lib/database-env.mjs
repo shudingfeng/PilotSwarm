@@ -33,6 +33,19 @@ export function databaseUsesManagedIdentity(env) {
   throw new Error("PILOTSWARM_USE_MANAGED_IDENTITY must select database auth: 1/true or 0/false.");
 }
 
+// Whether the workers and the portal reach Blob with their managed identity,
+// decided as the runtime decides it (createSessionBlobStore in
+// packages/sdk/src/blob-store.ts): the Blob flag when it is not empty, else the
+// database flag, each true only for 1, true, yes or on. Like loadEnv, an env
+// map without the Blob flag gets this deploy path's default.
+export function blobUsesManagedIdentity(env) {
+  const truthy = (value) => ["1", "true", "yes", "on"].includes(String(value ?? "").trim().toLowerCase());
+  const blobFlag = String(
+    env.PILOTSWARM_BLOB_USE_MANAGED_IDENTITY ?? DATABASE_ENV_DEFAULTS.PILOTSWARM_BLOB_USE_MANAGED_IDENTITY,
+  ).trim();
+  return blobFlag !== "" ? truthy(blobFlag) : truthy(env.PILOTSWARM_USE_MANAGED_IDENTITY);
+}
+
 function nonempty(value) {
   return value != null && String(value).trim() !== "";
 }

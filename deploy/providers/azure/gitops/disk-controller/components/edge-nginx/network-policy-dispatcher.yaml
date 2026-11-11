@@ -1,0 +1,24 @@
+# EDGE_MODE=private: the dispatcher port, 3004, only from the AKS app-routing
+# NGINX pods, which run in namespace app-routing-system.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: pilotswarm-disk-controller-dispatcher
+  labels:
+    app.kubernetes.io/name: pilotswarm
+    app.kubernetes.io/component: disk-controller
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: pilotswarm
+      app.kubernetes.io/component: disk-controller
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 3004
+      from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: app-routing-system

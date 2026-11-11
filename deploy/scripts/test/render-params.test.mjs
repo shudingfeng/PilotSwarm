@@ -160,3 +160,122 @@ test("real base-infra template renders the node-pool settings: the repocache poo
     }
   });
 });
+
+// ─── SFI_COMPLIANT ───
+
+// Values the base-infra and portal templates need besides template.env.
+const STAMP_FIXTURES = {
+  RESOURCE_PREFIX: "psfixture",
+  PORTAL_RESOURCE_NAME: "psfixture-wus3-portal",
+  FRONT_DOOR_ID: "fixture-front-door",
+  FRONT_DOOR_PROFILE_NAME: "fixture-profile",
+  FRONT_DOOR_PROFILE_RESOURCE_GROUP: "fixture-global-rg",
+  FRONT_DOOR_ENDPOINT_NAME: "fixture-endpoint",
+  APPLICATION_GATEWAY_NAME: "psfixture-appgw",
+  PRIVATE_LINK_CONFIGURATION_NAME: "privateLinkConfig",
+  APPROVAL_MANAGED_IDENTITY_ID: "/subscriptions/fixture/providers/Microsoft.ManagedIdentity/userAssignedIdentities/approver",
+  DEPLOYMENT_STORAGE_ACCOUNT_NAME: "psfixturesa",
+  AKS_CLUSTER_NAME: "psfixture-aks",
+  KV_NAME: "psfixturekv",
+  PORTAL_HOSTNAME: "unused",
+  PRIVATE_DNS_ZONE: "unused",
+  AKS_VNET_ID: "unused",
+};
+
+const templateFor = (module) =>
+  join(REPO_ROOT, `deploy/providers/azure/services/${module}/bicep/${module}.params.template.json`);
+
+// The rendering before SFI_COMPLIANT existed: every placeholder replaced by
+// its value inside the JSON string. The template.env values of the
+// normalized keys (true, false, 1) render unchanged, so this is exact here.
+function substituteTemplate(raw, env) {
+  return raw.replace(/\$\{([A-Z_][A-Z0-9_]*)\}/g, (_match, key) =>
+    String(env[key]).replace(/\\/g, "\\\\").replace(/"/g, '\\"'));
+}
+
+test("SFI_COMPLIANT off renders base-infra and portal byte for byte as before; on adds only the profile's parameters", () => {
+  withTmp((dir) => {
+    const base = {
+      ...parseEnvFile(templateEnvPath()),
+      ...STAMP_FIXTURES,
+      PERIMETER_OPERATOR_IP_PREFIXES: "203.0.113.7",
+      APP_GATEWAY_EXISTS: "true",
+    };
+    for (const module of ["base-infra", "portal", "worker"]) {
+      const templatePath = templateFor(module);
+      const raw = readFileSync(templatePath, "utf8");
+      for (const flag of [undefined, "", "false", " FALSE "]) {
+        const envMap = { ...base, SFI_COMPLIANT: flag };
+        if (flag === undefined) delete envMap.SFI_COMPLIANT;
+        const { renderedPath } = renderParams({ module, templatePath, envMap, outDir: dir });
+        assert.equal(readFileSync(renderedPath, "utf8"), substituteTemplate(raw, envMap), `${module} SFI_COMPLIANT=${flag}`);
+      }
+
+      const { renderedPath } = renderParams({ module, templatePath, envMap: { ...base, SFI_COMPLIANT: "true" }, outDir: dir });
+      const on = JSON.parse(readFileSync(renderedPath, "utf8")).parameters;
+      const off = JSON.parse(substituteTemplate(raw, base)).parameters;
+      for (const name of Object.keys(off)) assert.deepEqual(on[name], off[name], `${module} ${name}`);
+      const added = Object.fromEntries(Object.entries(on).filter(([name]) => !(name in off)));
+      const expected = {
+        "base-infra": {
+          sfiCompliant: { value: true },
+          perimeterOperatorIpPrefixes: { value: ["203.0.113.7/32"] },
+          appGwExists: { value: true },
+        },
+        portal: { sfiCompliant: { value: true } },
+        worker: {},
+      };
+      assert.deepEqual(added, expected[module], module);
+    }
+  });
+});
+
+test("PERIMETER_OPERATOR_IP_PREFIXES: trimmed, empty entries and repeats dropped, a bad entry refused", () => {
+  withTmp((dir) => {
+    const render = (prefixes) => {
+      const envMap = {
+        ...parseEnvFile(templateEnvPath()),
+        ...STAMP_FIXTURES,
+        SFI_COMPLIANT: "true",
+        APP_GATEWAY_EXISTS: "false",
+        PERIMETER_OPERATOR_IP_PREFIXES: prefixes,
+      };
+      if (prefixes === undefined) delete envMap.PERIMETER_OPERATOR_IP_PREFIXES;
+      const { renderedPath } = renderParams({ module: "base-infra", templatePath: templateFor("base-infra"), envMap, outDir: dir });
+      return JSON.parse(readFileSync(renderedPath, "utf8")).parameters.perimeterOperatorIpPrefixes.value;
+    };
+    assert.deepEqual(
+      render(" 203.0.113.7 , 198.51.100.0/24,, 203.0.113.7/32 ,"),
+      ["203.0.113.7/32", "198.51.100.0/24"],
+    );
+    for (const empty of [undefined, "", " , "]) assert.deepEqual(render(empty), [], `'${empty}'`);
+    for (const [entry, reason] of [
+      ["203.0.113.0/33", /'203\.0\.113\.0\/33' is not an IPv4 address or CIDR prefix/],
+      ["203.0.113.256", /'203\.0\.113\.256' is not an IPv4 address/],
+      ["2001:db8::/32", /'2001:db8::\/32' is not an IPv4 address/],
+      ["portal.example.com", /'portal\.example\.com' is not an IPv4 address/],
+      ["10.0.0.1/24", /'10\.0\.0\.1\/24' has host bits set; use 10\.0\.0\.0\/24/],
+    ]) {
+      assert.throws(() => render(`203.0.113.7, ${entry}`), reason);
+    }
+  });
+});
+
+test("SFI_COMPLIANT=true takes the App Gateway probe's answer in afd mode and refuses to guess it", () => {
+  withTmp((dir) => {
+    const render = (extra) => {
+      const envMap = { ...parseEnvFile(templateEnvPath()), ...STAMP_FIXTURES, SFI_COMPLIANT: "true", ...extra };
+      for (const [key, value] of Object.entries(extra)) if (value === undefined) delete envMap[key];
+      const { renderedPath } = renderParams({ module: "base-infra", templatePath: templateFor("base-infra"), envMap, outDir: dir });
+      return JSON.parse(readFileSync(renderedPath, "utf8")).parameters;
+    };
+    assert.equal(render({ APP_GATEWAY_EXISTS: "true" }).appGwExists.value, true);
+    assert.equal(render({ APP_GATEWAY_EXISTS: " FALSE " }).appGwExists.value, false);
+    for (const answer of [undefined, "", "maybe"]) {
+      assert.throws(() => render({ APP_GATEWAY_EXISTS: answer }), /SFI_COMPLIANT=true needs APP_GATEWAY_EXISTS/);
+    }
+    // No App Gateway outside afd mode, so no probe either.
+    assert.equal(render({ EDGE_MODE: "private", APP_GATEWAY_EXISTS: undefined }).appGwExists, undefined);
+    assert.throws(() => render({ SFI_COMPLIANT: "yes" }), /SFI_COMPLIANT must be true or false, not 'yes'/);
+  });
+});

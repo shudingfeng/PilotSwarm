@@ -1,0 +1,23 @@
+# The dispatcher port, 3004: the dispatcher routes and the health route that
+# App Gateway probes. The Ingress `pilotswarm-disk-controller-dispatcher` routes
+# the dispatcher's paths on the portal's host here. The controller's leaf
+# certificate names this Service's cluster DNS name
+# (pilotswarm-disk-controller-dispatcher.<namespace>.svc), which App Gateway and
+# NGINX check.
+apiVersion: v1
+kind: Service
+metadata:
+  name: pilotswarm-disk-controller-dispatcher
+  labels:
+    app.kubernetes.io/name: pilotswarm
+    app.kubernetes.io/component: disk-controller
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: pilotswarm
+    app.kubernetes.io/component: disk-controller
+  ports:
+    - name: https
+      protocol: TCP
+      port: 3004
+      targetPort: 3004

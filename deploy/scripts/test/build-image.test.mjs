@@ -29,3 +29,13 @@ test("docker build forwards an optional npm registry without placing its URL in 
   assert.equal(invocation.args.includes(registry), false);
   assert.deepEqual(invocation.envOverrides, { NPM_REGISTRY: registry });
 });
+
+test("docker build passes plain build arguments by name and value, before the build context", () => {
+  const invocation = dockerBuildInvocation({
+    ...baseInput,
+    buildArgs: { COPILOT_PKG_CACHE_HOME: "/app/copilot-pkg" },
+  });
+
+  assert.deepEqual(invocation.args.slice(-3), ["--build-arg", "COPILOT_PKG_CACHE_HOME=/app/copilot-pkg", invocation.args.at(-1)]);
+  assert.deepEqual(invocation.envOverrides, {});
+});

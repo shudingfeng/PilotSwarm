@@ -1,5 +1,5 @@
 {
-  "publicAzureHosts": ["privatelink.file.core.windows.net"],
+  "publicAzureHosts": ["privatelink.file.core.windows.net", "privatelink.blob.core.windows.net"],
   "exampleAzureHosts": [
     "acr_name.azurecr.io", "placeholder.azurecr.io", "placeholder.blob.core.windows.net",
     "your-foundry-resource.services.ai.azure.com", "myvault.vault.azure.net",

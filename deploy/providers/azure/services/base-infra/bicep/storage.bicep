@@ -47,6 +47,18 @@ param localDeploymentPrincipalId string = ''
 ])
 param localDeploymentPrincipalType string = 'User'
 
+@description('SFI_COMPLIANT profile: no shared-key access, Entra ID as the Azure portal\'s default sign-in to the data, and public access decided by the network security perimeter (nsp.bicep). False keeps the account unchanged.')
+param sfiCompliant bool = false
+
+@description('Windows worker pool: workerWorkloadPrincipalId gets Blob Data Contributor on the copilot-sessions container instead of the whole account, so neither the portal nor the database job can write a Windows release or a Flux manifest. Adds the win-worker-releases container. False keeps the account unchanged.')
+param winWorkersEnabled bool = false
+
+@description('Windows worker pool: principal ID of the workers\' identity, granted Blob Data Contributor on copilot-sessions and Blob Data Reader on win-worker-releases, container scopes only.')
+param winWorkerPrincipalId string = ''
+
+@description('Windows worker pool with the coordination host: principal ID of the Linux worker\'s own identity, granted Blob Data Contributor on copilot-sessions only. Empty grants nothing.')
+param coordinationHostPrincipalId string = ''
+
 resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
   name: storageAccountName
   location: location
@@ -54,13 +66,17 @@ resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
     name: skuName
   }
   kind: 'StorageV2'
-  properties: {
+  properties: union({
     accessTier: 'Hot'
     allowBlobPublicAccess: false
     allowSharedKeyAccess: true
     minimumTlsVersion: 'TLS1_2'
     supportsHttpsTrafficOnly: true
-  }
+  }, sfiCompliant ? {
+    allowSharedKeyAccess: false
+    defaultToOAuthAuthentication: true
+    publicNetworkAccess: 'SecuredByPerimeter'
+  } : {})
 }
 
 resource blobService 'Microsoft.Storage/storageAccounts/blobServices@2023-05-01' = {
@@ -72,6 +88,16 @@ resource blobService 'Microsoft.Storage/storageAccounts/blobServices@2023-05-01'
 resource sessionsContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = {
   parent: blobService
   name: 'copilot-sessions'
+  properties: {
+    publicAccess: 'None'
+  }
+}
+
+// The Windows workers' release zips, which only the deploying principal
+// writes (Windows worker pool only).
+resource winWorkerReleasesContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = if (winWorkersEnabled) {
+  parent: blobService
+  name: 'win-worker-releases'
   properties: {
     publicAccess: 'None'
   }
@@ -127,11 +153,63 @@ resource assignBlobContributorToLocalDeployer 'Microsoft.Authorization/roleAssig
 // `scripts/deploy-aks.sh` flow (connection-string auth, no MI flag) working
 // on stamps that haven't re-deployed BaseInfra since this assignment was
 // added.
-resource assignBlobContributorToWorkerWorkload 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!empty(workerWorkloadPrincipalId)) {
+//
+// With the Windows worker pool the grant is on the copilot-sessions container
+// instead, the only container PilotSwarm uses; in managed-identity mode it
+// streams artifacts rather than signing SAS URLs, so it needs no account-level
+// action. A role assignment's scope can't change, so on a stamp that turns the
+// pool on later, the Windows worker deploy step
+// (deploy/providers/azure/deploy-steps/win-workers.mjs) deletes the old
+// account-wide assignment after this deployment adds the container one.
+resource assignBlobContributorToWorkerWorkload 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!empty(workerWorkloadPrincipalId) && !winWorkersEnabled) {
   name: guid(storageAccount.id, workerWorkloadPrincipalId, blobDataContributorRoleId, 'worker-workload')
   scope: storageAccount
   properties: {
     principalId: workerWorkloadPrincipalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: blobDataContributorDef.id
+  }
+}
+
+resource assignSessionsContributorToWorkerWorkload 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!empty(workerWorkloadPrincipalId) && winWorkersEnabled) {
+  name: guid(sessionsContainer.id, workerWorkloadPrincipalId, blobDataContributorRoleId, 'worker-workload')
+  scope: sessionsContainer
+  properties: {
+    principalId: workerWorkloadPrincipalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: blobDataContributorDef.id
+  }
+}
+
+// The Windows workers' identity: session state in copilot-sessions, and read
+// access to the release zips. Container scopes only.
+resource assignSessionsContributorToWinWorkers 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (winWorkersEnabled && !empty(winWorkerPrincipalId)) {
+  name: guid(sessionsContainer.id, winWorkerPrincipalId, blobDataContributorRoleId, 'win-worker')
+  scope: sessionsContainer
+  properties: {
+    principalId: winWorkerPrincipalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: blobDataContributorDef.id
+  }
+}
+
+resource assignReleasesReaderToWinWorkers 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (winWorkersEnabled && !empty(winWorkerPrincipalId)) {
+  name: guid(winWorkerReleasesContainer.id, winWorkerPrincipalId, blobDataReaderRoleId, 'win-worker')
+  scope: winWorkerReleasesContainer
+  properties: {
+    principalId: winWorkerPrincipalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: blobDataReaderDef.id
+  }
+}
+
+// The coordination host's identity: session state in copilot-sessions, the
+// container scope only.
+resource assignSessionsContributorToCoordinationHost 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (winWorkersEnabled && !empty(coordinationHostPrincipalId)) {
+  name: guid(sessionsContainer.id, coordinationHostPrincipalId, blobDataContributorRoleId, 'coordination-host')
+  scope: sessionsContainer
+  properties: {
+    principalId: coordinationHostPrincipalId
     principalType: 'ServicePrincipal'
     roleDefinitionId: blobDataContributorDef.id
   }
