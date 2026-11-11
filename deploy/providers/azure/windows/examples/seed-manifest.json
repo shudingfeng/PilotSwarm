@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "reposRoot": "Q:\\Repos",
+  "repositories": [
+    {
+      "name": "PilotSwarm",
+      "url": "https://github.com/microsoft/PilotSwarm.git",
+      "branch": "main",
+      "submodules": true,
+      "lfs": false
+    },
+    {
+      "name": "Hello-World",
+      "url": "https://github.com/octocat/Hello-World.git",
+      "branch": "master",
+      "submodules": false,
+      "lfs": false
+    }
+  ],
+  "modifyFolders": [
+    "Q:\\Repos\\PilotSwarm",
+    "Q:\\Repos\\Hello-World",
+    "Q:\\.cache\\npm",
+    "Q:\\temp"
+  ],
+  "packageCaches": [
+    {
+      "name": "npm",
+      "workingDirectory": "Q:\\Repos\\PilotSwarm",
+      "command": ["npm.cmd", "ci", "--ignore-scripts", "--no-audit", "--no-fund"],
+      "env": {
+        "npm_config_cache": "Q:\\.cache\\npm"
+      }
+    }
+  ]
+}
