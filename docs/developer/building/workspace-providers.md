@@ -188,12 +188,12 @@ It acts on the answer:
 | `{ decision: "deny", message? }` | The turn fails with `message` and is not retried |
 
 The busy schedule starts over when a turn gets past the gates: for a session
-with a workspace, when a turn gets past its workspace check, and on
-orchestration 1.0.84 and later, for a session without one, when a turn runs.
-Only orchestrations before 1.0.84 keep a session without a workspace in its
-place in the schedule after a turn runs, so that each later busy answer waits
-at least as long as the one before, and two busy answers on one worker,
-however far apart, release it from that worker.
+with a workspace, when a turn gets past its workspace check. A session without
+one keeps its place in the schedule after a turn runs, so that each later busy
+answer waits at least as long as the one before, and two busy answers on one
+worker, however far apart, release it from that worker. On orchestration
+1.0.84 and later, a session without a workspace that has an owner tag or the
+fast busy policy starts over when a turn runs.
 
 A hook that throws or answers anything else, or a session that the worker
 cannot read from the catalog, fails the turn with an error that is retried,

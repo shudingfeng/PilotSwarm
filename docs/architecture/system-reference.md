@@ -244,7 +244,10 @@ has an `ownerTag` schedules every activity above with that tag instead of its
 capability tag, so only a worker started with the same `ownerTag` runs it.
 Each worker's filter is `defaultAnd` over the four capability tags, plus its
 owner tag or, with a capacity requester, `pilotswarm.owner-capacity.v1`: five
-tags, Duroxide's limit. A worker with both refuses to start. In an owner-tagged
+tags, Duroxide's limit. A worker with both refuses to start. A worker with a
+capacity requester refuses, without a retry, a turn whose session's creation
+config holds an owner tag that the turn's input lacks or replaces
+(`OWNER_TAG_MISSING`); no other worker reads that config. In an owner-tagged
 tree the worker starts and tests no Workflow and `create_agent_session` makes
 no new root. A worker started with `ownerOnly` has the filter
 `{ tags: [ownerTag] }` and runs only these activities of its owner's sessions:

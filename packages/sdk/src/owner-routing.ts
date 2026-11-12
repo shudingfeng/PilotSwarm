@@ -187,3 +187,19 @@ export async function askOwnerCapacityRequester(
         clearTimeout(timer);
     }
 }
+
+/**
+ * The code of a turn that a worker with a capacity requester refuses: the
+ * session's creation config holds an owner tag that the turn doesn't carry.
+ */
+export const OWNER_TAG_MISSING = "OWNER_TAG_MISSING";
+
+/**
+ * Its words. The orchestration carries the tag it started with to every later
+ * turn, so a retry would be refused again.
+ */
+export function ownerTagMissingText(turnOwnerTag: unknown): string {
+    const started = typeof turnOwnerTag === "string" && turnOwnerTag ? "with another owner's tag" : "without its owner tag";
+    return `${OWNER_TAG_MISSING}: This session runs only on its owner's workers (owner routing), but its orchestration `
+        + `was started ${started}, so this turn would run on another worker. The turn was refused and is not retried.`;
+}

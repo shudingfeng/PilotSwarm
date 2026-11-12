@@ -1260,7 +1260,8 @@ function holdRefusedTurnNote(runtime: DurableSessionRuntime, sourcePrompt: strin
  * 1.0.84: a capacity `busy` answer holds the prompt the same way. With the
  * fast busy policy, a WORKSPACE_BUSY refusal releases the worker at once and
  * retries follow WORKSPACE_BUSY_RETRY_SCHEDULE_SECONDS. A hold that is not a
- * failure (`countsAsFailure: false`, no capacity answer) releases nothing.
+ * failure (`countsAsFailure: false`, no capacity answer) releases nothing and
+ * keeps the schedule's step, so its wait doesn't grow.
  */
 function* holdForWorkspace(
     runtime: DurableSessionRuntime,
@@ -1301,7 +1302,7 @@ function* holdForWorkspace(
         state.workspaceRetryScheduleMs,
         fastBusy ? WORKSPACE_BUSY_RETRY_SCHEDULE_SECONDS : undefined,
     );
-    state.workspaceRetry = { step: previous.step + 1, failures };
+    state.workspaceRetry = { step: countsAsFailure ? previous.step + 1 : previous.step, failures };
     state.workspaceStatus = { state: "unavailable", ...(code ? { code } : {}) };
     ctx.traceInfo(
         `[orch] workspace unavailable (${code ?? "unknown"}) on ${failedOn || "unknown worker"}: `
@@ -1425,9 +1426,12 @@ export function* handleTurnResult(
     // 1.0.84: a session without a workspace is held on the same timer by a
     // capacity request's busy answer, and by any turn result with the
     // workspace gate, such as a busy answer from an admission hook or a
-    // credential resolver. A turn got past the gates, so that hold is over:
-    // the next one starts the schedule again, and no retry count is carried.
-    if (pastGates && !state.config.workspace && state.workspaceStatus?.state === "unavailable") {
+    // credential resolver. For a session with an owner tag or the fast busy
+    // policy, a turn that got past the gates ends that hold: the next one
+    // starts the schedule again, and no retry count is carried. Any other
+    // session keeps 1.0.83's schedule (C4).
+    if (pastGates && !state.config.workspace && (options.ownerTag || options.workspaceBusyFastRelease)
+        && state.workspaceStatus?.state === "unavailable") {
         state.workspaceStatus = null;
         state.workspaceRetry = null;
     }

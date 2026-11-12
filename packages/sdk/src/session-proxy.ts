@@ -1,5 +1,5 @@
 import { HANDOFF_ACTIVITY_NAMES, TURN_CONTROL_ACTIVITY_NAMES, WORKFLOW_INTAKE_TURN_ACTIVITY_NAMES, routeHandoffActivity, routedActivityName, registerHandoffActivity, registerTurnControlActivity, registerWorkflowIntakeTurnActivity, routeOwnerActivity, routeOwnerCapacityActivity, routeTurnControlActivity, routeWorkflowRequestActivity, routeWorkspaceActivity, type ActivityRoutingContract } from "./activity-routing.js";
-import { askOwnerCapacityRequester, isOwnerRoutingTag, NEW_ROOT_OWNER_ROUTED_TEXT, workflowOwnerRoutedRefusal } from "./owner-routing.js";
+import { askOwnerCapacityRequester, isOwnerRoutingTag, NEW_ROOT_OWNER_ROUTED_TEXT, ownerTagMissingText, workflowOwnerRoutedRefusal } from "./owner-routing.js";
 import { agentSender, sessionIdOfInstance } from "./message-sender.js";
 import { spawnAgentAdmission, spawnAgentCreationBudget, WORKFLOW_CHILD_BUDGET_MAX } from "./child-budget.js";
 import { sessionTitleChangedForRecord } from "./session-title.js";
@@ -2165,11 +2165,39 @@ export function registerActivities(
             return result;
         };
 
+        // ── owner routing's backstop on a worker with a capacity requester ──
+        //
+        // Such a worker (the coordination host) runs untagged turns, and the
+        // turn of a session whose creation config holds an owner tag belongs
+        // on that owner's workers. A turn without that tag, or with another,
+        // was started by a client that didn't copy it, so it is refused here
+        // without a retry: every later turn of its orchestration carries the
+        // same tag. No other worker reads the config.
+        const checkOwnerTag = async (): Promise<TurnResult | null> => {
+            if (!sessionManager.getOwnerCapacityRequester?.() || !catalog?.getSessionCreationConfig) return null;
+            let saved: Record<string, unknown> | null;
+            try {
+                saved = await cmsRetryCritical(
+                    `runTurn.getSessionCreationConfig owner-tag session=${input.sessionId}`,
+                    () => catalog!.getSessionCreationConfig!(input.sessionId),
+                    (msg) => activityCtx.traceInfo(msg),
+                );
+            } catch (err: any) {
+                const detail = `the session catalog could not read its creation config: ${err?.message ?? err}`;
+                activityCtx.traceInfo(`[runTurn] owner routing could not check ${input.sessionId}: ${detail}`);
+                return { type: "error", message: `Owner routing could not check this turn: ${detail}` } as TurnResult;
+            }
+            const savedTag = saved?.ownerTag;
+            if (!isOwnerRoutingTag(savedTag) || input.ownerTag === savedTag) return null;
+            activityCtx.traceInfo(`[runTurn] refused ${input.sessionId}: its creation config holds an owner tag that the turn ${input.ownerTag ? "replaces" : "lacks"}`);
+            return { type: "error", message: ownerTagMissingText(input.ownerTag), retryable: false } as TurnResult;
+        };
+
         try {
-            const refusedByAdmission = await admitTurn();
-            if (refusedByAdmission) {
+            const refused = await checkOwnerTag() ?? await admitTurn();
+            if (refused) {
                 // 1.0.83: refused before anything was sent, so an invocation this attempt carried is reported unsent.
-                finalTurnResult = withIntakeWitness(refusedByAdmission);
+                finalTurnResult = withIntakeWitness(refused);
                 return finalTurnResult;
             }
             finalTurnResult = await sessionManager.withRunTurnLock(input.sessionId, "runTurn", async () => {
