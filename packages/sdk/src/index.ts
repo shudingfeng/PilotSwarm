@@ -243,6 +243,9 @@ export {
 } from "./turn-control-contract.js";
 export { TURN_CONTROL_CAPABILITY, OWNER_CAPACITY_CAPABILITY } from "./activity-routing.js";
 export { CAPACITY_UNAVAILABLE, CAPACITY_DENIED, OWNER_CAPACITY_TIMEOUT_MS } from "./owner-routing.js";
+// Owner routing and dispatcher delegation: the tag and record the portal saves for a session a dispatcher creates.
+export { isOwnerRoutingTag, ownerRoutingTagForRow } from "./owner-routing.js";
+export type { DelegatedCreation, SessionDelegation } from "./delegated-creation.js";
 export {
     IMAGE_ATTACHMENT_CONTENT_TYPES,
     ATTACHMENT_MAX_BYTES,

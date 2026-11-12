@@ -15,9 +15,12 @@ test("deleteSession forwards its reason and the forced delete's options, and add
     const auth = { principal: { provider: "dev", subject: "owner" }, authorization: { role: "user" } };
     await runtime.call("deleteSession", { sessionId: "s1", reason: "work ended", force: true, settleTimeoutMs: 0 }, auth);
     await runtime.call("deleteSession", { sessionId: "s2" }, auth);
+    // A plain delete keeps the default reason, as before the forced delete existed.
+    await runtime.call("deleteSession", { sessionId: "s3", reason: "work ended" }, auth);
     assert.deepEqual(calls, [
         ["s1", "work ended", { force: true, settleTimeoutMs: 0 }],
         ["s2", undefined, {}],
+        ["s3", undefined, {}],
     ]);
 });
 

@@ -781,11 +781,14 @@ back or the dispatcher returns it.
 
 ### Owner tags and owner-only workers
 
-- **Owner tags.** With `PILOTSWARM_OWNER_ROUTING=1` on the Portal, the client
-  records `owner.<subject>` of a top-level user session's owner in its
-  orchestration input, and orchestration `1.0.84` tags every session-scoped
-  activity with it. A sub-agent created during a turn takes that turn's tag.
-  System sessions, and every session under a system root, stay untagged.
+- **Owner tags.** With `PILOTSWARM_OWNER_ROUTING=1` on the Portal, a session
+  the dispatcher creates for an owner (`onBehalfOfOwner`) is owner-routed: the
+  Portal records `owner.<ownerOid>` in its creation config, and whichever
+  client starts the session copies that tag into its orchestration input,
+  whatever that client's own settings. Orchestration `1.0.84` tags every
+  session-scoped activity with it. A sub-agent created during a turn takes
+  that turn's tag. Sessions that people start in the Portal, system sessions
+  and every session under a system root stay untagged.
 - **Workflows.** A Workflow carries no owner tag: its activities, scripts and
   agent steps run on the Linux workers. So in a tagged tree no Workflow is
   started or tested (`WORKFLOW_OWNER_ROUTED`), whether an agent or a person
@@ -874,9 +877,11 @@ sequenceDiagram
   isn't one, without asking the controller, rather than retrying a request it
   can never serve. Use Entra sign-in for the Portal.
 - **The fast busy policy.** With `PILOTSWARM_WORKSPACE_BUSY_FAST_RELEASE=1` on
-  the Portal, a `WORKSPACE_BUSY` refusal releases the session from its worker at
-  once and retries after 10 seconds, 20 seconds, a minute, then every 3 minutes,
-  instead of 30 seconds, 2 minutes, 5 minutes, then every 15 minutes. See the
+  the Portal, an owner-routed session and the sub-agents it creates use the
+  fast policy: a `WORKSPACE_BUSY` refusal releases the session from its worker
+  at once and retries after 10 seconds, 20 seconds, a minute, then every 3
+  minutes, instead of 30 seconds, 2 minutes, 5 minutes, then every 15 minutes.
+  Sessions that people start in the Portal keep today's policy. See the
   [fast busy policy](../../architecture/orchestration/design.md#fast-busy-policy-1084).
 
 ### Ending a session tree
@@ -919,11 +924,20 @@ controller answers `403`.
   explains it to owners.
 - **What the dispatcher may then do on the Portal.** Create sessions that the
   owner owns (`onBehalfOfOwner`), which stay private and give the dispatcher a
-  targeted `write` share, the session's only share; send prompts to them, steer
-  and stop their turns; and complete, cancel and delete them, with `force` for a
-  tree that doesn't settle or whose root is already deleted
+  targeted `write` share; send prompts to them, steer and stop their turns;
+  and complete, cancel and delete them, with `force` for a tree that doesn't
+  settle or whose root is already deleted
   ([Ending a session tree](#ending-a-session-tree)). Administrators get none of
-  this from their role.
+  this from their role. The Portal records each such creation in the session's
+  creation config, and with `PILOTSWARM_OWNER_ROUTING=1` the owner's tag too;
+  no request parameter sets either.
+- **Read-only sharing.** The owner, or an administrator, may share such a
+  session for reading (`read` shares, `shared_read`), but the Portal refuses
+  `shared_write` and every `write` share but the dispatcher's own, to everyone,
+  administrators included (`403 DELEGATED_SESSION_READ_ONLY`, audited).
+  Otherwise a teammate's prompt would run on the owner's VM with the owner's
+  token. To hand work to another user, the dispatcher creates a new session
+  for them.
 - **What it may do on the controller.** Only it passes the dispatcher routes, at
   most `WIN_DEV_DRIVE_MAX_PER_USER` drives per owner:
 
@@ -951,8 +965,10 @@ controller answers `403`.
   dispatcher call.
 
 Enforce ownership on a pool that several people share
-(`AUTHZ_ENFORCE_OWNERSHIP=true`): with the default, ownership is only audited,
-and revoking delegation changes nothing. See
+(`AUTHZ_ENFORCE_OWNERSHIP=true`). Without it the Portal refuses
+`onBehalfOfOwner` (`403 OWNERSHIP_NOT_ENFORCED`): ownership is then only
+audited, so nothing would keep a delegated session private or read-only, and
+revoking delegation would change nothing. See
 [Dispatcher delegation](../reference/configuration.md#dispatcher-delegation).
 
 ## Session message scope

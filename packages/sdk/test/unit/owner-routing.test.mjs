@@ -378,34 +378,31 @@ function fakeStore() {
 
 const USER = { provider: "entra", subject: "0b7c6f53-4d3e-4c0f-9f4e-2f6c1f0a9d11" };
 
-test("a top-level session first sent through another client gets the tag of its row's owner; other rows get none", async () => {
+test("a top-level session starts with the tag saved with its creation config, on any client whatever its settings; other sessions get none", async () => {
     const store = fakeStore();
-    const creator = store.client({ ownerRouting: false });
+    const creator = store.client();
+    // As the Portal records a session a dispatcher creates for a user.
+    const routed = await creator.createSession({ owner: USER, ownerTag: OWNER });
     const user = await creator.createSession({ owner: USER });
     const unowned = await creator.createSession({});
     const systemOwned = await creator.createSession({ owner: { provider: "system", subject: "system" } });
-    // A row marked is_system, as createSystemSession writes it.
-    await creator._catalog.createSession("system-row", { isSystem: true, owner: USER });
+    // A row marked is_system, as createSystemSession writes it; a saved tag does not route it.
+    await creator._catalog.createSession("system-row", { isSystem: true, owner: USER, creationConfig: { ownerTag: OWNER } });
 
-    // As after a Portal restart: another process sends the first message.
-    const portal = store.client({ ownerRouting: true });
-    for (const id of [user.sessionId, unowned.sessionId, systemOwned.sessionId, "system-row"]) await portal._startTurn(id, "hello");
-    assert.equal(store.startOf(user.sessionId).ownerTag, OWNER);
-    assert.equal(store.startOf(unowned.sessionId).ownerTag, undefined);
-    assert.equal(store.startOf(systemOwned.sessionId).ownerTag, undefined);
-    assert.equal(store.startOf("system-row").ownerTag, undefined);
+    // As after a Portal restart: another process, with no owner routing setting, sends the first message.
+    const other = store.client();
+    for (const id of [routed.sessionId, user.sessionId, unowned.sessionId, systemOwned.sessionId, "system-row"]) await other._startTurn(id, "hello");
+    assert.equal(store.startOf(routed.sessionId).ownerTag, OWNER);
+    for (const id of [user.sessionId, unowned.sessionId, systemOwned.sessionId, "system-row"]) {
+        assert.ok(!("ownerTag" in store.startOf(id)), id);
+        assert.ok(!("workspaceBusyFastRelease" in store.startOf(id)), id);
+    }
     assert.equal(store.startOf("system-row").isSystem, true);
-
-    // Without the setting, routed as today.
-    const plain = await creator.createSession({ owner: USER });
-    await store.client({ ownerRouting: false })._startTurn(plain.sessionId, "hello");
-    assert.ok(!("ownerTag" in store.startOf(plain.sessionId)));
-    assert.ok(!("workspaceBusyFastRelease" in store.startOf(plain.sessionId)));
 });
 
 test("a session created during a turn keeps the turn's tag and fast policy when another client starts it, and is never derived", async () => {
     const store = fakeStore();
-    const turnClient = store.client({ ownerRouting: false, workspaceBusyFastRelease: false });
+    const turnClient = store.client({ workspaceBusyFastRelease: false });
     const root = await turnClient.createSession({ owner: USER });
     const child = await turnClient.createSession({
         parentSessionId: root.sessionId, nestingLevel: 1, owner: USER, ownerTag: OWNER, workspaceBusyFastRelease: true,
@@ -415,7 +412,7 @@ test("a session created during a turn keeps the turn's tag and fast policy when 
     assert.equal(store.creation.get(child.sessionId).ownerTag, OWNER);
     assert.equal(store.creation.get(child.sessionId).workspaceBusyFastRelease, true);
 
-    const other = store.client({ ownerRouting: false, workspaceBusyFastRelease: false });
+    const other = store.client({ workspaceBusyFastRelease: false });
     await other._startTurn(child.sessionId, "task", { bootstrap: true });
     await other._startTurn(createdRoot.sessionId, "task", { bootstrap: true });
     for (const id of [child.sessionId, createdRoot.sessionId]) {
@@ -425,24 +422,28 @@ test("a session created during a turn keeps the turn's tag and fast policy when 
         assert.ok(!("ownerTag" in input.config) && !("workspaceBusyFastRelease" in input.config));
     }
 
-    // A child without saved routing is never given a derived tag, even by a
-    // client with owner routing on.
+    // A child without saved routing is never given a derived tag or the
+    // fast policy, even by a client with the fast policy on.
     const untaggedChild = await turnClient.createSession({ parentSessionId: root.sessionId, nestingLevel: 1, owner: USER });
-    await store.client({ ownerRouting: true, workspaceBusyFastRelease: true })._startTurn(untaggedChild.sessionId, "task");
+    await store.client({ workspaceBusyFastRelease: true })._startTurn(untaggedChild.sessionId, "task");
     assert.ok(!("ownerTag" in store.startOf(untaggedChild.sessionId)));
     assert.ok(!("workspaceBusyFastRelease" in store.startOf(untaggedChild.sessionId)));
 });
 
-test("the client settings default from PILOTSWARM_OWNER_ROUTING and PILOTSWARM_WORKSPACE_BUSY_FAST_RELEASE", async () => {
+test("PILOTSWARM_OWNER_ROUTING tags nothing at start; PILOTSWARM_WORKSPACE_BUSY_FAST_RELEASE gives owner-routed top-level sessions the fast policy", async () => {
     const saved = { routing: process.env.PILOTSWARM_OWNER_ROUTING, fast: process.env.PILOTSWARM_WORKSPACE_BUSY_FAST_RELEASE };
     try {
         process.env.PILOTSWARM_OWNER_ROUTING = "1";
         process.env.PILOTSWARM_WORKSPACE_BUSY_FAST_RELEASE = "1";
         const store = fakeStore();
-        const s = await store.client().createSession({ owner: USER });
-        await store.client()._startTurn(s.sessionId, "hello");
-        assert.equal(store.startOf(s.sessionId).ownerTag, OWNER);
-        assert.equal(store.startOf(s.sessionId).workspaceBusyFastRelease, true);
+        const routed = await store.client().createSession({ owner: USER, ownerTag: OWNER });
+        const portalSession = await store.client().createSession({ owner: USER });
+        await store.client()._startTurn(routed.sessionId, "hello");
+        await store.client()._startTurn(portalSession.sessionId, "hello");
+        assert.equal(store.startOf(routed.sessionId).ownerTag, OWNER);
+        assert.equal(store.startOf(routed.sessionId).workspaceBusyFastRelease, true);
+        assert.ok(!("ownerTag" in store.startOf(portalSession.sessionId)), "a session without a saved tag gets none");
+        assert.ok(!("workspaceBusyFastRelease" in store.startOf(portalSession.sessionId)), "and keeps today's busy policy");
     } finally {
         if (saved.routing === undefined) delete process.env.PILOTSWARM_OWNER_ROUTING; else process.env.PILOTSWARM_OWNER_ROUTING = saved.routing;
         if (saved.fast === undefined) delete process.env.PILOTSWARM_WORKSPACE_BUSY_FAST_RELEASE; else process.env.PILOTSWARM_WORKSPACE_BUSY_FAST_RELEASE = saved.fast;
@@ -451,13 +452,18 @@ test("the client settings default from PILOTSWARM_OWNER_ROUTING and PILOTSWARM_W
 
 test("a session the dispatcher creates for an owner (onBehalfOfOwner) carries the owner's tag, not the dispatcher's", async () => {
     const store = fakeStore();
-    const portal = store.client({ ownerRouting: true });
-    // As the Portal creates it: owned by the named user, private, and its
-    // first prompt sent by the dispatcher as itself.
-    const delegated = await portal.createSession({ owner: USER, visibility: "private" });
     const dispatcher = { kind: "user", provider: "entra", subject: "5d0c9b61-2f4e-4a8d-b1c7-3e9f0a6d2b44", relation: "collaborator", origin: "api" };
-    await portal._startTurn(delegated.sessionId, "do the work", { sender: dispatcher });
-    assert.equal(store.startOf(delegated.sessionId).ownerTag, OWNER);
+    // As the Portal creates it: owned by the named user, private, with the
+    // owner's tag and the record of the delegated creation saved.
+    const delegated = await store.client().createSession({
+        owner: USER, visibility: "private", ownerTag: OWNER,
+        delegatedCreation: { dispatcher: { provider: dispatcher.provider, subject: dispatcher.subject } },
+    });
+    // Its first prompt, sent by the dispatcher as itself, through a client without owner routing settings.
+    await store.client()._startTurn(delegated.sessionId, "do the work", { sender: dispatcher });
+    const input = store.startOf(delegated.sessionId);
+    assert.equal(input.ownerTag, OWNER);
+    assert.ok(!("delegatedCreation" in input.config), "the record stays in the catalog, out of the session's config");
 });
 
 // ─── The orchestration ──────────────────────────────────────────────────────

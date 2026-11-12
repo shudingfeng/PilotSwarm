@@ -56,3 +56,29 @@ test("dispatcherConfigured follows this host's DISPATCHER_SP_OBJECT_ID", async (
         assert.equal((await transport.getMyDispatcherDelegation()).dispatcherConfigured, false);
     });
 });
+
+test("the portal's trusted creation fields reach the client, and the delegation record is read through the management client", async () => {
+    const { transport } = makeTransport();
+    const created = [];
+    const handle = (sessionId) => ({ sessionId });
+    transport.client = {
+        createSession: async (options) => { created.push(["createSession", options]); return handle("s-1"); },
+        createSessionForAgent: async (agentName, options) => { created.push(["createSessionForAgent", options]); return handle("s-2"); },
+    };
+    transport._authorizePackageAgentCreate = async (agentName) => agentName;
+    const reads = [];
+    transport.mgmt.getSession = async () => null;
+    transport.mgmt.getSessionDelegation = async (sessionId) => { reads.push(sessionId); return { rootSessionId: "s-1", dispatcher: { provider: "entra", subject: "d" } }; };
+    const trusted = { ownerTag: "owner.u-1", delegatedCreation: { dispatcher: { provider: "entra", subject: "d" } } };
+    await transport.createSession({ owner: { provider: "entra", subject: "u-1" }, visibility: "private", ...trusted });
+    await transport.createSessionForAgent("builder", { owner: { provider: "entra", subject: "u-1" }, visibility: "private", ...trusted });
+    await transport.createSession({ owner: { provider: "entra", subject: "u-2" } });
+    assert.deepEqual(created.map(([, options]) => [options.ownerTag, options.delegatedCreation?.dispatcher.subject]), [
+        ["owner.u-1", "d"],
+        ["owner.u-1", "d"],
+        [undefined, undefined],
+    ]);
+    assert.ok(!("ownerTag" in created[2][1]) && !("delegatedCreation" in created[2][1]));
+    assert.equal((await transport.getSessionDelegation("s-1")).dispatcher.subject, "d");
+    assert.deepEqual(reads, ["s-1"]);
+});

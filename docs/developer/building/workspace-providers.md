@@ -360,10 +360,12 @@ mistakes, not against a person who wants to read another person's files.
 
 [Owner routing](../reference/configuration.md#owner-routing-optional) gives
 each person workers of their own, for example when a worker holds that
-person's folders or credentials. The client tags the person's sessions
-(`PILOTSWARM_OWNER_ROUTING=1`), and only workers started with the person's
+person's folders or credentials. With `PILOTSWARM_OWNER_ROUTING=1` the portal
+tags the sessions that the deployment's dispatcher creates for a person, and
+only workers started with the person's
 tag (`PILOTSWARM_WORKER_OWNER_TAG`) run their turns, workspace checks and
-releases. With `PILOTSWARM_WORKER_OWNER_ONLY=1` as well, such a worker runs
+releases. Sessions that people start themselves stay untagged. With
+`PILOTSWARM_WORKER_OWNER_ONLY=1` as well, such a worker runs
 nothing else: no untagged work (system sessions' turns, titles, the steps
 around every turn), no capability-tagged activity and no capacity request,
 work whose input can come from every user. Another worker without these
