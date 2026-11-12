@@ -86,8 +86,8 @@ param privateLinkConfigurationName string
 @description('UAMI resource id used by the approve-private-endpoint deployment script. Must have Network Contributor on the AppGW.')
 param approvalManagedIdentityId string
 
-@description('SFI_COMPLIANT profile: skip the Private Link approval deployment script, which needs Storage shared keys. deploy/providers/azure/deploy-steps/sfi.mjs approves the connection after this module instead.')
-param sfiCompliant bool = false
+@description('AZURE_POLICY_RESTRICTED profile: skip the Private Link approval deployment script, which needs Storage shared keys. deploy/providers/azure/deploy-steps/policy-restricted.mjs approves the connection after this module instead.')
+param policyRestricted bool = false
 
 // -----------------------------------------------------------------------------
 // GlobalInfra references
@@ -375,11 +375,11 @@ module afdOrigin '../../common/bicep/frontdoor-origin-route.bicep' = if (edgeMod
 // -----------------------------------------------------------------------------
 // Auto-approve pending PLS connection on the AppGW side. Only meaningful when
 // AFD owns the Private Endpoint (afd mode). In private mode there's no
-// no AFD-side PE to approve. With SFI_COMPLIANT the deploy step approves it
+// no AFD-side PE to approve. With AZURE_POLICY_RESTRICTED the deploy step approves it
 // instead (a deployment script needs Storage shared keys).
 // -----------------------------------------------------------------------------
 
-var approvesPrivateEndpointHere = edgeMode == 'afd' && !sfiCompliant
+var approvesPrivateEndpointHere = edgeMode == 'afd' && !policyRestricted
 
 module plApprove '../../common/bicep/approve-private-endpoint.bicep' = if (approvesPrivateEndpointHere) {
   name: 'portal-approve-pe-${dTime}'
@@ -418,7 +418,7 @@ output PrivateLinkServiceId string = privateLinkServiceId
 #disable-next-line BCP318
 output RouteName string = edgeMode == 'afd' ? afdOrigin.outputs.routeName : ''
 
-@description('Count of PLS connections auto-approved in this deployment. Zero when edgeMode is not afd, or with SFI_COMPLIANT, where the deploy step approves. Reads the approval module only under its own condition: reading a skipped module fails the deployment with DeploymentNotFound.')
+@description('Count of PLS connections auto-approved in this deployment. Zero when edgeMode is not afd, or with AZURE_POLICY_RESTRICTED, where the deploy step approves. Reads the approval module only under its own condition: reading a skipped module fails the deployment with DeploymentNotFound.')
 #disable-next-line BCP318
 output ApprovedPrivateEndpointCount int = approvesPrivateEndpointHere ? plApprove.outputs.approvedCount : 0
 

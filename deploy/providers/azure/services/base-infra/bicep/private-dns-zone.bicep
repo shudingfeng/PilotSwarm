@@ -1,6 +1,6 @@
 // ==============================================================================
 // PilotSwarm BaseInfra — private DNS zone linked to the stamp VNet
-// (SFI_COMPLIANT=true or the Windows worker pool).
+// (AZURE_POLICY_RESTRICTED=true or the Windows worker pool).
 //
 // The link sets `resolutionPolicy: 'NxDomainRedirect'` (API 2024-06-01 or
 // later). A linked privatelink zone otherwise answers NXDOMAIN for a name it

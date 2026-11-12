@@ -51,7 +51,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { log, run } from "../../../scripts/lib/common.mjs";
 import { deploysPostgres } from "../../../scripts/lib/database-env.mjs";
-import { sfiCompliant, settingValue, winWorkerSettings, winWorkersEnabled } from "../../../scripts/lib/aks-env.mjs";
+import { policyRestricted, settingValue, winWorkerSettings, winWorkersEnabled } from "../../../scripts/lib/aks-env.mjs";
 import { renderWinWorkerUserData } from "../../../scripts/lib/render-params.mjs";
 import { diskControllerOverlayEnv } from "../../../scripts/lib/stage-manifests.mjs";
 import { COORDINATION_HOST_CA_HASH_KEY, caBundleHash, coordinationHostEnabled } from "../../../scripts/lib/coordination-host.mjs";
@@ -502,8 +502,8 @@ export async function afterBicep({ env, modules }, { runFn = run, tmpRoot = tmpd
     patchScaleSetModel({ scaleSetId, body: scaleSetModelPatch({ vmSize: settings.vmSize, imageId, userData }) }, { runFn, tmpRoot });
     log("ok", `[win-workers] updated the model of scale set ${names.scaleSetName} (configuration ${configVersion.slice(0, 12)}); new VMs take it, and the controller replaces the others.`);
   }
-  // The SFI deploy step deletes the rule under that profile.
-  if (deploysPostgres(env) && !sfiCompliant(env)) {
+  // The policy-restricted deploy step deletes the rule under that profile.
+  if (deploysPostgres(env) && !policyRestricted(env)) {
     deleteAllowAllAzureServicesRule({
       subscriptionId: names.subscriptionId, resourceGroup: names.resourceGroup, serverName: names.postgresServerName,
     }, { runFn });

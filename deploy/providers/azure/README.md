@@ -21,7 +21,7 @@ This directory holds the reusable Azure deployment templates for PilotSwarm:
   and upgrade steps of a Windows worker pool; nothing uses it unless a
   deployment builds that image. See its [README](windows/README.md).
 - `deploy-steps/` holds what Bicep alone can't do for some settings:
-  `sfi.mjs` for `SFI_COMPLIANT=true`, and for the Windows worker pool
+  `policy-restricted.mjs` for `AZURE_POLICY_RESTRICTED=true`, and for the Windows worker pool
   (`WIN_WORKERS_ENABLED=true`, see "Optional: Windows worker pool" in
   [deploy/scripts/README.md](../../scripts/README.md)) `win-workers.mjs` and
   the database role Job (`Setup-WinWorkerDbRole.mjs`, staged and run by

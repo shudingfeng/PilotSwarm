@@ -1,5 +1,5 @@
 // ==============================================================================
-// PilotSwarm BaseInfra — Network Security Perimeter (SFI_COMPLIANT=true only).
+// PilotSwarm BaseInfra — Network Security Perimeter (AZURE_POLICY_RESTRICTED=true only).
 //
 // A subscription whose Azure Policy requires a network security perimeter
 // denies `publicNetworkAccess: 'Enabled'` and `'Disabled'` on Key Vault and

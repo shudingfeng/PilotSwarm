@@ -1,4 +1,4 @@
-// The SFI_COMPLIANT deploy step (deploy/providers/azure/deploy-steps/sfi.mjs):
+// The AZURE_POLICY_RESTRICTED deploy step (deploy/providers/azure/deploy-steps/policy-restricted.mjs):
 // the App Gateway probe, the Front Door Private Link approval and the removal
 // of PostgreSQL's AllowAllAzureServices rule, each against an Azure CLI that
 // the test answers, then the step's wiring into deploy.mjs's bicep stage.
@@ -20,7 +20,7 @@ import {
   FRONT_DOOR_REQUEST_MESSAGE,
   PRIVATE_LINK_APPROVAL_TIMEOUT_MS,
   PRIVATE_LINK_POLL_INTERVAL_MS,
-} from "../../providers/azure/deploy-steps/sfi.mjs";
+} from "../../providers/azure/deploy-steps/policy-restricted.mjs";
 import { REPO_ROOT, parseEnvFile, templateEnvPath } from "../lib/common.mjs";
 import { DATABASE_INPUT_KEYS } from "../lib/database-env.mjs";
 
@@ -221,10 +221,10 @@ test("after the modules: base-infra removes the rule from a provisioned server, 
 const FAKE_AZ = String.raw`
 const fs = require("node:fs");
 const args = process.argv.slice(2);
-const record = (extra = {}) => fs.appendFileSync(process.env.SFI_TEST_CALLS, JSON.stringify({ args, ...extra }) + "\n");
+const record = (extra = {}) => fs.appendFileSync(process.env.POLICY_RESTRICTED_TEST_CALLS, JSON.stringify({ args, ...extra }) + "\n");
 const is = (...words) => words.every((word, i) => args[i] === word);
 if (is("--version")) { console.log("azure-cli (test)"); process.exit(0); }
-if (is("account", "show")) { console.log(process.env.SFI_TEST_SUBSCRIPTION); process.exit(0); }
+if (is("account", "show")) { console.log(process.env.POLICY_RESTRICTED_TEST_SUBSCRIPTION); process.exit(0); }
 if (is("ad", "signed-in-user", "show")) process.exit(1);
 if (is("group", "show")) process.exit(0);
 if (is("deployment", "group", "create")) {
@@ -260,9 +260,9 @@ function writeFakeAz(dir) {
 
 let sequence = 0;
 function deployBaseInfraBicep(t, settings) {
-  const name = `sfi${process.pid.toString(36)}${sequence++}`;
+  const name = `apr${process.pid.toString(36)}${sequence++}`;
   const local = join(REPO_ROOT, "deploy/envs/local", name);
-  const dir = mkdtempSync(join(tmpdir(), "ps-sfi-step-"));
+  const dir = mkdtempSync(join(tmpdir(), "ps-apr-step-"));
   t.after(() => {
     for (const path of [local, dir, join(REPO_ROOT, "deploy/.tmp", name), join(REPO_ROOT, "deploy/.tmp", `base-infra-${name}`)]) {
       rmSync(path, { recursive: true, force: true });
@@ -285,29 +285,29 @@ function deployBaseInfraBicep(t, settings) {
   writeFileSync(calls, "");
 
   const childEnv = { ...process.env };
-  const ambient = [...Object.keys(env), ...DATABASE_INPUT_KEYS, "SFI_COMPLIANT", "PERIMETER_OPERATOR_IP_PREFIXES",
+  const ambient = [...Object.keys(env), ...DATABASE_INPUT_KEYS, "AZURE_POLICY_RESTRICTED", "PERIMETER_OPERATOR_IP_PREFIXES",
     "ACTIONS_ID_TOKEN_REQUEST_URL", "ACTIONS_ID_TOKEN_REQUEST_TOKEN"];
   for (const key of ambient) delete childEnv[key];
   const pathKey = Object.keys(childEnv).find((key) => key.toUpperCase() === "PATH") ?? "PATH";
   childEnv[pathKey] = `${dir}${delimiter}${childEnv[pathKey] ?? ""}`;
   const result = spawnSync(process.execPath, [
     join(REPO_ROOT, "deploy/scripts/deploy.mjs"), "base-infra", name, "--steps", "bicep", "--image-tag", "fixture",
-  ], { cwd: REPO_ROOT, encoding: "utf8", env: { ...childEnv, SFI_TEST_CALLS: calls, SFI_TEST_SUBSCRIPTION: env.SUBSCRIPTION_ID } });
+  ], { cwd: REPO_ROOT, encoding: "utf8", env: { ...childEnv, POLICY_RESTRICTED_TEST_CALLS: calls, POLICY_RESTRICTED_TEST_SUBSCRIPTION: env.SUBSCRIPTION_ID } });
   const logged = readFileSync(calls, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
   return { result, logged };
 }
 
-test("deploy.mjs runs the step around base-infra's Bicep only with SFI_COMPLIANT=true", (t) => {
+test("deploy.mjs runs the step around base-infra's Bicep only with AZURE_POLICY_RESTRICTED=true", (t) => {
   // Off: no profile call, and no profile parameter in the rendered file.
   const off = deployBaseInfraBicep(t, {});
   assert.equal(off.result.status, 0, off.result.stderr);
   assert.deepEqual(off.logged.map(({ args }) => args.slice(0, 3).join(" ")), ["deployment group create"]);
   const rendered = Object.keys(off.logged[0].parameters);
-  for (const name of ["sfiCompliant", "perimeterOperatorIpPrefixes", "appGwExists"]) assert.ok(!rendered.includes(name), name);
+  for (const name of ["policyRestricted", "perimeterOperatorIpPrefixes", "appGwExists"]) assert.ok(!rendered.includes(name), name);
 
   // On: the probe before the deployment, the rule cleanup after it.
   const on = deployBaseInfraBicep(t, {
-    SFI_COMPLIANT: "true",
+    AZURE_POLICY_RESTRICTED: "true",
     PERIMETER_OPERATOR_IP_PREFIXES: "203.0.113.7, 198.51.100.0/24",
   });
   assert.equal(on.result.status, 0, on.result.stderr);
@@ -318,7 +318,7 @@ test("deploy.mjs runs the step around base-infra's Bicep only with SFI_COMPLIANT
     "postgres flexible-server firewall-rule delete",
   ]);
   const { parameters } = on.logged[1];
-  assert.deepEqual(parameters.sfiCompliant, { value: true });
+  assert.deepEqual(parameters.policyRestricted, { value: true });
   assert.deepEqual(parameters.appGwExists, { value: false });
   assert.deepEqual(parameters.perimeterOperatorIpPrefixes, { value: ["203.0.113.7/32", "198.51.100.0/24"] });
 });

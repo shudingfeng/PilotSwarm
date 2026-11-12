@@ -161,7 +161,7 @@ test("real base-infra template renders the node-pool settings: the repocache poo
   });
 });
 
-// ─── SFI_COMPLIANT ───
+// ─── AZURE_POLICY_RESTRICTED ───
 
 // Values the base-infra and portal templates need besides template.env.
 const STAMP_FIXTURES = {
@@ -185,7 +185,7 @@ const STAMP_FIXTURES = {
 const templateFor = (module) =>
   join(REPO_ROOT, `deploy/providers/azure/services/${module}/bicep/${module}.params.template.json`);
 
-// The rendering before SFI_COMPLIANT existed: every placeholder replaced by
+// The rendering before AZURE_POLICY_RESTRICTED existed: every placeholder replaced by
 // its value inside the JSON string. The template.env values of the
 // normalized keys (true, false, 1) render unchanged, so this is exact here.
 function substituteTemplate(raw, env) {
@@ -193,7 +193,7 @@ function substituteTemplate(raw, env) {
     String(env[key]).replace(/\\/g, "\\\\").replace(/"/g, '\\"'));
 }
 
-test("SFI_COMPLIANT off renders base-infra and portal byte for byte as before; on adds only the profile's parameters", () => {
+test("AZURE_POLICY_RESTRICTED off renders base-infra and portal byte for byte as before; on adds only the profile's parameters", () => {
   withTmp((dir) => {
     const base = {
       ...parseEnvFile(templateEnvPath()),
@@ -205,24 +205,24 @@ test("SFI_COMPLIANT off renders base-infra and portal byte for byte as before; o
       const templatePath = templateFor(module);
       const raw = readFileSync(templatePath, "utf8");
       for (const flag of [undefined, "", "false", " FALSE "]) {
-        const envMap = { ...base, SFI_COMPLIANT: flag };
-        if (flag === undefined) delete envMap.SFI_COMPLIANT;
+        const envMap = { ...base, AZURE_POLICY_RESTRICTED: flag };
+        if (flag === undefined) delete envMap.AZURE_POLICY_RESTRICTED;
         const { renderedPath } = renderParams({ module, templatePath, envMap, outDir: dir });
-        assert.equal(readFileSync(renderedPath, "utf8"), substituteTemplate(raw, envMap), `${module} SFI_COMPLIANT=${flag}`);
+        assert.equal(readFileSync(renderedPath, "utf8"), substituteTemplate(raw, envMap), `${module} AZURE_POLICY_RESTRICTED=${flag}`);
       }
 
-      const { renderedPath } = renderParams({ module, templatePath, envMap: { ...base, SFI_COMPLIANT: "true" }, outDir: dir });
+      const { renderedPath } = renderParams({ module, templatePath, envMap: { ...base, AZURE_POLICY_RESTRICTED: "true" }, outDir: dir });
       const on = JSON.parse(readFileSync(renderedPath, "utf8")).parameters;
       const off = JSON.parse(substituteTemplate(raw, base)).parameters;
       for (const name of Object.keys(off)) assert.deepEqual(on[name], off[name], `${module} ${name}`);
       const added = Object.fromEntries(Object.entries(on).filter(([name]) => !(name in off)));
       const expected = {
         "base-infra": {
-          sfiCompliant: { value: true },
+          policyRestricted: { value: true },
           perimeterOperatorIpPrefixes: { value: ["203.0.113.7/32"] },
           appGwExists: { value: true },
         },
-        portal: { sfiCompliant: { value: true } },
+        portal: { policyRestricted: { value: true } },
         worker: {},
       };
       assert.deepEqual(added, expected[module], module);
@@ -236,7 +236,7 @@ test("PERIMETER_OPERATOR_IP_PREFIXES: trimmed, empty entries and repeats dropped
       const envMap = {
         ...parseEnvFile(templateEnvPath()),
         ...STAMP_FIXTURES,
-        SFI_COMPLIANT: "true",
+        AZURE_POLICY_RESTRICTED: "true",
         APP_GATEWAY_EXISTS: "false",
         PERIMETER_OPERATOR_IP_PREFIXES: prefixes,
       };
@@ -261,10 +261,10 @@ test("PERIMETER_OPERATOR_IP_PREFIXES: trimmed, empty entries and repeats dropped
   });
 });
 
-test("SFI_COMPLIANT=true takes the App Gateway probe's answer in afd mode and refuses to guess it", () => {
+test("AZURE_POLICY_RESTRICTED=true takes the App Gateway probe's answer in afd mode and refuses to guess it", () => {
   withTmp((dir) => {
     const render = (extra) => {
-      const envMap = { ...parseEnvFile(templateEnvPath()), ...STAMP_FIXTURES, SFI_COMPLIANT: "true", ...extra };
+      const envMap = { ...parseEnvFile(templateEnvPath()), ...STAMP_FIXTURES, AZURE_POLICY_RESTRICTED: "true", ...extra };
       for (const [key, value] of Object.entries(extra)) if (value === undefined) delete envMap[key];
       const { renderedPath } = renderParams({ module: "base-infra", templatePath: templateFor("base-infra"), envMap, outDir: dir });
       return JSON.parse(readFileSync(renderedPath, "utf8")).parameters;
@@ -272,10 +272,10 @@ test("SFI_COMPLIANT=true takes the App Gateway probe's answer in afd mode and re
     assert.equal(render({ APP_GATEWAY_EXISTS: "true" }).appGwExists.value, true);
     assert.equal(render({ APP_GATEWAY_EXISTS: " FALSE " }).appGwExists.value, false);
     for (const answer of [undefined, "", "maybe"]) {
-      assert.throws(() => render({ APP_GATEWAY_EXISTS: answer }), /SFI_COMPLIANT=true needs APP_GATEWAY_EXISTS/);
+      assert.throws(() => render({ APP_GATEWAY_EXISTS: answer }), /AZURE_POLICY_RESTRICTED=true needs APP_GATEWAY_EXISTS/);
     }
     // No App Gateway outside afd mode, so no probe either.
     assert.equal(render({ EDGE_MODE: "private", APP_GATEWAY_EXISTS: undefined }).appGwExists, undefined);
-    assert.throws(() => render({ SFI_COMPLIANT: "yes" }), /SFI_COMPLIANT must be true or false, not 'yes'/);
+    assert.throws(() => render({ AZURE_POLICY_RESTRICTED: "yes" }), /AZURE_POLICY_RESTRICTED must be true or false, not 'yes'/);
   });
 });

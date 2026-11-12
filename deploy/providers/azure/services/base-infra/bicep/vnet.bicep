@@ -8,11 +8,11 @@
 //      Link Service backing the AppGW private frontend. MUST have
 //      `privateLinkServiceNetworkPolicies: 'Disabled'`.
 //
-// With sfiCompliant (SFI_COMPLIANT=true) the VNet also gets `pe-subnet` for
+// With policyRestricted (AZURE_POLICY_RESTRICTED=true) the VNet also gets `pe-subnet` for
 // private endpoints, and each of these four subnets gets its own NSG.
 //
 // With winWorkersEnabled (WIN_WORKERS_ENABLED=true) it gets `pe-subnet` too
-// (its NSG only with sfiCompliant), and `win-workers-subnet` for the Windows
+// (its NSG only with policyRestricted), and `win-workers-subnet` for the Windows
 // worker VMs: a NAT gateway with a static public IP gives them outbound access
 // (a Flexible scale set's VMs have no default outbound access), and its NSG
 // keeps them from reaching each other and the rest of the VNet.
@@ -48,10 +48,10 @@ param dnsResolverInboundSubnetPrefix string = '10.20.19.0/28'
 @description('DNS server IPs to advertise via the VNet `dhcpOptions.dnsServers` block. P2S VPN clients connecting through the gateway inherit these (this is the supported mechanism — the classic `virtualNetworkGateways` resource has no DNS push field of its own). Leave empty for non-VPN stamps so the VNet uses Azure-provided DNS. When VPN is enabled, main.bicep passes the Private DNS Resolver inbound endpoint static IP so clients can resolve Private DNS Zone records through the tunnel.')
 param dnsServers array = []
 
-@description('SFI_COMPLIANT profile: add the private endpoint subnet and give the AKS, App Gateway, App Gateway Private Link and private endpoint subnets explicit NSGs. False keeps the VNet unchanged.')
-param sfiCompliant bool = false
+@description('AZURE_POLICY_RESTRICTED profile: add the private endpoint subnet and give the AKS, App Gateway, App Gateway Private Link and private endpoint subnets explicit NSGs. False keeps the VNet unchanged.')
+param policyRestricted bool = false
 
-@description('Private endpoint subnet prefix. Created only with sfiCompliant.')
+@description('Private endpoint subnet prefix. Created only with policyRestricted.')
 param privateEndpointSubnetPrefix string = '10.20.33.0/26'
 
 @description('Windows worker pool: add the private endpoint subnet and the worker subnet with its NAT gateway and NSG. False keeps the VNet unchanged.')
@@ -82,19 +82,19 @@ var privateEndpointSubnetName = 'pe-subnet'
 var gatewaySubnetName = 'GatewaySubnet'
 var dnsResolverInboundSubnetName = 'dns-resolver-inbound-subnet'
 var winWorkersSubnetName = 'win-workers-subnet'
-var privateEndpointSubnetEnabled = sfiCompliant || winWorkersEnabled
+var privateEndpointSubnetEnabled = policyRestricted || winWorkersEnabled
 
-// Explicit subnet NSGs (sfiCompliant only). A policy-managed subscription's
+// Explicit subnet NSGs (policyRestricted only). A policy-managed subscription's
 // network automation may otherwise attach its own NSG to a subnet that has
 // none, without the inbound rules App Gateway v2 requires; with these NSGs in
 // place it adds its rules to them instead. Apart from the App Gateway rules
 // below, Azure's default rules apply.
-resource aksSubnetNsg 'Microsoft.Network/networkSecurityGroups@2024-05-01' = if (sfiCompliant) {
+resource aksSubnetNsg 'Microsoft.Network/networkSecurityGroups@2024-05-01' = if (policyRestricted) {
   name: '${resourceNamePrefix}-${aksSubnetName}-nsg'
   location: location
 }
 
-resource appGatewaySubnetNsg 'Microsoft.Network/networkSecurityGroups@2024-05-01' = if (sfiCompliant) {
+resource appGatewaySubnetNsg 'Microsoft.Network/networkSecurityGroups@2024-05-01' = if (policyRestricted) {
   name: '${resourceNamePrefix}-${appGatewaySubnetName}-nsg'
   location: location
   properties: {
@@ -144,12 +144,12 @@ resource appGatewaySubnetNsg 'Microsoft.Network/networkSecurityGroups@2024-05-01
   }
 }
 
-resource appGatewayPrivateLinkSubnetNsg 'Microsoft.Network/networkSecurityGroups@2024-05-01' = if (sfiCompliant) {
+resource appGatewayPrivateLinkSubnetNsg 'Microsoft.Network/networkSecurityGroups@2024-05-01' = if (policyRestricted) {
   name: '${resourceNamePrefix}-${appGatewayPrivateLinkSubnetName}-nsg'
   location: location
 }
 
-resource privateEndpointSubnetNsg 'Microsoft.Network/networkSecurityGroups@2024-05-01' = if (sfiCompliant) {
+resource privateEndpointSubnetNsg 'Microsoft.Network/networkSecurityGroups@2024-05-01' = if (policyRestricted) {
   name: '${resourceNamePrefix}-${privateEndpointSubnetName}-nsg'
   location: location
 }
@@ -301,7 +301,7 @@ var baseSubnets = [
     name: aksSubnetName
     properties: union({
       addressPrefix: aksSubnetPrefix
-    }, sfiCompliant ? {
+    }, policyRestricted ? {
       networkSecurityGroup: {
         id: aksSubnetNsg.id
       }
@@ -311,7 +311,7 @@ var baseSubnets = [
     name: appGatewaySubnetName
     properties: union({
       addressPrefix: appGatewaySubnetPrefix
-    }, sfiCompliant ? {
+    }, policyRestricted ? {
       networkSecurityGroup: {
         id: appGatewaySubnetNsg.id
       }
@@ -322,7 +322,7 @@ var baseSubnets = [
     properties: union({
       addressPrefix: appGatewayPrivateLinkSubnetPrefix
       privateLinkServiceNetworkPolicies: 'Disabled'
-    }, sfiCompliant ? {
+    }, policyRestricted ? {
       networkSecurityGroup: {
         id: appGatewayPrivateLinkSubnetNsg.id
       }
@@ -366,9 +366,9 @@ var dnsResolverInboundSubnetEntry = [
   }
 ]
 
-// Private endpoint subnet (sfiCompliant or winWorkersEnabled), after the
+// Private endpoint subnet (policyRestricted or winWorkersEnabled), after the
 // optional VPN subnets so their positions above don't move. Endpoint network
-// policies stay off, so its NSG (sfiCompliant only) filters no endpoint
+// policies stay off, so its NSG (policyRestricted only) filters no endpoint
 // traffic.
 var privateEndpointSubnetEntry = [
   {
@@ -376,7 +376,7 @@ var privateEndpointSubnetEntry = [
     properties: union({
       addressPrefix: privateEndpointSubnetPrefix
       privateEndpointNetworkPolicies: 'Disabled'
-    }, sfiCompliant ? {
+    }, policyRestricted ? {
       networkSecurityGroup: {
         id: privateEndpointSubnetNsg.id
       }
@@ -441,7 +441,7 @@ output gatewaySubnetId string = vpnGatewayEnabled ? vnet.properties.subnets[3].i
 // resolver is exclusively here to give P2S clients a reachable DNS server).
 output dnsResolverInboundSubnetId string = vpnGatewayEnabled ? vnet.properties.subnets[4].id : ''
 output dnsResolverInboundSubnetName string = dnsResolverInboundSubnetName
-// Private endpoint subnet — with sfiCompliant or winWorkersEnabled. By name,
+// Private endpoint subnet — with policyRestricted or winWorkersEnabled. By name,
 // not position.
 output privateEndpointSubnetId string = privateEndpointSubnetEnabled ? '${vnet.id}/subnets/${privateEndpointSubnetName}' : ''
 // Windows worker subnet and its NAT gateway's address — winWorkersEnabled only.

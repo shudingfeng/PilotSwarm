@@ -4,7 +4,7 @@
 // No schema creation happens here. The worker runs its own migrations at
 // startup (FR-012). This module only provisions the server + one database
 // and wires an "allow Azure services" firewall rule so AKS pods can reach
-// it over the public endpoint. Given `clusterEgressIpAddress` (SFI_COMPLIANT
+// it over the public endpoint. Given `clusterEgressIpAddress` (AZURE_POLICY_RESTRICTED
 // profile or the Windows worker pool), the firewall admits only that address
 // instead, plus the worker subnet's NAT gateway address with the pool.
 // ==============================================================================
@@ -21,10 +21,10 @@ param databaseName string = 'pilotswarm'
 @description('Admin login name.')
 param administratorLogin string = 'pilotswarm'
 
-@description('Use Microsoft Entra authentication exclusively. Required for the public, AKS-managed-network topology and the SFI_COMPLIANT profile. The CSI workload identity is assigned as PostgreSQL administrator.')
+@description('Use Microsoft Entra authentication exclusively. Required for the public, AKS-managed-network topology and the AZURE_POLICY_RESTRICTED profile. The CSI workload identity is assigned as PostgreSQL administrator.')
 param aadOnly bool = false
 
-@description('The cluster\'s pinned egress IPv4 address (SFI_COMPLIANT profile). When set, the firewall admits only this address and no longer declares AllowAllAzureServices, which admits every Azure address, other customers\' included. An incremental deployment never deletes that rule from an existing server; the SFI deploy step does. Empty keeps AllowAllAzureServices.')
+@description('The cluster\'s pinned egress IPv4 address (AZURE_POLICY_RESTRICTED profile). When set, the firewall admits only this address and no longer declares AllowAllAzureServices, which admits every Azure address, other customers\' included. An incremental deployment never deletes that rule from an existing server; the policy-restricted deploy step does. Empty keeps AllowAllAzureServices.')
 param clusterEgressIpAddress string = ''
 
 @description('The Windows worker subnet\'s NAT gateway IPv4 address (Windows worker pool). With clusterEgressIpAddress, the firewall also admits it, so the workers sign in from their own egress address. The Windows worker deploy step deletes an existing AllowAllAzureServices rule too. Empty adds no rule.')

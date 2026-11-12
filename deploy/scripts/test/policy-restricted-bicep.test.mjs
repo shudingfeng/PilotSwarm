@@ -1,4 +1,4 @@
-// The SFI_COMPLIANT profile's Bicep: what it adds is conditional on the
+// The AZURE_POLICY_RESTRICTED profile's Bicep: what it adds is conditional on the
 // setting, so a stamp without it deploys as before, and the addresses,
 // rules and modes match the profile's design. Read as text, like
 // frontdoor-waf-policy-name.test.mjs; the deploy step's own tests are in
@@ -46,23 +46,23 @@ const paramDefault = (source, name) => {
   return match[1];
 };
 
-test("everything the profile adds is conditional on sfiCompliant", () => {
+test("everything the profile adds is conditional on policyRestricted", () => {
   for (const symbol of ["LogAnalyticsNsp", "Nsp"]) {
-    assert.equal(conditionOf(main, symbol), "sfiCompliant", symbol);
+    assert.equal(conditionOf(main, symbol), "policyRestricted", symbol);
   }
   // The blob private endpoint comes with the profile or the Windows worker pool.
   for (const symbol of ["BlobPrivateDnsZone", "StorageBlobPrivateEndpoint"]) {
     assert.equal(conditionOf(main, symbol), "privateEndpointsEnabled", symbol);
   }
-  assert.match(main, /^var privateEndpointsEnabled = sfiCompliant \|\| winWorkersEnabled\s*$/m);
+  assert.match(main, /^var privateEndpointsEnabled = policyRestricted \|\| winWorkersEnabled\s*$/m);
   for (const symbol of ["aksSubnetNsg", "appGatewaySubnetNsg", "appGatewayPrivateLinkSubnetNsg", "privateEndpointSubnetNsg"]) {
-    assert.equal(conditionOf(vnet, symbol), "sfiCompliant", symbol);
+    assert.equal(conditionOf(vnet, symbol), "policyRestricted", symbol);
   }
   // The deployment-script modules are the ones the profile turns off.
-  assert.equal(conditionOf(main, "ApplicationGatewayExistsCheck"), "edgeMode == 'afd' && !sfiCompliant");
-  assert.match(main, /appGwExists: sfiCompliant \? appGwExists : ApplicationGatewayExistsCheck!\.outputs\.exists/);
+  assert.equal(conditionOf(main, "ApplicationGatewayExistsCheck"), "edgeMode == 'afd' && !policyRestricted");
+  assert.match(main, /appGwExists: policyRestricted \? appGwExists : ApplicationGatewayExistsCheck!\.outputs\.exists/);
   assert.equal(conditionOf(portal, "plApprove"), "approvesPrivateEndpointHere");
-  assert.match(portal, /^var approvesPrivateEndpointHere = edgeMode == 'afd' && !sfiCompliant\s*$/m);
+  assert.match(portal, /^var approvesPrivateEndpointHere = edgeMode == 'afd' && !policyRestricted\s*$/m);
   // Reading a skipped module fails the deployment (DeploymentNotFound), so the
   // output reads it under the module's own condition.
   assert.match(portal, /^output ApprovedPrivateEndpointCount int = approvesPrivateEndpointHere \? plApprove\.outputs\.approvedCount : 0\s*$/m);
@@ -78,8 +78,8 @@ test("Key Vault and Storage are SecuredByPerimeter, and Storage refuses shared k
     ]],
   ]) {
     const source = read(file);
-    const branch = /\}, sfiCompliant \? \{([^}]*)\} : \{\}\)/.exec(source);
-    assert.ok(branch, `${file} adds its properties in a sfiCompliant branch`);
+    const branch = /\}, policyRestricted \? \{([^}]*)\} : \{\}\)/.exec(source);
+    assert.ok(branch, `${file} adds its properties in a policyRestricted branch`);
     const added = branch[1].split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
     assert.deepEqual(added, expected, file);
     assert.equal(source.split("SecuredByPerimeter").length - 1, 1, `${file} names SecuredByPerimeter once`);
@@ -143,7 +143,7 @@ test("the App Gateway subnet's NSG allows GatewayManager, the load balancer and 
 });
 
 test("the cluster's pinned egress IP keeps its name and is used in every edge mode with the setting", () => {
-  assert.match(main, /^var clusterEgressIpEnabled = \(edgeMode == 'public' && horizonDbEnabled\) \|\| sfiCompliant \|\| winWorkersEnabled\s*$/m);
+  assert.match(main, /^var clusterEgressIpEnabled = \(edgeMode == 'public' && horizonDbEnabled\) \|\| policyRestricted \|\| winWorkersEnabled\s*$/m);
   assert.equal(conditionOf(main, "horizonEgressIp"), "clusterEgressIpEnabled");
   assert.equal(conditionOf(main, "horizonEgressIpRole"), "clusterEgressIpEnabled");
   assert.match(blockOf(main, "horizonEgressIp"), /name: '\$\{resourceNamePrefix\}-hdb-egress'/);
@@ -163,5 +163,5 @@ test("PostgreSQL: Entra-only with an egress-only firewall under the setting, All
   const module = blockOf(main, "Postgres");
   assert.match(module, /aadOnly: edgeMode == 'public' \|\| postgresEgressOnly/);
   assert.match(module, /clusterEgressIpAddress: postgresEgressOnly \? horizonEgressIp!\.properties\.ipAddress : ''/);
-  assert.match(main, /^var postgresEgressOnly = sfiCompliant \|\| winWorkersEnabled\s*$/m);
+  assert.match(main, /^var postgresEgressOnly = policyRestricted \|\| winWorkersEnabled\s*$/m);
 });

@@ -389,7 +389,7 @@ inputs fail loudly at preflight with a single named diagnostic.
 
 Some subscriptions enforce an Azure Policy set that requires a network
 security perimeter, denies Storage shared keys and denies ARM deployment
-scripts. A default stamp fails there. Set `SFI_COMPLIANT=true` in the
+scripts. A default stamp fails there. Set `AZURE_POLICY_RESTRICTED=true` in the
 stamp's env file to deploy a stamp that such a subscription accepts.
 Unset or `false`, nothing changes: the deploy renders no new parameter,
 and every new resource is conditional on the setting.
@@ -409,7 +409,7 @@ shared keys, it requires `PILOTSWARM_BLOB_USE_MANAGED_IDENTITY=1` too, the
 default on this deploy path, so the workers and the portal reach Blob with
 their managed identity.
 
-| Area | With `SFI_COMPLIANT=true` |
+| Area | With `AZURE_POLICY_RESTRICTED=true` |
 |---|---|
 | Network security perimeter | `<prefix>-nsp` with one profile, `stamp`. The stamp Key Vault and the main storage account join it in Enforced mode, with `publicNetworkAccess: SecuredByPerimeter`. Its inbound rules admit the cluster's egress IP as a `/32` together with `PERIMETER_OPERATOR_IP_PREFIXES`, and any managed identity of the stamp subscription. An admitted caller still needs an RBAC role for any data. |
 | Logs | A perimeter resource's logs must stay inside the perimeter, so the perimeter's access logs go to a second workspace, `<prefix>-log-nsp`, which joins the profile in Transition mode and keeps its own network settings. `<prefix>-log` is unchanged. |
@@ -417,7 +417,7 @@ their managed identity.
 | Cluster egress | The pinned egress IP `<prefix>-hdb-egress` (named when only HorizonDB used it) is the cluster's outbound address in every edge mode. |
 | PostgreSQL | Entra sign-in only, a passwordless `DATABASE_URL`, and a firewall that admits only the cluster's egress IP (`AllowClusterEgress`). The deploy deletes an existing `AllowAllAzureServices` rule, which admits every Azure address. |
 | Subnet NSGs | `aks-subnet`, `appgw-subnet`, `appgw-pls-subnet` and `pe-subnet` get their own NSGs, so network automation that attaches an NSG to a subnet without one adds its rules to these. The App Gateway subnet's NSG allows inbound `GatewayManager` TCP 65200-65535 (priority 200), `AzureLoadBalancer` (210) and internet TCP 80 for the ACME HTTP-01 challenge (220). A base-infra deploy resets these NSGs to their declared rules. |
-| Deployment scripts | None. `deploy/providers/azure/deploy-steps/sfi.mjs` runs as the deploying principal: it probes for the App Gateway before base-infra, and approves Front Door's Private Link connection after the portal module, polling for up to 15 minutes. |
+| Deployment scripts | None. `deploy/providers/azure/deploy-steps/policy-restricted.mjs` runs as the deploying principal: it probes for the App Gateway before base-infra, and approves Front Door's Private Link connection after the portal module, polling for up to 15 minutes. |
 
 Turning the profile on for an existing stamp changes the cluster's
 outbound address and turns off PostgreSQL password sign-in.

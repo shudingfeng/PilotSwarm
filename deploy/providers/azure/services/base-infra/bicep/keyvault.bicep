@@ -36,8 +36,8 @@ param localDeploymentPrincipalType string = 'User'
 @description('Allow ARM to resolve a HorizonDB bootstrap password from this vault. Only needed for HorizonDB stamps.')
 param templateDeploymentEnabled bool = false
 
-@description('SFI_COMPLIANT profile: public access decided by the network security perimeter (nsp.bicep). False keeps the vault unchanged.')
-param sfiCompliant bool = false
+@description('AZURE_POLICY_RESTRICTED profile: public access decided by the network security perimeter (nsp.bicep). False keeps the vault unchanged.')
+param policyRestricted bool = false
 
 resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
   name: keyVaultName
@@ -57,7 +57,7 @@ resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
       bypass: 'AzureServices'
       defaultAction: 'Allow'
     }
-  }, sfiCompliant ? {
+  }, policyRestricted ? {
     publicNetworkAccess: 'SecuredByPerimeter'
   } : {})
 }

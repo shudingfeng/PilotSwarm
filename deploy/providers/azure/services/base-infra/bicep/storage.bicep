@@ -47,8 +47,8 @@ param localDeploymentPrincipalId string = ''
 ])
 param localDeploymentPrincipalType string = 'User'
 
-@description('SFI_COMPLIANT profile: no shared-key access, Entra ID as the Azure portal\'s default sign-in to the data, and public access decided by the network security perimeter (nsp.bicep). False keeps the account unchanged.')
-param sfiCompliant bool = false
+@description('AZURE_POLICY_RESTRICTED profile: no shared-key access, Entra ID as the Azure portal\'s default sign-in to the data, and public access decided by the network security perimeter (nsp.bicep). False keeps the account unchanged.')
+param policyRestricted bool = false
 
 @description('Windows worker pool: workerWorkloadPrincipalId gets Blob Data Contributor on the copilot-sessions container instead of the whole account, so neither the portal nor the database job can write a Windows release or a Flux manifest. Adds the win-worker-releases container. False keeps the account unchanged.')
 param winWorkersEnabled bool = false
@@ -72,7 +72,7 @@ resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
     allowSharedKeyAccess: true
     minimumTlsVersion: 'TLS1_2'
     supportsHttpsTrafficOnly: true
-  }, sfiCompliant ? {
+  }, policyRestricted ? {
     allowSharedKeyAccess: false
     defaultToOAuthAuthentication: true
     publicNetworkAccess: 'SecuredByPerimeter'

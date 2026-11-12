@@ -266,7 +266,7 @@ from the controller's private CA.
   the NAT gateway's (`AllowWinWorkerEgress`). The deploy step deletes an
   `AllowAllAzureServices` rule that an earlier deploy left.
 - **The personal vault and the controller's state account** have public access
-  turned off, or, with `SFI_COMPLIANT=true`, a network security perimeter
+  turned off, or, with `AZURE_POLICY_RESTRICTED=true`, a network security perimeter
   profile with no access rule. Only their private endpoints reach them: the
   Portal writes tokens and the controller reads tokens and its state.
 - **Blob:** the workers use the main storage account's private endpoint, which
@@ -1016,7 +1016,7 @@ each. The workflow passes the pool's settings through like any other, but on
 its public stamp the deploy refuses `WIN_WORKERS_ENABLED=true` before any
 step. Run `deploy.mjs` from your own pipeline, or by hand.
 
-`SFI_COMPLIANT` is independent: a pool deploys with or without it. With it, the
+`AZURE_POLICY_RESTRICTED` is independent: a pool deploys with or without it. With it, the
 personal vault and the controller's state account join a second perimeter
 profile, `private-only`, which has no access rule, the deploy-only vault joins
 the `stamp` profile, and the security logs go to the perimeter's workspace. See
@@ -1749,7 +1749,7 @@ last run, so a late row still counts once, all of them emailing
 - **Logs.** The cluster's `kube-audit` log (not `kube-audit-admin`, which leaves
   out the `get` requests that open an exec) goes to the main workspace. The
   storage accounts' `StorageBlobLogs` and the three vaults' `AuditEvent` go to
-  the perimeter's workspace with `SFI_COMPLIANT=true`, and to the main one
+  the perimeter's workspace with `AZURE_POLICY_RESTRICTED=true`, and to the main one
   otherwise.
 - **The Activity Log.** Four rules read the subscription's Activity Log in the
   main workspace. Sending it there is the subscription owner's job; until then

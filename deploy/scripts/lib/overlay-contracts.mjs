@@ -33,7 +33,7 @@ export { databaseOverlayOmittedKeys } from "./database-env.mjs";
 import { PORTAL_CONFIG_KEYS } from "./portal-config.mjs";
 import { deploysPostgres, databaseUsesManagedIdentity, blobUsesManagedIdentity } from "./database-env.mjs";
 import {
-  sfiCompliant,
+  policyRestricted,
   perimeterOperatorIpPrefixes,
   PORTAL_SETTING_DEFAULTS,
   winWorkersEnabled,
@@ -270,7 +270,7 @@ function describeVpnComboError(code) {
 //             ACME_EMAIL when malformed on letsencrypt). These render as
 //             "requires <keys> to be set" with a scaffolder hint.
 //   combo   — array of `{ code, message, hint }` objects describing VPN
-//             gateway, SFI_COMPLIANT and Windows worker pool combo errors.
+//             gateway, AZURE_POLICY_RESTRICTED and Windows worker pool combo errors.
 //             These render
 //             distinctly: a named error + a hint that does NOT point at
 //             the scaffolder.
@@ -312,12 +312,12 @@ export function validateRequiredEnv({ edgeMode, tlsSource, env }) {
   // differ — combo errors are not "set this key" errors and should not
   // direct operators at the scaffolder. Gated on VPN_GATEWAY_ENABLED=true
   // inside validateVpnGatewayCombo so non-VPN stamps are unaffected. The
-  // SFI_COMPLIANT and Windows worker pool checks share the channel, each
+  // AZURE_POLICY_RESTRICTED and Windows worker pool checks share the channel, each
   // gated on its own settings.
   const vpnCodes = validateVpnGatewayCombo({ edgeMode, tlsSource, env });
   const combo = [
     ...vpnCodes.map(describeVpnComboError),
-    ...validateSfiCombo({ edgeMode, tlsSource, env }),
+    ...validatePolicyRestrictedCombo({ edgeMode, tlsSource, env }),
     ...validateWinWorkersCombo({ edgeMode, tlsSource, env }),
   ];
   return { missing, combo };
@@ -497,7 +497,7 @@ export function validateWinWorkersCombo({ edgeMode, tlsSource, env }) {
 }
 
 // ===========================================================================
-// SFI_COMPLIANT combo validator.
+// AZURE_POLICY_RESTRICTED combo validator.
 //
 // The profile is for subscriptions whose Azure Policy requires a network
 // security perimeter and denies Storage shared keys and deployment scripts,
@@ -505,38 +505,38 @@ export function validateWinWorkersCombo({ edgeMode, tlsSource, env }) {
 // step of every service, so a run that only publishes manifests is checked
 // too. Returns `{ code, message, hint }` objects; empty when the setting is
 // off or the combination is fine:
-//   sfi-requires-afd               — EDGE_MODE must be 'afd'. `private` needs
+//   policy-restricted-requires-afd               — EDGE_MODE must be 'afd'. `private` needs
 //                                    an akv TLS source (next code); `public`
 //                                    has no stamp VNet to hold the blob
 //                                    private endpoint.
-//   sfi-requires-letsencrypt       — TLS_SOURCE 'akv' and 'akv-selfsigned'
+//   policy-restricted-requires-letsencrypt       — TLS_SOURCE 'akv' and 'akv-selfsigned'
 //                                    issue and bind the portal certificate
 //                                    with deployment scripts.
-//   sfi-operator-prefixes          — a PERIMETER_OPERATOR_IP_PREFIXES entry
+//   policy-restricted-operator-prefixes          — a PERIMETER_OPERATOR_IP_PREFIXES entry
 //                                    is not an IPv4 address or CIDR prefix.
-//   sfi-requires-database-identity — the profile's PostgreSQL server takes
+//   policy-restricted-requires-database-identity — the profile's PostgreSQL server takes
 //                                    Entra sign-in only, so a provisioned
 //                                    database needs
 //                                    PILOTSWARM_USE_MANAGED_IDENTITY=1.
-//   sfi-requires-blob-identity     — the profile turns off Storage shared
+//   policy-restricted-requires-blob-identity     — the profile turns off Storage shared
 //                                    keys, so the workers and the portal
 //                                    need Blob managed identity
 //                                    (PILOTSWARM_BLOB_USE_MANAGED_IDENTITY,
 //                                    1 by default on this deploy path).
 // ===========================================================================
-export function validateSfiCombo({ edgeMode, tlsSource, env }) {
-  if (!sfiCompliant(env)) return [];
+export function validatePolicyRestrictedCombo({ edgeMode, tlsSource, env }) {
+  if (!policyRestricted(env)) return [];
   const hint =
-    "Change the setting in deploy/envs/local/<env>/.env, or deploy without SFI_COMPLIANT=true. " +
+    "Change the setting in deploy/envs/local/<env>/.env, or deploy without AZURE_POLICY_RESTRICTED=true. " +
     "See docs/developer/deploy/aks.md.";
   const errors = [];
 
   const em = String(edgeMode ?? "").toLowerCase();
   if (em !== "afd") {
     errors.push({
-      code: "sfi-requires-afd",
+      code: "policy-restricted-requires-afd",
       message:
-        `SFI_COMPLIANT=true supports EDGE_MODE='afd' only, not '${em}'. Private mode needs an akv ` +
+        `AZURE_POLICY_RESTRICTED=true supports EDGE_MODE='afd' only, not '${em}'. Private mode needs an akv ` +
         "TLS source, which uses deployment scripts, and public mode has no stamp VNet to hold the " +
         "blob private endpoint.",
       hint,
@@ -546,9 +546,9 @@ export function validateSfiCombo({ edgeMode, tlsSource, env }) {
   const ts = String(tlsSource ?? "").toLowerCase();
   if (ts === "akv" || ts === "akv-selfsigned") {
     errors.push({
-      code: "sfi-requires-letsencrypt",
+      code: "policy-restricted-requires-letsencrypt",
       message:
-        `SFI_COMPLIANT=true refuses TLS_SOURCE='${ts}': the akv TLS sources issue and bind the portal ` +
+        `AZURE_POLICY_RESTRICTED=true refuses TLS_SOURCE='${ts}': the akv TLS sources issue and bind the portal ` +
         "certificate with ARM deployment scripts, which need Storage shared keys. Use TLS_SOURCE=letsencrypt.",
       hint,
     });
@@ -557,7 +557,7 @@ export function validateSfiCombo({ edgeMode, tlsSource, env }) {
   try {
     perimeterOperatorIpPrefixes(env);
   } catch (e) {
-    errors.push({ code: "sfi-operator-prefixes", message: e.message, hint });
+    errors.push({ code: "policy-restricted-operator-prefixes", message: e.message, hint });
   }
 
   let databaseIdentity;
@@ -568,9 +568,9 @@ export function validateSfiCombo({ edgeMode, tlsSource, env }) {
   }
   if (deploysPostgres(env) && !databaseIdentity) {
     errors.push({
-      code: "sfi-requires-database-identity",
+      code: "policy-restricted-requires-database-identity",
       message:
-        "SFI_COMPLIANT=true makes the provisioned PostgreSQL server accept Entra sign-in only, " +
+        "AZURE_POLICY_RESTRICTED=true makes the provisioned PostgreSQL server accept Entra sign-in only, " +
         "so PILOTSWARM_USE_MANAGED_IDENTITY must be 1.",
       hint,
     });
@@ -578,9 +578,9 @@ export function validateSfiCombo({ edgeMode, tlsSource, env }) {
 
   if (!blobUsesManagedIdentity(env)) {
     errors.push({
-      code: "sfi-requires-blob-identity",
+      code: "policy-restricted-requires-blob-identity",
       message:
-        "SFI_COMPLIANT=true denies Storage shared keys, so the workers and the portal must reach Blob " +
+        "AZURE_POLICY_RESTRICTED=true denies Storage shared keys, so the workers and the portal must reach Blob " +
         "with their managed identity: PILOTSWARM_BLOB_USE_MANAGED_IDENTITY must be 1.",
       hint,
     });

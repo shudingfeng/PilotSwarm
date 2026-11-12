@@ -1,6 +1,6 @@
 // ==============================================================================
 // PilotSwarm BaseInfra — private endpoint at a static address, with its A
-// record in a private DNS zone (SFI_COMPLIANT=true or the Windows worker pool).
+// record in a private DNS zone (AZURE_POLICY_RESTRICTED=true or the Windows worker pool).
 //
 // A static address lets network rules name the endpoint. The zone group keeps
 // the A record in step with the endpoint.

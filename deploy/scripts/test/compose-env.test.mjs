@@ -27,19 +27,19 @@ test("public mode composes an Entra-only database URL", () => {
   assert.equal(env.DATABASE_URL, "postgresql://ps-csi-mid@ps.example.postgres.database.azure.com:5432/pilotswarm?sslmode=require");
 });
 
-test("SFI_COMPLIANT=true composes the Entra-only database URL in any edge mode; off keeps the password URL", () => {
+test("AZURE_POLICY_RESTRICTED=true composes the Entra-only database URL in any edge mode; off keeps the password URL", () => {
   const outputs = {
     POSTGRES_FQDN: "ps.example.postgres.database.azure.com",
     POSTGRES_AAD_ADMIN_PRINCIPAL_NAME: "ps-csi-mid",
   };
   for (const edgeMode of ["afd", "private"]) {
-    const env = { EDGE_MODE: edgeMode, SFI_COMPLIANT: "true", ...outputs };
+    const env = { EDGE_MODE: edgeMode, AZURE_POLICY_RESTRICTED: "true", ...outputs };
     composeDerivedEnv(env);
     assert.equal(env.DATABASE_URL, "postgresql://ps-csi-mid@ps.example.postgres.database.azure.com:5432/pilotswarm?sslmode=require");
   }
   for (const flag of [undefined, "false"]) {
     const env = { EDGE_MODE: "afd", ...outputs };
-    if (flag !== undefined) env.SFI_COMPLIANT = flag;
+    if (flag !== undefined) env.AZURE_POLICY_RESTRICTED = flag;
     composeDerivedEnv(env);
     assert.equal(
       env.DATABASE_URL,
@@ -47,7 +47,7 @@ test("SFI_COMPLIANT=true composes the Entra-only database URL in any edge mode; 
     );
   }
   assert.throws(
-    () => composeDerivedEnv({ EDGE_MODE: "afd", SFI_COMPLIANT: "true", POSTGRES_FQDN: outputs.POSTGRES_FQDN }),
+    () => composeDerivedEnv({ EDGE_MODE: "afd", AZURE_POLICY_RESTRICTED: "true", POSTGRES_FQDN: outputs.POSTGRES_FQDN }),
     /requires the PostgreSQL Entra administrator output/,
   );
 });

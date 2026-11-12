@@ -3,8 +3,8 @@
 // Reads a Bicep parameters template (deploy/providers/azure/services/<Module>/bicep/<Module>.params.template.json),
 // substitutes ${VAR} placeholders left-to-right with values from the env map,
 // and writes the rendered file to <staging>/<module>.params.json. With
-// SFI_COMPLIANT=true it also adds that profile's parameters to base-infra and
-// portal (sfiParameters below), and with WIN_WORKERS_ENABLED=true the Windows
+// AZURE_POLICY_RESTRICTED=true it also adds that profile's parameters to base-infra and
+// portal (policyRestrictedParameters below), and with WIN_WORKERS_ENABLED=true the Windows
 // worker pool's parameters to base-infra (winWorkerParameters); the templates
 // themselves never name them.
 //
@@ -19,7 +19,7 @@ import { deploysPostgres } from "./database-env.mjs";
 import { workspacesEnabled } from "./workspaces.mjs";
 import {
   userPoolMinCount,
-  sfiCompliant,
+  policyRestricted,
   perimeterOperatorIpPrefixes,
   winWorkersEnabled,
   winWorkerSettings,
@@ -80,7 +80,7 @@ export function renderParams({ module, templatePath, envMap, outDir }) {
   }
 
   let rendered = out;
-  const added = { ...sfiParameters(module, envMap), ...winWorkerParameters(module, envMap) };
+  const added = { ...policyRestrictedParameters(module, envMap), ...winWorkerParameters(module, envMap) };
   if (Object.keys(added).length > 0) {
     for (const [name, value] of Object.entries(added)) parsed.parameters[name] = { value };
     rendered = `${JSON.stringify(parsed, null, 2)}\n`;
@@ -91,14 +91,14 @@ export function renderParams({ module, templatePath, envMap, outDir }) {
   return { renderedPath, substituted };
 }
 
-// Parameters that only SFI_COMPLIANT=true adds. With the setting off nothing
+// Parameters that only AZURE_POLICY_RESTRICTED=true adds. With the setting off nothing
 // is added: the file stays the template's substitution and Bicep keeps its
 // defaults, so redeploying an existing stamp changes nothing.
-function sfiParameters(module, env) {
-  if (!sfiCompliant(env)) return null;
-  if (module === "portal") return { sfiCompliant: true };
+function policyRestrictedParameters(module, env) {
+  if (!policyRestricted(env)) return null;
+  if (module === "portal") return { policyRestricted: true };
   if (module !== "base-infra") return null;
-  const params = { sfiCompliant: true, perimeterOperatorIpPrefixes: perimeterOperatorIpPrefixes(env) };
+  const params = { policyRestricted: true, perimeterOperatorIpPrefixes: perimeterOperatorIpPrefixes(env) };
   // Under the setting Bicep skips its App Gateway probe, a deployment
   // script, and takes the result of the deploy step's probe instead. A
   // missing result must not pass as false: Bicep would then reset the
@@ -107,8 +107,8 @@ function sfiParameters(module, env) {
     const exists = String(env.APP_GATEWAY_EXISTS ?? "").trim().toLowerCase();
     if (exists !== "true" && exists !== "false") {
       throw new Error(
-        "SFI_COMPLIANT=true needs APP_GATEWAY_EXISTS (true or false) from the App Gateway probe in " +
-          "deploy/providers/azure/deploy-steps/sfi.mjs. Deploy base-infra through deploy.mjs.",
+        "AZURE_POLICY_RESTRICTED=true needs APP_GATEWAY_EXISTS (true or false) from the App Gateway probe in " +
+          "deploy/providers/azure/deploy-steps/policy-restricted.mjs. Deploy base-infra through deploy.mjs.",
       );
     }
     params.appGwExists = exists === "true";

@@ -216,14 +216,14 @@ function substituteTemplate(raw, env) {
     String(env[key]).replace(/\\/g, "\\\\").replace(/"/g, '\\"'));
 }
 
-test("with WIN_WORKERS_ENABLED and SFI_COMPLIANT off, every module's parameters render byte for byte as before", () => {
+test("with WIN_WORKERS_ENABLED and AZURE_POLICY_RESTRICTED off, every module's parameters render byte for byte as before", () => {
   withTmp((dir) => {
     const base = { ...parseEnvFile(templateEnvPath()), ...STAMP, ...OUTPUTS };
     for (const module of ["base-infra", "portal", "worker", "disk-controller"]) {
       const templatePath = templateFor(module);
       const raw = readFileSync(templatePath, "utf8");
       for (const flag of [undefined, "", "false", " FALSE "]) {
-        const envMap = { ...base, WIN_WORKERS_ENABLED: flag, SFI_COMPLIANT: "false" };
+        const envMap = { ...base, WIN_WORKERS_ENABLED: flag, AZURE_POLICY_RESTRICTED: "false" };
         if (flag === undefined) delete envMap.WIN_WORKERS_ENABLED;
         const { renderedPath } = renderParams({ module, templatePath, envMap, outDir: dir });
         assert.equal(readFileSync(renderedPath, "utf8"), substituteTemplate(raw, envMap), `${module} WIN_WORKERS_ENABLED=${flag}`);
@@ -987,7 +987,7 @@ test("every alert rule queries its workspace and notifies the one action group",
   assert.match(alertRules, /evaluationFrequency: 'PT5M'/);
   assert.match(blockOf(alerts, "actionGroup"), /for \(email, i\) in alertEmails: \{\s*name: 'receiver-\$\{i\}'\s*emailAddress: email/);
   const module = blockOf(main, "WinWorkerAlerts");
-  assert.match(module, /securityWorkspaceId: sfiCompliant \? LogAnalyticsNsp!\.outputs\.workspaceId : LogAnalytics\.outputs\.workspaceId/);
+  assert.match(module, /securityWorkspaceId: policyRestricted \? LogAnalyticsNsp!\.outputs\.workspaceId : LogAnalytics\.outputs\.workspaceId/);
   assert.match(module, /mainWorkspaceId: LogAnalytics\.outputs\.workspaceId/);
   assert.match(module, /alertEmails: winWorkerAlertEmails/);
   // Logs: kube-audit (with exec's get requests), blob logs of both accounts,
@@ -1170,23 +1170,23 @@ test("the private endpoints: the stamp's blob at .4, the controller's state at .
   assert.match(blockOf(main, "VaultPrivateDnsZone"), /zoneName: 'privatelink\$\{replace\(environment\(\)\.suffixes\.keyvaultDns, '\.vault\.', '\.vaultcore\.'\)\}'/);
   assert.match(readBicep("private-dns-zone.bicep"), /resolutionPolicy: 'NxDomainRedirect'/);
   // The blob endpoint and its zone come with the pool too.
-  assert.match(main, /^var privateEndpointsEnabled = sfiCompliant \|\| winWorkersEnabled\s*$/m);
-  assert.match(vnet, /^var privateEndpointSubnetEnabled = sfiCompliant \|\| winWorkersEnabled\s*$/m);
+  assert.match(main, /^var privateEndpointsEnabled = policyRestricted \|\| winWorkersEnabled\s*$/m);
+  assert.match(vnet, /^var privateEndpointSubnetEnabled = policyRestricted \|\| winWorkersEnabled\s*$/m);
 });
 
 test("the vaults and the controller's state account", () => {
   const personal = readBicep("personal-keyvault.bicep");
   for (const pattern of [/enableRbacAuthorization: true/, /enablePurgeProtection: true/, /softDeleteRetentionInDays: 7\b/,
-    /publicNetworkAccess: sfiCompliant \? 'SecuredByPerimeter' : 'Disabled'/, /bypass: 'None'\s*defaultAction: 'Deny'/]) {
+    /publicNetworkAccess: policyRestricted \? 'SecuredByPerimeter' : 'Disabled'/, /bypass: 'None'\s*defaultAction: 'Deny'/]) {
     assert.match(personal, pattern);
   }
   const deployVault = readBicep("deploy-keyvault.bicep");
   assert.match(deployVault, /enableRbacAuthorization: true[\s\S]*enablePurgeProtection: true/);
-  assert.match(deployVault, /sfiCompliant \? \{\s*publicNetworkAccess: 'SecuredByPerimeter'\s*\} : \{\}/);
+  assert.match(deployVault, /policyRestricted \? \{\s*publicNetworkAccess: 'SecuredByPerimeter'\s*\} : \{\}/);
   assert.match(blockOf(deployVault, "assignSecretsOfficerToDeployer"), /if \(!empty\(deployPrincipalId\)\)[\s\S]*b86a8fe4-44ce-4948-aee5-eccb2c155cd7|kvSecretsOfficerRoleId/);
   assert.equal([...deployVault.matchAll(/roleAssignments@/g)].length, 1, "the deploying principal is the only one granted");
   const state = readBicep("controller-storage.bicep");
-  for (const pattern of [/allowSharedKeyAccess: false/, /publicNetworkAccess: sfiCompliant \? 'SecuredByPerimeter' : 'Disabled'/,
+  for (const pattern of [/allowSharedKeyAccess: false/, /publicNetworkAccess: policyRestricted \? 'SecuredByPerimeter' : 'Disabled'/,
     /^var stateContainerName = 'disk-pool-state'\s*$/m]) {
     assert.match(state, pattern);
   }
@@ -1215,7 +1215,7 @@ test("the main storage account: the portal identity's Blob grant moves to copilo
 });
 
 test("PostgreSQL with the pool: Entra only, and a firewall that admits the cluster's and the workers' egress addresses only", () => {
-  assert.match(main, /^var postgresEgressOnly = sfiCompliant \|\| winWorkersEnabled\s*$/m);
+  assert.match(main, /^var postgresEgressOnly = policyRestricted \|\| winWorkersEnabled\s*$/m);
   assert.match(main, /^var clusterEgressIpEnabled = .*\|\| winWorkersEnabled\s*$/m);
   const module = blockOf(main, "Postgres");
   assert.match(module, /aadOnly: edgeMode == 'public' \|\| postgresEgressOnly/);
@@ -1542,7 +1542,7 @@ test("after base-infra: an existing scale set's model changes by a PATCH that ne
   }
 });
 
-test("after base-infra: an AllowAllAzureServices rule left on the server is deleted, unless the SFI step owns that or the database is not the stamp's", async () => {
+test("after base-infra: an AllowAllAzureServices rule left on the server is deleted, unless the policy-restricted step owns that or the database is not the stamp's", async () => {
   const present = fakeStepAz({ ruleExists: true });
   await step.afterBicep({ env: stepEnv(), modules: ["base-infra"] }, { runFn: present.runFn });
   assert.deepEqual(present.verbs().slice(0, 2), ["postgres flexible-server firewall-rule show", "postgres flexible-server firewall-rule delete"]);
@@ -1552,7 +1552,7 @@ test("after base-infra: an AllowAllAzureServices rule left on the server is dele
   const absent = fakeStepAz();
   await step.afterBicep({ env: stepEnv(), modules: ["base-infra"] }, { runFn: absent.runFn });
   assert.ok(!absent.verbs().includes("postgres flexible-server firewall-rule delete"));
-  for (const extra of [{ SFI_COMPLIANT: "true" }, { DEPLOY_POSTGRES: "false" }]) {
+  for (const extra of [{ AZURE_POLICY_RESTRICTED: "true" }, { DEPLOY_POSTGRES: "false" }]) {
     const skipped = fakeStepAz({ ruleExists: true });
     await step.afterBicep({ env: stepEnv(extra), modules: ["base-infra"] }, { runFn: skipped.runFn });
     assert.ok(!skipped.verbs().some((verb) => verb.startsWith("postgres")), JSON.stringify(extra));

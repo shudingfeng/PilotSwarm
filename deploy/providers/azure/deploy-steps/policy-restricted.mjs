@@ -1,5 +1,5 @@
-// SFI_COMPLIANT deploy step for the Azure provider. deploy/scripts/deploy.mjs
-// calls it around the bicep step's modules, and only with SFI_COMPLIANT=true.
+// AZURE_POLICY_RESTRICTED deploy step for the Azure provider. deploy/scripts/deploy.mjs
+// calls it around the bicep step's modules, and only with AZURE_POLICY_RESTRICTED=true.
 //
 // A subscription whose Azure Policy denies Storage shared keys can't run ARM
 // deployment scripts: each one keeps its files in a storage account that it
@@ -45,7 +45,7 @@ function edgeMode(env) {
 // App Gateway probe runs before base-infra has reported any output.
 export function stampResourceNames(env) {
   for (const key of ["SUBSCRIPTION_ID", "RESOURCE_GROUP", "RESOURCE_PREFIX"]) {
-    if (!env[key]) throw new Error(`The SFI_COMPLIANT deploy step needs ${key}.`);
+    if (!env[key]) throw new Error(`The AZURE_POLICY_RESTRICTED deploy step needs ${key}.`);
   }
   return {
     subscriptionId: env.SUBSCRIPTION_ID,
@@ -113,12 +113,12 @@ export async function approveFrontDoorPrivateLink({ resourceGroup, applicationGa
 } = {}) {
   const deadline = now() + timeoutMs;
   const approved = new Set();
-  log("info", `[sfi] waiting for Front Door's Private Link connection on App Gateway ${applicationGatewayName}`);
+  log("info", `[policy-restricted] waiting for Front Door's Private Link connection on App Gateway ${applicationGatewayName}`);
   for (;;) {
     const connections = listPrivateLinkConnections({ resourceGroup, applicationGatewayName }, runFn);
     const pending = connections.filter(isPendingFrontDoor);
     if (pending.length === 0 && connections.some((c) => connectionState(c).status === "Approved")) {
-      log("ok", `[sfi] Front Door's Private Link connection on App Gateway ${applicationGatewayName} is approved.`);
+      log("ok", `[policy-restricted] Front Door's Private Link connection on App Gateway ${applicationGatewayName} is approved.`);
       return approved.size;
     }
     // A connection is approved once; while its state catches up, the loop waits.
@@ -129,7 +129,7 @@ export async function approveFrontDoorPrivateLink({ resourceGroup, applicationGa
         "--id", connection.id, "--description", "Approved by the deploy step", "--output", "none",
       ], { capture: true });
       approved.add(connection.id);
-      log("info", `[sfi] approved Private Link connection ${connection.name}`);
+      log("info", `[policy-restricted] approved Private Link connection ${connection.name}`);
     }
     if (fresh.length > 0) continue;
     if (now() >= deadline) {
@@ -160,7 +160,7 @@ export function deleteAllowAllAzureServicesRule({ subscriptionId, resourceGroup,
   runFn("az", [
     "postgres", "flexible-server", "firewall-rule", "delete", "--ids", ruleId, "--yes", "--output", "none",
   ], { capture: true });
-  log("ok", `[sfi] deleted the ${ALLOW_ALL_AZURE_SERVICES_RULE} firewall rule of PostgreSQL server ${serverName}.`);
+  log("ok", `[policy-restricted] deleted the ${ALLOW_ALL_AZURE_SERVICES_RULE} firewall rule of PostgreSQL server ${serverName}.`);
   return true;
 }
 
@@ -171,7 +171,7 @@ export function beforeBicep({ env, modules }, { runFn = run } = {}) {
   const { resourceGroup, applicationGatewayName } = stampResourceNames(env);
   const exists = appGatewayExists({ resourceGroup, name: applicationGatewayName }, { runFn });
   env.APP_GATEWAY_EXISTS = String(exists);
-  log("info", `[sfi] App Gateway ${applicationGatewayName} ${exists ? "exists" : "does not exist yet"}.`);
+  log("info", `[policy-restricted] App Gateway ${applicationGatewayName} ${exists ? "exists" : "does not exist yet"}.`);
 }
 
 // After the bicep step's modules. Each check is cheap, so it also runs when

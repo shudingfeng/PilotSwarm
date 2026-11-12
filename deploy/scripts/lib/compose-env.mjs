@@ -19,7 +19,7 @@
 import { log } from "./common.mjs";
 import { deploysPostgres } from "./database-env.mjs";
 import { validateHorizonDbConfig } from "./horizondb.mjs";
-import { sfiCompliant, winWorkersEnabled } from "./aks-env.mjs";
+import { policyRestricted, winWorkersEnabled } from "./aks-env.mjs";
 
 export function composeDerivedEnv(env) {
   validateHorizonDbConfig(env);
@@ -54,12 +54,12 @@ export function composeDerivedEnv(env) {
   // Embeds the deterministic bootstrap admin password from postgres.bicep.
   // The password is identical on every stamp and never reaches a real
   // production cluster (prod uses the enterprise path, where Postgres comes with
-  // AAD-only auth). Public mode, the SFI_COMPLIANT profile and the Windows
+  // AAD-only auth). Public mode, the AZURE_POLICY_RESTRICTED profile and the Windows
   // worker pool provision an Entra-only server (postgres.bicep `aadOnly`), so
   // their URL has no password.
-  if (!env.DATABASE_URL && env.POSTGRES_FQDN && (env.EDGE_MODE === "public" || sfiCompliant(env) || winWorkersEnabled(env))) {
+  if (!env.DATABASE_URL && env.POSTGRES_FQDN && (env.EDGE_MODE === "public" || policyRestricted(env) || winWorkersEnabled(env))) {
     if (!env.POSTGRES_AAD_ADMIN_PRINCIPAL_NAME) {
-      throw new Error("Entra-only PostgreSQL (public mode, SFI_COMPLIANT=true or WIN_WORKERS_ENABLED=true) requires the PostgreSQL Entra administrator output before composing DATABASE_URL.");
+      throw new Error("Entra-only PostgreSQL (public mode, AZURE_POLICY_RESTRICTED=true or WIN_WORKERS_ENABLED=true) requires the PostgreSQL Entra administrator output before composing DATABASE_URL.");
     }
     const pgDb = env.POSTGRES_DATABASE_NAME || "pilotswarm";
     env.DATABASE_URL = `postgresql://${encodeURIComponent(env.POSTGRES_AAD_ADMIN_PRINCIPAL_NAME)}@${env.POSTGRES_FQDN}:5432/${pgDb}?sslmode=require`;

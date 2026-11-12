@@ -11,7 +11,7 @@
 //   * no shared key access; Entra ID only;
 //   * Storage Blob Data Contributor on the container for the controller's
 //     identity, and no data role for anyone else;
-//   * no public access: `Disabled`, or with sfiCompliant `SecuredByPerimeter`
+//   * no public access: `Disabled`, or with policyRestricted `SecuredByPerimeter`
 //     in the perimeter's private-only profile (nsp.bicep). The controller
 //     reaches it through its blob private endpoint (main.bicep), since its
 //     requests come from inside the region;
@@ -27,8 +27,8 @@ param location string
 @description('Storage account name (globally unique, 3-24 lowercase alphanumeric).')
 param storageAccountName string
 
-@description('SFI_COMPLIANT profile: public access decided by the network security perimeter instead of turned off.')
-param sfiCompliant bool = false
+@description('AZURE_POLICY_RESTRICTED profile: public access decided by the network security perimeter instead of turned off.')
+param policyRestricted bool = false
 
 @description('Principal ID of the disk controller\'s identity, granted Storage Blob Data Contributor on the state container.')
 param controllerPrincipalId string
@@ -49,7 +49,7 @@ resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
     defaultToOAuthAuthentication: true
     minimumTlsVersion: 'TLS1_2'
     supportsHttpsTrafficOnly: true
-    publicNetworkAccess: sfiCompliant ? 'SecuredByPerimeter' : 'Disabled'
+    publicNetworkAccess: policyRestricted ? 'SecuredByPerimeter' : 'Disabled'
     networkAcls: {
       bypass: 'None'
       defaultAction: 'Deny'

@@ -33,9 +33,9 @@ import { SERVICE_IMAGE_INFO, SERVICE_TO_MODULES, ALL_SEQUENCE, ALL_MODE_MODULES 
 import { validateRequiredEnv, applyStubKeys } from "./lib/overlay-contracts.mjs";
 import { resolveDatabaseSecretVersions } from "./lib/database-secrets.mjs";
 import { WORKSPACES_SERVICE, workspacesEnabled } from "./lib/workspaces.mjs";
-import { sfiCompliant, winWorkersEnabled, DISK_CONTROLLER_SERVICE } from "./lib/aks-env.mjs";
+import { policyRestricted, winWorkersEnabled, DISK_CONTROLLER_SERVICE } from "./lib/aks-env.mjs";
 import { coordinationHostSequence, workerImageBuildArgs } from "./lib/coordination-host.mjs";
-import { beforeBicep as sfiBeforeBicep, afterBicep as sfiAfterBicep } from "../providers/azure/deploy-steps/sfi.mjs";
+import { beforeBicep as policyRestrictedBeforeBicep, afterBicep as policyRestrictedAfterBicep } from "../providers/azure/deploy-steps/policy-restricted.mjs";
 import {
   beforeBicep as winWorkersBeforeBicep,
   afterBicep as winWorkersAfterBicep,
@@ -206,15 +206,15 @@ async function runStage(name, ctx) {
       });
       return;
     case "bicep": {
-      // SFI_COMPLIANT=true: the Azure provider's deploy step does the work of
+      // AZURE_POLICY_RESTRICTED=true: the Azure provider's deploy step does the work of
       // the Bicep deployment scripts, which that profile's subscriptions deny.
       // WIN_WORKERS_ENABLED=true: the Windows worker deploy step prepares and
       // finishes what Bicep can't do for the pool (custom role lookups, the
       // VMs' administrator password, the scale set model, stale grants).
-      const sfi = sfiCompliant(ctx.env);
+      const restricted = policyRestricted(ctx.env);
       const winWorkers = winWorkersEnabled(ctx.env);
       const modules = ctx.moduleListOverride ?? SERVICE_TO_MODULES[ctx.service] ?? [];
-      if (sfi) sfiBeforeBicep({ env: ctx.env, modules });
+      if (restricted) policyRestrictedBeforeBicep({ env: ctx.env, modules });
       const winWorkerStep = winWorkers ? winWorkersBeforeBicep({ env: ctx.env, modules }) : null;
       await deployBicep({
         service: ctx.service,
@@ -227,7 +227,7 @@ async function runStage(name, ctx) {
         forceModules: ctx.forceModules,
         secureParameters: winWorkerStep?.secureParameters,
       });
-      if (sfi) await sfiAfterBicep({ env: ctx.env, modules });
+      if (restricted) await policyRestrictedAfterBicep({ env: ctx.env, modules });
       if (winWorkers) await winWorkersAfterBicep({ env: ctx.env, modules });
       // Re-run composition: a fresh `all` run starts with an empty outputs
       // cache, so the startup pass at line ~258 had nothing to compose.

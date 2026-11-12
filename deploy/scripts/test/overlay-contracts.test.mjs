@@ -22,7 +22,7 @@ import {
   getContract,
   validateRequiredEnv,
   validateVpnGatewayCombo,
-  validateSfiCombo,
+  validatePolicyRestrictedCombo,
   validateWinWorkersCombo,
   applyStubKeys,
   EDGE_MODES,
@@ -423,10 +423,10 @@ test("VPN combo-error hints never reference the nonexistent deploy/docs/ tree", 
   );
 });
 
-// === SFI_COMPLIANT combo checks =============================================
+// === AZURE_POLICY_RESTRICTED combo checks =============================================
 
-const SFI_ENV = Object.freeze({
-  SFI_COMPLIANT: "true",
+const POLICY_RESTRICTED_ENV = Object.freeze({
+  AZURE_POLICY_RESTRICTED: "true",
   ACME_EMAIL: "operator@example.com",
   SSL_CERT_DOMAIN_SUFFIX: "portal.example.com",
   HOST: "portal",
@@ -435,89 +435,89 @@ const SFI_ENV = Object.freeze({
   PILOTSWARM_USE_MANAGED_IDENTITY: "1",
 });
 
-function sfiErrors(edgeMode, tlsSource, extra = {}) {
-  const { combo } = validateRequiredEnv({ edgeMode, tlsSource, env: { ...SFI_ENV, ...extra } });
+function policyRestrictedErrors(edgeMode, tlsSource, extra = {}) {
+  const { combo } = validateRequiredEnv({ edgeMode, tlsSource, env: { ...POLICY_RESTRICTED_ENV, ...extra } });
   return combo;
 }
 const codes = (errors) => errors.map((e) => e.code);
 
-test("SFI_COMPLIANT refuses the akv TLS sources, which issue the certificate with deployment scripts", () => {
+test("AZURE_POLICY_RESTRICTED refuses the akv TLS sources, which issue the certificate with deployment scripts", () => {
   for (const tlsSource of ["akv", "akv-selfsigned"]) {
-    const errors = sfiErrors("afd", tlsSource);
-    assert.deepEqual(codes(errors), ["sfi-requires-letsencrypt"], tlsSource);
+    const errors = policyRestrictedErrors("afd", tlsSource);
+    assert.deepEqual(codes(errors), ["policy-restricted-requires-letsencrypt"], tlsSource);
     assert.match(errors[0].message, new RegExp(`TLS_SOURCE='${tlsSource}'.*deployment scripts`));
     // Off, the same settings pass: the setting gates every check.
     for (const flag of [undefined, "", "false", "FALSE"]) {
-      const env = { ...SFI_ENV, SFI_COMPLIANT: flag, PERIMETER_OPERATOR_IP_PREFIXES: "nope", PILOTSWARM_USE_MANAGED_IDENTITY: "0" };
-      assert.deepEqual(validateSfiCombo({ edgeMode: "afd", tlsSource, env }), [], `SFI_COMPLIANT=${flag}`);
+      const env = { ...POLICY_RESTRICTED_ENV, AZURE_POLICY_RESTRICTED: flag, PERIMETER_OPERATOR_IP_PREFIXES: "nope", PILOTSWARM_USE_MANAGED_IDENTITY: "0" };
+      assert.deepEqual(validatePolicyRestrictedCombo({ edgeMode: "afd", tlsSource, env }), [], `AZURE_POLICY_RESTRICTED=${flag}`);
     }
   }
-  assert.deepEqual(sfiErrors("afd", "letsencrypt"), []);
+  assert.deepEqual(policyRestrictedErrors("afd", "letsencrypt"), []);
 });
 
-test("SFI_COMPLIANT supports EDGE_MODE=afd only", () => {
+test("AZURE_POLICY_RESTRICTED supports EDGE_MODE=afd only", () => {
   // private mode has only akv TLS sources, so both refusals apply.
-  assert.deepEqual(codes(sfiErrors("private", "akv")), ["sfi-requires-afd", "sfi-requires-letsencrypt"]);
-  assert.deepEqual(codes(sfiErrors("private", "akv-selfsigned")), ["sfi-requires-afd", "sfi-requires-letsencrypt"]);
-  const publicMode = sfiErrors("public", "letsencrypt");
-  assert.deepEqual(codes(publicMode), ["sfi-requires-afd"]);
+  assert.deepEqual(codes(policyRestrictedErrors("private", "akv")), ["policy-restricted-requires-afd", "policy-restricted-requires-letsencrypt"]);
+  assert.deepEqual(codes(policyRestrictedErrors("private", "akv-selfsigned")), ["policy-restricted-requires-afd", "policy-restricted-requires-letsencrypt"]);
+  const publicMode = policyRestrictedErrors("public", "letsencrypt");
+  assert.deepEqual(codes(publicMode), ["policy-restricted-requires-afd"]);
   assert.match(publicMode[0].message, /public mode has no stamp VNet/);
 });
 
-test("SFI_COMPLIANT refuses bad operator prefixes and password sign-in to the stamp's database", () => {
-  const prefixes = sfiErrors("afd", "letsencrypt", { PERIMETER_OPERATOR_IP_PREFIXES: "203.0.113.7, 198.51.100.1/24" });
-  assert.deepEqual(codes(prefixes), ["sfi-operator-prefixes"]);
+test("AZURE_POLICY_RESTRICTED refuses bad operator prefixes and password sign-in to the stamp's database", () => {
+  const prefixes = policyRestrictedErrors("afd", "letsencrypt", { PERIMETER_OPERATOR_IP_PREFIXES: "203.0.113.7, 198.51.100.1/24" });
+  assert.deepEqual(codes(prefixes), ["policy-restricted-operator-prefixes"]);
   assert.match(prefixes[0].message, /'198\.51\.100\.1\/24' has host bits set/);
 
   for (const value of ["0", "", "maybe"]) {
-    assert.deepEqual(codes(sfiErrors("afd", "letsencrypt", { PILOTSWARM_USE_MANAGED_IDENTITY: value })),
-      ["sfi-requires-database-identity"], `PILOTSWARM_USE_MANAGED_IDENTITY=${value}`);
+    assert.deepEqual(codes(policyRestrictedErrors("afd", "letsencrypt", { PILOTSWARM_USE_MANAGED_IDENTITY: value })),
+      ["policy-restricted-requires-database-identity"], `PILOTSWARM_USE_MANAGED_IDENTITY=${value}`);
   }
   // A bring-your-own database keeps its own sign-in.
-  assert.deepEqual(sfiErrors("afd", "letsencrypt", { DEPLOY_POSTGRES: "false", PILOTSWARM_USE_MANAGED_IDENTITY: "0" }), []);
+  assert.deepEqual(policyRestrictedErrors("afd", "letsencrypt", { DEPLOY_POSTGRES: "false", PILOTSWARM_USE_MANAGED_IDENTITY: "0" }), []);
 
-  for (const e of [...prefixes, ...sfiErrors("private", "akv")]) {
+  for (const e of [...prefixes, ...policyRestrictedErrors("private", "akv")]) {
     assert.ok(e.message && e.hint, e.code);
     assert.ok(!/new-env|deploy:new-env/i.test(e.hint), `combo hint for ${e.code} must not point at the scaffolder`);
   }
 });
 
-test("SFI_COMPLIANT refuses a Blob client without managed identity, judged as the runtime judges it", () => {
+test("AZURE_POLICY_RESTRICTED refuses a Blob client without managed identity, judged as the runtime judges it", () => {
   // Storage shared keys are off, so a Blob flag that isn't truthy is refused,
   // even with database managed identity on.
   for (const value of ["0", "false", "no", "off", "maybe"]) {
-    assert.deepEqual(codes(sfiErrors("afd", "letsencrypt", { PILOTSWARM_BLOB_USE_MANAGED_IDENTITY: value })),
-      ["sfi-requires-blob-identity"], `PILOTSWARM_BLOB_USE_MANAGED_IDENTITY=${value}`);
+    assert.deepEqual(codes(policyRestrictedErrors("afd", "letsencrypt", { PILOTSWARM_BLOB_USE_MANAGED_IDENTITY: value })),
+      ["policy-restricted-requires-blob-identity"], `PILOTSWARM_BLOB_USE_MANAGED_IDENTITY=${value}`);
   }
-  const [refused] = sfiErrors("afd", "letsencrypt", { PILOTSWARM_BLOB_USE_MANAGED_IDENTITY: "0" });
+  const [refused] = policyRestrictedErrors("afd", "letsencrypt", { PILOTSWARM_BLOB_USE_MANAGED_IDENTITY: "0" });
   assert.match(refused.message, /denies Storage shared keys.*PILOTSWARM_BLOB_USE_MANAGED_IDENTITY must be 1/);
   assert.ok(!/new-env|deploy:new-env/i.test(refused.hint));
 
   // Without the key the deploy path's default (1) applies; truthy values pass.
   for (const value of [undefined, "1", "true", " YES ", "on"]) {
-    assert.deepEqual(sfiErrors("afd", "letsencrypt", { PILOTSWARM_BLOB_USE_MANAGED_IDENTITY: value }), [], `${value}`);
+    assert.deepEqual(policyRestrictedErrors("afd", "letsencrypt", { PILOTSWARM_BLOB_USE_MANAGED_IDENTITY: value }), [], `${value}`);
   }
-  assert.deepEqual(validateSfiCombo({
-    edgeMode: "afd", tlsSource: "letsencrypt", env: { ...parseEnvFile(templateEnvPath()), SFI_COMPLIANT: "true" },
+  assert.deepEqual(validatePolicyRestrictedCombo({
+    edgeMode: "afd", tlsSource: "letsencrypt", env: { ...parseEnvFile(templateEnvPath()), AZURE_POLICY_RESTRICTED: "true" },
   }), [], "an env scaffolded from template.env passes");
 
   // An empty Blob flag falls back to the database flag, as at runtime. A
   // bring-your-own database keeps password sign-in apart from Blob.
   const byo = { DEPLOY_POSTGRES: "false" };
-  assert.deepEqual(codes(sfiErrors("afd", "letsencrypt", {
+  assert.deepEqual(codes(policyRestrictedErrors("afd", "letsencrypt", {
     ...byo, PILOTSWARM_BLOB_USE_MANAGED_IDENTITY: "", PILOTSWARM_USE_MANAGED_IDENTITY: "0",
-  })), ["sfi-requires-blob-identity"]);
-  assert.deepEqual(sfiErrors("afd", "letsencrypt", {
+  })), ["policy-restricted-requires-blob-identity"]);
+  assert.deepEqual(policyRestrictedErrors("afd", "letsencrypt", {
     ...byo, PILOTSWARM_BLOB_USE_MANAGED_IDENTITY: " ", PILOTSWARM_USE_MANAGED_IDENTITY: "1",
   }), []);
-  assert.deepEqual(sfiErrors("afd", "letsencrypt", {
+  assert.deepEqual(policyRestrictedErrors("afd", "letsencrypt", {
     ...byo, PILOTSWARM_BLOB_USE_MANAGED_IDENTITY: "1", PILOTSWARM_USE_MANAGED_IDENTITY: "0",
   }), []);
 
   // The setting off never refuses.
   for (const flag of [undefined, "", "false"]) {
-    const env = { ...SFI_ENV, SFI_COMPLIANT: flag, PILOTSWARM_BLOB_USE_MANAGED_IDENTITY: "0" };
-    assert.deepEqual(validateSfiCombo({ edgeMode: "afd", tlsSource: "letsencrypt", env }), [], `SFI_COMPLIANT=${flag}`);
+    const env = { ...POLICY_RESTRICTED_ENV, AZURE_POLICY_RESTRICTED: flag, PILOTSWARM_BLOB_USE_MANAGED_IDENTITY: "0" };
+    assert.deepEqual(validatePolicyRestrictedCombo({ edgeMode: "afd", tlsSource: "letsencrypt", env }), [], `AZURE_POLICY_RESTRICTED=${flag}`);
   }
 });
 
@@ -526,9 +526,9 @@ test("SFI_COMPLIANT refuses a Blob client without managed identity, judged as th
 // call. Returns the process result and the logged calls.
 let manifestsRuns = 0;
 function manifestsOnlyPortalRun(t, settings) {
-  const name = `sfim${process.pid.toString(36)}${manifestsRuns++}`;
+  const name = `aprm${process.pid.toString(36)}${manifestsRuns++}`;
   const local = join(REPO_ROOT, "deploy", "envs", "local", name);
-  const dir = mkdtempSync(join(tmpdir(), "ps-sfi-combo-"));
+  const dir = mkdtempSync(join(tmpdir(), "ps-apr-combo-"));
   t.after(() => {
     rmSync(local, { recursive: true, force: true });
     rmSync(dir, { recursive: true, force: true });
@@ -541,7 +541,7 @@ function manifestsOnlyPortalRun(t, settings) {
   writeFileSync(join(dir, "az.cjs"), [
     "const fs = require('node:fs');",
     "const args = process.argv.slice(2);",
-    "fs.appendFileSync(process.env.SFI_TEST_CALLS, JSON.stringify(args) + '\\n');",
+    "fs.appendFileSync(process.env.POLICY_RESTRICTED_TEST_CALLS, JSON.stringify(args) + '\\n');",
     "process.exit(args[0] === '--version' ? 0 : 9);",
   ].join("\n"));
   if (process.platform === "win32") {
@@ -550,7 +550,7 @@ function manifestsOnlyPortalRun(t, settings) {
     writeFileSync(join(dir, "az"), `#!/bin/sh\nexec "${process.execPath}" "$(dirname "$0")/az.cjs" "$@"\n`, { mode: 0o755 });
   }
 
-  const env = { ...process.env, SFI_TEST_CALLS: calls };
+  const env = { ...process.env, POLICY_RESTRICTED_TEST_CALLS: calls };
   const ambient = [...Object.keys(settings), ...DATABASE_INPUT_KEYS, "TLS_SOURCE", "ACME_EMAIL", "SSL_CERT_DOMAIN_SUFFIX",
     "PERIMETER_OPERATOR_IP_PREFIXES", "WORKSPACES_ENABLED", "USER_POOL_MIN_COUNT", "PILOTSWARM_NATIVE_SUBAGENTS",
     "NPM_REGISTRY", "DEPLOY_PROVIDER"];
@@ -564,28 +564,28 @@ function manifestsOnlyPortalRun(t, settings) {
   return { result, logged };
 }
 
-const SFI_STAMP = Object.freeze({
+const POLICY_RESTRICTED_STAMP = Object.freeze({
   SUBSCRIPTION_ID: "00000000-0000-0000-0000-000000000003",
   EDGE_MODE: "afd",
   PILOTSWARM_USE_MANAGED_IDENTITY: "1",
-  SFI_COMPLIANT: "true",
+  AZURE_POLICY_RESTRICTED: "true",
 });
 
-test("SFI_COMPLIANT refuses an akv TLS source on a portal run that only publishes manifests, before any step", (t) => {
+test("AZURE_POLICY_RESTRICTED refuses an akv TLS source on a portal run that only publishes manifests, before any step", (t) => {
   const { result, logged } = manifestsOnlyPortalRun(t, {
-    ...SFI_STAMP, TLS_SOURCE: "akv", SSL_CERT_DOMAIN_SUFFIX: "portal.example.com",
+    ...POLICY_RESTRICTED_STAMP, TLS_SOURCE: "akv", SSL_CERT_DOMAIN_SUFFIX: "portal.example.com",
   });
   assert.equal(result.status, 1, result.stderr);
-  assert.match(result.stderr, /\[sfi-requires-letsencrypt\] SFI_COMPLIANT=true refuses TLS_SOURCE='akv'/);
+  assert.match(result.stderr, /\[policy-restricted-requires-letsencrypt\] AZURE_POLICY_RESTRICTED=true refuses TLS_SOURCE='akv'/);
   assert.deepEqual(logged, [["--version"]], "no Azure call besides the CLI check");
 });
 
-test("SFI_COMPLIANT refuses Blob without managed identity on a portal run that only publishes manifests, before any step", (t) => {
+test("AZURE_POLICY_RESTRICTED refuses Blob without managed identity on a portal run that only publishes manifests, before any step", (t) => {
   const { result, logged } = manifestsOnlyPortalRun(t, {
-    ...SFI_STAMP, TLS_SOURCE: "letsencrypt", ACME_EMAIL: "operator@example.com", PILOTSWARM_BLOB_USE_MANAGED_IDENTITY: "0",
+    ...POLICY_RESTRICTED_STAMP, TLS_SOURCE: "letsencrypt", ACME_EMAIL: "operator@example.com", PILOTSWARM_BLOB_USE_MANAGED_IDENTITY: "0",
   });
   assert.equal(result.status, 1, result.stderr);
-  assert.match(result.stderr, /\[sfi-requires-blob-identity\] SFI_COMPLIANT=true denies Storage shared keys/);
+  assert.match(result.stderr, /\[policy-restricted-requires-blob-identity\] AZURE_POLICY_RESTRICTED=true denies Storage shared keys/);
   assert.deepEqual(logged, [["--version"]], "no Azure call besides the CLI check");
 });
 

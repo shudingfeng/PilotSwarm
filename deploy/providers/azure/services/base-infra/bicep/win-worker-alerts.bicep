@@ -9,7 +9,7 @@
 //   * StorageBlobLogs of the main storage account and the disk controller's
 //     state account, and the AuditEvent log of the stamp vault, the
 //     deploy-only vault and the personal vault, to the security workspace: the
-//     perimeter's own workspace with SFI_COMPLIANT=true (a perimeter
+//     perimeter's own workspace with AZURE_POLICY_RESTRICTED=true (a perimeter
 //     resource's logs must stay in the perimeter), the main one otherwise.
 //
 // Alerts: each a scheduled query on one workspace, every 5 minutes, on the rows
@@ -82,7 +82,7 @@ param resourceNamePrefix string
 @description('The main Log Analytics workspace: AKS, container logs and the Activity Log.')
 param mainWorkspaceId string
 
-@description('The workspace for the vaults\' and storage accounts\' logs: the perimeter\'s with SFI_COMPLIANT=true, else the main one.')
+@description('The workspace for the vaults\' and storage accounts\' logs: the perimeter\'s with AZURE_POLICY_RESTRICTED=true, else the main one.')
 param securityWorkspaceId string
 
 @description('Email receivers of every alert.')

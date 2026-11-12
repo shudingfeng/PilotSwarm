@@ -4,13 +4,13 @@
 //                         (default 1). The session-workspaces tests need two
 //                         agent nodes (docs/proposals/session-workspaces.md,
 //                         section 12.1).
-//   SFI_COMPLIANT         true deploys the stamp for subscriptions whose
+//   AZURE_POLICY_RESTRICTED         true deploys the stamp for subscriptions whose
 //                         Azure Policy requires a network security perimeter
 //                         and denies Storage shared keys and deployment
 //                         scripts (default false). See "Policy-restricted
 //                         subscriptions" in docs/developer/deploy/aks.md.
 //   PERIMETER_OPERATOR_IP_PREFIXES
-//                         with SFI_COMPLIANT=true, comma-separated public
+//                         with AZURE_POLICY_RESTRICTED=true, comma-separated public
 //                         IPv4 addresses or CIDR prefixes that the perimeter
 //                         also admits (default none).
 //   WIN_WORKERS_ENABLED   true deploys a Windows worker pool beside the
@@ -118,7 +118,7 @@ export const WIN_WORKER_OUTPUT_DEFAULTS = Object.freeze({
 
 export const AKS_ENV_DEFAULTS = Object.freeze({
   USER_POOL_MIN_COUNT: "1",
-  SFI_COMPLIANT: "false",
+  AZURE_POLICY_RESTRICTED: "false",
   ...WIN_WORKER_ENV_DEFAULTS,
   ...DISK_CONTROLLER_ENV_DEFAULTS,
   ...PORTAL_SETTING_DEFAULTS,
@@ -134,12 +134,12 @@ export function userPoolMinCount(env) {
   return Number(value);
 }
 
-export function sfiCompliant(env) {
-  const raw = env?.SFI_COMPLIANT;
+export function policyRestricted(env) {
+  const raw = env?.AZURE_POLICY_RESTRICTED;
   const value = String(raw ?? "").trim().toLowerCase();
   if (value === "true") return true;
   if (value === "false" || value === "") return false;
-  throw new Error(`SFI_COMPLIANT must be true or false, not '${raw}'.`);
+  throw new Error(`AZURE_POLICY_RESTRICTED must be true or false, not '${raw}'.`);
 }
 
 // The perimeter's access rules take CIDR prefixes, so an address becomes a

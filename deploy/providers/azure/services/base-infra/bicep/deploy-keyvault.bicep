@@ -15,7 +15,7 @@
 //   * RBAC and purge protection, with the stamp vault's 90-day soft delete.
 //   * Key Vault Secrets Officer for the deploying principal only; no workload
 //     identity holds any role here.
-//   * Public access like the stamp vault: open to RBAC, or with sfiCompliant
+//   * Public access like the stamp vault: open to RBAC, or with policyRestricted
 //     `SecuredByPerimeter` in the perimeter's stamp profile (nsp.bicep).
 //
 // Its AuditEvent log and the alert on reads of the CA keys are in
@@ -31,8 +31,8 @@ param keyVaultName string
 @description('AAD tenant ID for the vault.')
 param tenantId string = subscription().tenantId
 
-@description('SFI_COMPLIANT profile: public access decided by the network security perimeter.')
-param sfiCompliant bool = false
+@description('AZURE_POLICY_RESTRICTED profile: public access decided by the network security perimeter.')
+param policyRestricted bool = false
 
 @description('The deploying principal, granted Key Vault Secrets Officer. Empty grants nobody; the deploy step then cannot keep its secrets here.')
 param deployPrincipalId string = ''
@@ -62,7 +62,7 @@ resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
       bypass: 'AzureServices'
       defaultAction: 'Allow'
     }
-  }, sfiCompliant ? {
+  }, policyRestricted ? {
     publicNetworkAccess: 'SecuredByPerimeter'
   } : {})
 }

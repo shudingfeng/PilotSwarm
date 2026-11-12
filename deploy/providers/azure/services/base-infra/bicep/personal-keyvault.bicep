@@ -8,7 +8,7 @@
 //
 //   * RBAC and purge protection. Soft delete keeps a removed token for the
 //     minimum, 7 days; the retention is fixed when the vault is created.
-//   * No public access: `Disabled`, or with sfiCompliant `SecuredByPerimeter`
+//   * No public access: `Disabled`, or with policyRestricted `SecuredByPerimeter`
 //     in the perimeter's private-only profile (nsp.bicep), which has no access
 //     rule. Only its private endpoint and the perimeter's own resources reach
 //     it, so its RBAC grants are its data boundary:
@@ -31,8 +31,8 @@ param keyVaultName string
 @description('AAD tenant ID for the vault.')
 param tenantId string = subscription().tenantId
 
-@description('SFI_COMPLIANT profile: public access decided by the network security perimeter instead of turned off.')
-param sfiCompliant bool = false
+@description('AZURE_POLICY_RESTRICTED profile: public access decided by the network security perimeter instead of turned off.')
+param policyRestricted bool = false
 
 @description('Principal ID of the disk controller\'s identity, granted Key Vault Secrets User.')
 param controllerPrincipalId string
@@ -56,7 +56,7 @@ resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
     enableSoftDelete: true
     enablePurgeProtection: true
     softDeleteRetentionInDays: 7
-    publicNetworkAccess: sfiCompliant ? 'SecuredByPerimeter' : 'Disabled'
+    publicNetworkAccess: policyRestricted ? 'SecuredByPerimeter' : 'Disabled'
     networkAcls: {
       bypass: 'None'
       defaultAction: 'Deny'

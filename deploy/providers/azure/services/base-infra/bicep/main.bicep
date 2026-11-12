@@ -143,19 +143,19 @@ param tenantId string = ''
 @description('Portal short hostname (e.g. psmystamp-wus3-portal), threaded from the deploy-time PORTAL_RESOURCE_NAME env var. Used as the A-record label in the VPN-mode private DNS zone so VPN clients resolve the SAME hostname the AppGw listener serves (matching the AKV cert subject portalResourceName.sslCertificateDomainSuffix set in portal/bicep/main.bicep). Empty default keeps non-VPN stamps byte-equivalent.')
 param portalResourceName string = ''
 
-// ----- SFI_COMPLIANT profile (additive, optional) ----------------------------
+// ----- AZURE_POLICY_RESTRICTED profile (additive, optional) ----------------------------
 // For subscriptions whose Azure Policy requires a network security perimeter
 // and denies Storage shared keys and deployment scripts. deploy/scripts/lib/
-// render-params.mjs passes these parameters only with SFI_COMPLIANT=true;
+// render-params.mjs passes these parameters only with AZURE_POLICY_RESTRICTED=true;
 // their defaults leave the stamp unchanged.
 
-@description('SFI_COMPLIANT profile (EDGE_MODE=afd): a network security perimeter for the stamp Key Vault and storage account, explicit subnet NSGs, a blob private endpoint, the pinned cluster egress IP in every edge mode, Entra-only PostgreSQL behind an egress-only firewall, no shared-key Storage access, and no deployment script: deploy/providers/azure/deploy-steps/sfi.mjs probes for the App Gateway instead.')
-param sfiCompliant bool = false
+@description('AZURE_POLICY_RESTRICTED profile (EDGE_MODE=afd): a network security perimeter for the stamp Key Vault and storage account, explicit subnet NSGs, a blob private endpoint, the pinned cluster egress IP in every edge mode, Entra-only PostgreSQL behind an egress-only firewall, no shared-key Storage access, and no deployment script: deploy/providers/azure/deploy-steps/policy-restricted.mjs probes for the App Gateway instead.')
+param policyRestricted bool = false
 
-@description('SFI_COMPLIANT profile: public IPv4 CIDR prefixes that the perimeter admits besides the cluster egress IP and the stamp subscription (PERIMETER_OPERATOR_IP_PREFIXES).')
+@description('AZURE_POLICY_RESTRICTED profile: public IPv4 CIDR prefixes that the perimeter admits besides the cluster egress IP and the stamp subscription (PERIMETER_OPERATOR_IP_PREFIXES).')
 param perimeterOperatorIpPrefixes array = []
 
-@description('SFI_COMPLIANT profile: whether the App Gateway already exists, from the deploy step\'s probe. Without the profile, check-appgw-exists.bicep answers this.')
+@description('AZURE_POLICY_RESTRICTED profile: whether the App Gateway already exists, from the deploy step\'s probe. Without the profile, check-appgw-exists.bicep answers this.')
 param appGwExists bool = false
 
 // ----- Windows worker pool (additive, optional) ------------------------------
@@ -269,17 +269,17 @@ var controllerStorageAccountName = '${alphaPrefix}poolsa'
 var winWorkerDcrName = '${resourceNamePrefix}-win-worker-dcr'
 
 // The cluster's pinned egress IP. HorizonDB's firewall (public mode) and the
-// SFI_COMPLIANT profile's perimeter and PostgreSQL firewall admit only it, and
+// AZURE_POLICY_RESTRICTED profile's perimeter and PostgreSQL firewall admit only it, and
 // so does the Windows worker pool's PostgreSQL firewall.
-var clusterEgressIpEnabled = (edgeMode == 'public' && horizonDbEnabled) || sfiCompliant || winWorkersEnabled
+var clusterEgressIpEnabled = (edgeMode == 'public' && horizonDbEnabled) || policyRestricted || winWorkersEnabled
 
 // PostgreSQL takes Entra sign-in only from the stamp's egress addresses with
-// the SFI_COMPLIANT profile or the Windows worker pool.
-var postgresEgressOnly = sfiCompliant || winWorkersEnabled
+// the AZURE_POLICY_RESTRICTED profile or the Windows worker pool.
+var postgresEgressOnly = policyRestricted || winWorkersEnabled
 
 // The private endpoint subnet and the main storage account's blob private
-// endpoint: the SFI_COMPLIANT profile and the Windows worker pool.
-var privateEndpointsEnabled = sfiCompliant || winWorkersEnabled
+// endpoint: the AZURE_POLICY_RESTRICTED profile and the Windows worker pool.
+var privateEndpointsEnabled = policyRestricted || winWorkersEnabled
 
 // The main storage account's blob private endpoint, at a fixed address in
 // pe-subnet (vnet.bicep) so network rules can name it.
@@ -326,7 +326,7 @@ module Vnet './vnet.bicep' = if (edgeMode != 'public') {
     dnsServers: vpnGatewayEnabled ? [
       '10.20.19.4'
     ] : []
-    sfiCompliant: sfiCompliant
+    policyRestricted: policyRestricted
     winWorkersEnabled: winWorkersEnabled
     diskControllerWorkerPortIp: diskControllerWorkerPortIp
     storageBlobPrivateEndpointIp: storageBlobPrivateEndpointIp
@@ -350,12 +350,12 @@ module ApproverRgReaderRbac './approver-rg-reader-rbac.bicep' = {
 // ==============================================================================
 // Probe whether the AppGw already exists in the RG. Drives the AGIC config
 // preservation flag in `application-gateway.bicep`. Skipped in private
-// mode — there is no AppGw. Skipped with SFI_COMPLIANT too: the probe is a
+// mode — there is no AppGw. Skipped with AZURE_POLICY_RESTRICTED too: the probe is a
 // deployment script, which needs Storage shared keys, so the deploy step
 // probes instead and passes `appGwExists`.
 // ==============================================================================
 
-module ApplicationGatewayExistsCheck './check-appgw-exists.bicep' = if (edgeMode == 'afd' && !sfiCompliant) {
+module ApplicationGatewayExistsCheck './check-appgw-exists.bicep' = if (edgeMode == 'afd' && !policyRestricted) {
   name: '${resourceNamePrefix}-check-appgw-${dTime}'
   params: {
     location: location
@@ -384,7 +384,7 @@ module AppGateway './application-gateway.bicep' = if (edgeMode == 'afd') {
     wafMode: wafMode
     availabilityZones: availabilityZones
     userAssignedIdentityId: Uami.outputs.appGwIdentityResourceId
-    appGwExists: sfiCompliant ? appGwExists : ApplicationGatewayExistsCheck!.outputs.exists
+    appGwExists: policyRestricted ? appGwExists : ApplicationGatewayExistsCheck!.outputs.exists
     logAnalyticsWorkspaceResourceId: LogAnalytics.outputs.workspaceId
     appgwWafCustomRules: appgwWafCustomRules
     vpnGatewayEnabled: vpnGatewayEnabled
@@ -426,7 +426,7 @@ module AksControlPlaneRbac './aks-controlplane-rbac.bicep' = if (edgeMode != 'pu
 }
 
 // The cluster's pinned egress IP (clusterEgressIpEnabled): HorizonDB in public
-// mode, and the SFI_COMPLIANT profile and the Windows worker pool in every edge
+// mode, and the AZURE_POLICY_RESTRICTED profile and the Windows worker pool in every edge
 // mode. The IP is owned by
 // the stamp resource group, not by the AKS node resource group. It keeps its
 // first name, so a stamp that already has it keeps its address.
@@ -628,7 +628,7 @@ module Storage './storage.bicep' = {
     workerWorkloadPrincipalId: Uami.outputs.csiIdentityPrincipalId
     localDeploymentPrincipalId: localDeploymentPrincipalId
     localDeploymentPrincipalType: localDeploymentPrincipalType
-    sfiCompliant: sfiCompliant
+    policyRestricted: policyRestricted
     winWorkersEnabled: winWorkersEnabled
     winWorkerPrincipalId: Uami.outputs.winWorkerIdentityPrincipalId
     coordinationHostPrincipalId: Uami.outputs.coordinationIdentityPrincipalId
@@ -667,12 +667,12 @@ module KeyVault './keyvault.bicep' = {
     localDeploymentPrincipalId: localDeploymentPrincipalId
     localDeploymentPrincipalType: localDeploymentPrincipalType
     templateDeploymentEnabled: horizonDbEnabled
-    sfiCompliant: sfiCompliant
+    policyRestricted: policyRestricted
   }
 }
 
 // ==============================================================================
-// SFI_COMPLIANT profile: the network security perimeter around the stamp Key
+// AZURE_POLICY_RESTRICTED profile: the network security perimeter around the stamp Key
 // Vault and the main storage account, and the perimeter's log workspace.
 // Skipped without the profile. The account's blob private endpoint comes with
 // the profile or the Windows worker pool.
@@ -681,7 +681,7 @@ module KeyVault './keyvault.bicep' = {
 // A perimeter resource's diagnostic logs must go to a destination in the same
 // perimeter, so the perimeter gets its own workspace. The main workspace stays
 // outside the perimeter, unchanged.
-module LogAnalyticsNsp '../../common/bicep/log-analytics.bicep' = if (sfiCompliant) {
+module LogAnalyticsNsp '../../common/bicep/log-analytics.bicep' = if (policyRestricted) {
   name: '${resourceNamePrefix}-log-nsp-${dTime}'
   params: {
     location: location
@@ -690,7 +690,7 @@ module LogAnalyticsNsp '../../common/bicep/log-analytics.bicep' = if (sfiComplia
   }
 }
 
-module Nsp './nsp.bicep' = if (sfiCompliant) {
+module Nsp './nsp.bicep' = if (policyRestricted) {
   name: '${resourceNamePrefix}-nsp-${dTime}'
   params: {
     location: location
@@ -755,7 +755,7 @@ module DeployKeyVault './deploy-keyvault.bicep' = if (winWorkersEnabled) {
   params: {
     location: location
     keyVaultName: deployKeyVaultName
-    sfiCompliant: sfiCompliant
+    policyRestricted: policyRestricted
     deployPrincipalId: localDeploymentPrincipalId
     deployPrincipalType: localDeploymentPrincipalType
   }
@@ -767,7 +767,7 @@ module PersonalKeyVault './personal-keyvault.bicep' = if (winWorkersEnabled) {
   params: {
     location: location
     keyVaultName: personalKeyVaultName
-    sfiCompliant: sfiCompliant
+    policyRestricted: policyRestricted
     controllerPrincipalId: Uami.outputs.diskControllerIdentityPrincipalId
     portalPrincipalId: Uami.outputs.csiIdentityPrincipalId
     personalVaultWriterRoleId: personalVaultWriterRoleId
@@ -807,7 +807,7 @@ module ControllerStorage './controller-storage.bicep' = if (winWorkersEnabled) {
   params: {
     location: location
     storageAccountName: controllerStorageAccountName
-    sfiCompliant: sfiCompliant
+    policyRestricted: policyRestricted
     controllerPrincipalId: Uami.outputs.diskControllerIdentityPrincipalId
   }
 }
@@ -975,7 +975,7 @@ module WinWorkerAlerts './win-worker-alerts.bicep' = if (winWorkersEnabled) {
     resourceNamePrefix: resourceNamePrefix
     mainWorkspaceId: LogAnalytics.outputs.workspaceId
     // A perimeter resource's diagnostic logs must stay in the perimeter.
-    securityWorkspaceId: sfiCompliant ? LogAnalyticsNsp!.outputs.workspaceId : LogAnalytics.outputs.workspaceId
+    securityWorkspaceId: policyRestricted ? LogAnalyticsNsp!.outputs.workspaceId : LogAnalytics.outputs.workspaceId
     alertEmails: winWorkerAlertEmails
     namespace: serviceAccountNamespace
     aksClusterName: Aks.outputs.aksClusterName

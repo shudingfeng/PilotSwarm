@@ -723,7 +723,7 @@ Unset, empty and `__PS_UNSET__` all mean unset.
 In the stamp's env file (`deploy/providers/azure/envs/template.env`), read by
 `deploy.mjs`, base-infra's Bicep and the overlays of the disk controller and the
 Linux worker. Each is off or at its default unless set, and with
-`WIN_WORKERS_ENABLED` and `SFI_COMPLIANT` both off, a redeploy renders exactly
+`WIN_WORKERS_ENABLED` and `AZURE_POLICY_RESTRICTED` both off, a redeploy renders exactly
 what it did before.
 
 | Setting | Default | What it does |
@@ -761,8 +761,8 @@ what it did before.
 | `PS_DISK_CONTROLLER_SNAPSHOT_REFRESH_DAYS` | `7` | The golden snapshot's refresh interval; `0` turns the refresh off |
 | `PS_DISK_CONTROLLER_VM_SCRIPTS_DIR` | unset (`C:\pilotswarm\scripts`) | Where the image keeps the scripts the controller runs as Run Commands |
 | `APPGW_TRUSTED_ROOT_CERTS` | `pilotswarm-disk-controller-ca` | With `EDGE_MODE=afd`, the prefix of the App Gateway trusted roots that the deploy uploads for the controller's CAs: one name of 1 to 67 letters, digits, `_`, `.` or `-`, starting with a letter or digit, never a list (the deploy refuses a comma). Roots are matched by certificate: a CA already on a root keeps it, whatever its name, and a CA on none is uploaded as `<prefix>-<the first 12 hex digits of the SHA-256 of its DER>`. A stamp deployed before CA rotations keeps its CA on the root named after the prefix itself, so it deploys as before. The deploy lists the roots, two during a CA rotation, for the dispatcher Ingress |
-| `SFI_COMPLIANT` | `false` | The profile for policy-restricted subscriptions; see [Deploying to AKS](../deploy/aks.md#optional-policy-restricted-subscriptions) |
-| `PERIMETER_OPERATOR_IP_PREFIXES` | unset | With `SFI_COMPLIANT=true`, comma-separated IPv4 addresses or CIDR prefixes that the network security perimeter also admits |
+| `AZURE_POLICY_RESTRICTED` | `false` | The profile for policy-restricted subscriptions; see [Deploying to AKS](../deploy/aks.md#optional-policy-restricted-subscriptions) |
+| `PERIMETER_OPERATOR_IP_PREFIXES` | unset | With `AZURE_POLICY_RESTRICTED=true`, comma-separated IPv4 addresses or CIDR prefixes that the network security perimeter also admits |
 
 The deploy also refuses `PILOTSWARM_OWNER_ROUTING=1` without
 `WIN_WORKERS_ENABLED=true`: only a bound Windows worker serves an owner tag.
