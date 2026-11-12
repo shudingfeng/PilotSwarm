@@ -34,7 +34,7 @@ function catalogOf(rows, configs = {}) {
     };
 }
 
-test("a tree is owner-routed by the tag saved for its session or its root, or, with owner routing on, by its user root", async () => {
+test("a tree is owner-routed by the tag saved for its session or its root, and only so", async () => {
     const catalog = catalogOf({
         root: { owner: USER },
         child: { owner: USER, parentSessionId: "root", rootSessionId: "root" },
@@ -49,16 +49,21 @@ test("a tree is owner-routed by the tag saved for its session or its root, or, w
         "tagged-root": { ownerTag: OWNER },
         unowned: { ownerTag: "not a tag" },
     });
-    for (const ownerRouting of [false, true]) {
-        assert.equal(await ownerRoutedTreeTag(catalog, "child", ownerRouting), OWNER, "a tag saved for the session");
-        assert.equal(await ownerRoutedTreeTag(catalog, "under-tagged-root", ownerRouting), OWNER, "a tag saved for its root");
-        assert.equal(await ownerRoutedTreeTag(catalog, "tagged-root", ownerRouting), OWNER);
-        for (const id of ["system-root", "system-child", "system-owned", "unowned", "missing"]) {
-            assert.equal(await ownerRoutedTreeTag(catalog, id, ownerRouting), undefined, `${id}: never tagged`);
+    const saved = process.env.PILOTSWARM_OWNER_ROUTING;
+    try {
+        // The Portal's setting decides what it records, not what a tree is.
+        for (const setting of [undefined, "1"]) {
+            if (setting === undefined) delete process.env.PILOTSWARM_OWNER_ROUTING; else process.env.PILOTSWARM_OWNER_ROUTING = setting;
+            assert.equal(await ownerRoutedTreeTag(catalog, "child"), OWNER, "a tag saved for the session");
+            assert.equal(await ownerRoutedTreeTag(catalog, "under-tagged-root"), OWNER, "a tag saved for its root");
+            assert.equal(await ownerRoutedTreeTag(catalog, "tagged-root"), OWNER);
+            for (const id of ["root", "system-root", "system-child", "system-owned", "unowned", "missing"]) {
+                assert.equal(await ownerRoutedTreeTag(catalog, id), undefined, `${id}: never tagged`);
+            }
         }
+    } finally {
+        if (saved === undefined) delete process.env.PILOTSWARM_OWNER_ROUTING; else process.env.PILOTSWARM_OWNER_ROUTING = saved;
     }
-    assert.equal(await ownerRoutedTreeTag(catalog, "root", true), OWNER, "the tag its root takes at start");
-    assert.equal(await ownerRoutedTreeTag(catalog, "root", false), undefined, "with owner routing off, no tag");
 });
 
 // ─── The agent's tools ──────────────────────────────────────────────────────
@@ -178,10 +183,12 @@ test("a person's start of a Workflow is refused in an owner-routed tree (409 WOR
         root: { owner: USER },
         child: { owner: USER, parentSessionId: "root", rootSessionId: "root" },
         "system-root": { owner: USER, isSystem: true },
-    }, { child: { ownerTag: OWNER } });
+        "routed-root": { owner: USER },
+        "routed-child": { owner: USER, parentSessionId: "routed-root", rootSessionId: "routed-root" },
+    }, { child: { ownerTag: OWNER }, "routed-root": { ownerTag: OWNER } });
     catalog.workflowStore = () => ({});
-    const managementClient = (options) => {
-        const client = new PilotSwarmManagementClient({ store: "sqlite::memory:", ...options });
+    const managementClient = () => {
+        const client = new PilotSwarmManagementClient({ store: "sqlite::memory:" });
         client._catalog = catalog;
         client._started = true;
         return client;
@@ -193,23 +200,22 @@ test("a person's start of a Workflow is refused in an owner-routed tree (409 WOR
         assert.fail("expected the start to fail");
     };
 
-    for (const [options, sessionId] of [[{ ownerRouting: false }, "child"], [{ ownerRouting: true }, "child"], [{ ownerRouting: true }, "root"]]) {
-        const error = await failure(start(managementClient(options), sessionId));
-        assert.deepEqual([error.code, error.status], [WORKFLOW_OWNER_ROUTED, 409], `${sessionId} ${JSON.stringify(options)}`);
-        assert.match(error.message, /owner's workers/);
-    }
-    // Not owner-routed: the start goes on (and fails later, on this test's empty store, for another reason).
-    for (const [options, sessionId] of [[{ ownerRouting: false }, "root"], [{ ownerRouting: true }, "system-root"]]) {
-        const error = await failure(start(managementClient(options), sessionId));
-        assert.notEqual(error.code, WORKFLOW_OWNER_ROUTED, `${sessionId} ${JSON.stringify(options)}`);
-    }
-
     const saved = process.env.PILOTSWARM_OWNER_ROUTING;
     try {
-        process.env.PILOTSWARM_OWNER_ROUTING = "1";
-        assert.equal((await failure(start(managementClient({}), "root"))).code, WORKFLOW_OWNER_ROUTED, "the default follows PILOTSWARM_OWNER_ROUTING");
-        delete process.env.PILOTSWARM_OWNER_ROUTING;
-        assert.notEqual((await failure(start(managementClient({}), "root"))).code, WORKFLOW_OWNER_ROUTED);
+        // The Portal's setting decides what it records, not where a person may start a Workflow.
+        for (const setting of [undefined, "1"]) {
+            if (setting === undefined) delete process.env.PILOTSWARM_OWNER_ROUTING; else process.env.PILOTSWARM_OWNER_ROUTING = setting;
+            for (const sessionId of ["child", "routed-root", "routed-child"]) {
+                const error = await failure(start(managementClient(), sessionId));
+                assert.deepEqual([error.code, error.status], [WORKFLOW_OWNER_ROUTED, 409], `${sessionId} PILOTSWARM_OWNER_ROUTING=${setting}`);
+                assert.match(error.message, /owner's workers/);
+            }
+            // Not owner-routed: the start goes on (and fails later, on this test's empty store, for another reason).
+            for (const sessionId of ["root", "system-root"]) {
+                const error = await failure(start(managementClient(), sessionId));
+                assert.notEqual(error.code, WORKFLOW_OWNER_ROUTED, `${sessionId} PILOTSWARM_OWNER_ROUTING=${setting}`);
+            }
+        }
     } finally {
         if (saved === undefined) delete process.env.PILOTSWARM_OWNER_ROUTING; else process.env.PILOTSWARM_OWNER_ROUTING = saved;
     }

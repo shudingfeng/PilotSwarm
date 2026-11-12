@@ -146,7 +146,7 @@ describe("owner-only workers", () => {
                 workers.delete(id);
             };
 
-            client = new PilotSwarmClient({ ...stores, modelProvidersPath: providersPath.default, ownerRouting: true });
+            client = new PilotSwarmClient({ ...stores, modelProvidersPath: providersPath.default });
             mgmt = new PilotSwarmManagementClient({ ...stores, modelProvidersPath: providersPath.default });
             catalog = await createCatalog(env);
 
@@ -156,7 +156,8 @@ describe("owner-only workers", () => {
             await startWorker("default");
             await client.start();
             await mgmt.start();
-            const user = await client.createSession({ sessionId: randomUUID(), model: FIXTURE_QUALIFIED_MODEL, owner: OWNER });
+            // An owner-routed session: its tag saved with its creation config, as the Portal records it.
+            const user = await client.createSession({ sessionId: randomUUID(), model: FIXTURE_QUALIFIED_MODEL, owner: OWNER, ownerTag: OWNER_TAG });
             // The first title comes a minute after the first turn; start the
             // session as one whose title is due, as a continue-as-new would.
             const titleDue = patchSessionStartInput(client, (input) => ({ ...input, nextSummarizeAt: 1 }), { sessionId: user.sessionId });

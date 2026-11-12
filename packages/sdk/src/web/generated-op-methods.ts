@@ -365,7 +365,7 @@ export interface ManagementOps {
     }): Promise<any>;
 
     /**
-     * Create a session. Owner is the authenticated principal; visibility defaults to the deployment default. workspace { root, folder? } sets its working folder. onBehalfOfOwner { subject, provider? }: the deployment's dispatcher only, for a user who allows it; that user owns the private session and the dispatcher gets a write share.
+     * Create a session. Owner is the authenticated principal; visibility defaults to the deployment default. workspace { root, folder? } sets its working folder. onBehalfOfOwner { subject, provider? }: the deployment's dispatcher only, for a user who allows it, while ownership is enforced; that user owns the private session, shared for reading only, and the dispatcher gets a write share. Ignored on a deployment that names no dispatcher.
      * @remarks `POST /sessions` — access: `session:create`
      */
     createSession(params: {
@@ -398,7 +398,7 @@ export interface ManagementOps {
     }): Promise<any>;
 
     /**
-     * Stage 2.3: make a session for a package's Workflow Definition (ref, <package>/<name>): a session (model: default the deployment's) with the definition attached and locked at the package's version, instructions to coordinate it from its interface card, and a first message that asks the session to greet the person and ask for the inputs it needs. 404 PACKAGE_WORKFLOW_NOT_FOUND for a definition the caller cannot use.
+     * Stage 2.3: make a session for a package's Workflow Definition (ref, <package>/<name>): a session (model: default the deployment's) with the definition attached and locked at the package's version, instructions to coordinate it from its interface card, and a first message that asks the session to greet the person and ask for the inputs it needs. 404 PACKAGE_WORKFLOW_NOT_FOUND for a definition the caller cannot use. onBehalfOfOwner is refused (400 INVALID_REQUEST) on a deployment that names a dispatcher: no Workflow starts in a session created on behalf of a user.
      * @remarks `POST /sessions/for-workflow` — access: `session:create`
      */
     createSessionForWorkflow(params: {
@@ -408,6 +408,7 @@ export interface ManagementOps {
         contextTier?: any;
         groupId?: any;
         visibility?: any;
+        onBehalfOfOwner?: any;
     }): Promise<any>;
 
     /**
@@ -499,7 +500,7 @@ export interface ManagementOps {
     }): Promise<any>;
 
     /**
-     * Cancel and soft-delete a session. With force: when the delete has not settled within settleTimeoutMs (0 to 65000, default 65000; 0 sends no command), delete its subtree directly, leaves first, and fail naming what failed so a retry can finish.
+     * Cancel and soft-delete a session. With force: when the delete has not settled within settleTimeoutMs (0 to 65000, default 65000; 0 sends no command), delete its subtree directly, leaves first, and fail naming what failed so a retry can finish. reason is recorded with force only.
      * @remarks `DELETE /sessions/:sessionId` — access: `session:destroy`
      */
     deleteSession(params: {
@@ -1083,7 +1084,7 @@ export interface ManagementOps {
     }): Promise<any>;
 
     /**
-     * Grant (or update) a targeted share ({ user: { provider, subject, email?, displayName? }, access: read|write }). Owner or admin.
+     * Grant (or update) a targeted share ({ user: { provider, subject, email?, displayName? }, access: read|write }). Owner or admin. A tree the dispatcher created for its owner takes no write share but the dispatcher's (403 DELEGATED_SESSION_READ_ONLY).
      * @remarks `POST /sessions/:sessionId/shares` — access: `session:share`
      */
     grantSessionShare(params: {
@@ -1746,7 +1747,7 @@ export interface ManagementOps {
     }): Promise<any>;
 
     /**
-     * Set the tree's sharing level (private | shared_read | shared_write). Owner or admin.
+     * Set the tree's sharing level (private | shared_read | shared_write). Owner or admin. A tree the dispatcher created for its owner refuses shared_write (403 DELEGATED_SESSION_READ_ONLY).
      * @remarks `PUT /sessions/:sessionId/visibility` — access: `session:share`
      */
     setSessionVisibility(params: {

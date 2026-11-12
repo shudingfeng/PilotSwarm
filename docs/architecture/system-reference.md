@@ -240,7 +240,9 @@ These execute on the specific worker holding the session's in-memory state.
 | `checkpointSession` | sessionId | void | Upload to blob without destroying |
 
 **Owner routing (orchestration 1.0.84).** A session whose orchestration input
-has an `ownerTag` schedules every activity above with that tag instead of its
+has an `ownerTag` (copied at start from its creation config, where the portal
+saves it for a session the dispatcher creates for a user) schedules every
+activity above with that tag instead of its
 capability tag, so only a worker started with the same `ownerTag` runs it.
 Each worker's filter is `defaultAnd` over the four capability tags, plus its
 owner tag or, with a capacity requester, `pilotswarm.owner-capacity.v1`: five
@@ -756,6 +758,7 @@ ENTRYPOINT ["node", "examples/worker.js"]
 | `dumpSession(id)` | Export session transcript |
 | `getMyDispatcherDelegation(principal?)` | `{ enabled }`: whether the user lets the deployment's dispatcher create sessions for them and end the ones it holds a write share on. `principal` defaults to the local default user; over the Web API it is always the signed-in caller, and the result adds `dispatcherConfigured` |
 | `setMyDispatcherDelegation(enabled, principal?)` | Turn that opt-in on or off (`users.allow_dispatcher_delegation`); returns `{ enabled }`. Off keeps the dispatcher's shares, and the portal refuses it on the user's sessions until the opt-in is back on |
+| `getSessionDelegation(sessionId)` | The delegation record of the session's tree, `{ rootSessionId, dispatcher: { provider, subject } }`, read from its root's creation config (`delegatedCreation`, which the portal saves for a session the dispatcher creates for a user), or `null`. The portal reads it to keep such a tree shared for reading only. Direct mode only: over the Web API it throws `WEB_MODE_UNSUPPORTED` |
 
 **`PilotSwarmSessionView`**: Merged view combining CMS metadata (title, model, events) with duroxide orchestration state (customStatus, runtime status), including cron metadata and the latest `contextUsage` snapshot when available.
 

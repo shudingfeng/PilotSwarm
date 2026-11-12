@@ -1498,7 +1498,8 @@ export interface OrchestrationInput {
 
     // ─── Owner routing (1.0.84) ──────────────────────────────
     /**
-     * The owner routing tag, `owner.<subject>` of the session row's owner.
+     * The owner routing tag, `owner.<subject>` of the session's owner, as
+     * its creation config holds it (the client copies it at start).
      * With it, every session-scoped activity goes only to a worker that
      * declares the tag (`PilotSwarmWorkerOptions.ownerTag`), and the session
      * asks for capacity (`requestOwnerCapacity`) before each turn. Carried
@@ -1671,12 +1672,13 @@ export interface PilotSwarmWorkerOptions {
     workerOwner?: { provider: string; subject: string } | null;
     /**
      * Owner routing: an owner's tag, `owner.<subject>`. The worker then also
-     * runs the session-scoped activities of that owner's sessions, which
-     * carry the tag when their client sets `ownerRouting`. Fixed for the
-     * worker's lifetime. Default: none. `examples/worker.js` reads
-     * `PILOTSWARM_WORKER_OWNER_TAG`. Without `ownerOnly`, a worker with a tag
-     * refuses to start with a capacity requester: its filter would hold six
-     * tags, one more than duroxide allows.
+     * runs the session-scoped activities of that owner's owner-routed
+     * sessions, which carry the tag when their creation config does (the
+     * portal records it for a session a dispatcher creates for its owner).
+     * Fixed for the worker's lifetime. Default: none. `examples/worker.js`
+     * reads `PILOTSWARM_WORKER_OWNER_TAG`. Without `ownerOnly`, a worker with
+     * a tag refuses to start with a capacity requester: its filter would hold
+     * six tags, one more than duroxide allows.
      */
     ownerTag?: string;
     /**
@@ -2085,20 +2087,11 @@ export interface PilotSwarmClientOptions {
     aadDbUser?: string;
 
     /**
-     * Owner routing: when this client starts the orchestration of a
-     * top-level session owned by a user, it records the tag
-     * `owner.<subject>` of the owner on the session's row, so the session's
-     * turns run only on workers that declare that tag. System sessions,
-     * sessions the system user owns and rows without an owner get none.
-     * Default: `PILOTSWARM_OWNER_ROUTING=1`.
-     */
-    ownerRouting?: boolean;
-
-    /**
-     * The fast workspace busy policy for the top-level sessions this client
-     * starts: their first `WORKSPACE_BUSY` refusal releases the worker, and
-     * retries follow 10 s, 20 s, 1 min, then every 3 min. Sessions they
-     * create during a turn get it too. Default:
+     * The fast workspace busy policy for the owner-routed top-level sessions
+     * this client starts (those whose creation config carries an owner tag):
+     * their first `WORKSPACE_BUSY` refusal releases the worker, and retries
+     * follow 10 s, 20 s, 1 min, then every 3 min. Sessions they create during
+     * a turn get it too. Other sessions keep the default policy. Default:
      * `PILOTSWARM_WORKSPACE_BUSY_FAST_RELEASE=1`.
      */
     workspaceBusyFastRelease?: boolean;

@@ -174,6 +174,8 @@ test("direct-only plumbing refuses loudly with WEB_MODE_UNSUPPORTED", () => {
         // client concern either. Both are portal-internal, direct mode only.
         "recordUserRole",
         "getUserRole",
+        // The portal applies a delegated session's sharing rule server-side.
+        "getSessionDelegation",
         "dumpSession",
         "sendCommand",
         "getCommandResponse",

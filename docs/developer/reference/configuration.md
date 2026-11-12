@@ -208,7 +208,8 @@ remain visible or keep enforcement disabled during the transition. See
 sessions for the people who allow it. For Entra, that is an app-only token
 holding the `user` app role, and the value is the service principal's object
 ID (the token's `oid`, which the portal uses as the principal's subject).
-Unset, none of the rules below applies and the portal makes no extra lookups.
+Unset, none of the rules below applies, the portal makes no extra lookups, and
+it ignores `onBehalfOfOwner`, as it did before the parameter existed.
 
 - **The opt-in.** Each user turns delegation on or off for themselves only:
   the **Dispatcher Delegation** switch in Admin Console → Model Providers →
@@ -219,9 +220,21 @@ Unset, none of the rules below applies and the portal makes no extra lookups.
   dispatcher.
 - **Creating for a user.** `createSession` and `createSessionForAgent` accept
   `onBehalfOfOwner: { subject, provider? }` from the dispatcher only — from
-  nobody else, admins included — and only for a user whose opt-in is on. That
-  user owns the session, its visibility stays `private`, and the dispatcher
-  gets a targeted `write` share, the session's only share.
+  nobody else, admins included — only while `AUTHZ_ENFORCE_OWNERSHIP=true`,
+  and only for a user whose opt-in is on. That user owns the session, its
+  visibility stays `private`, and the dispatcher gets a targeted `write`
+  share. The portal records the delegated creation in the session's creation
+  config (`delegatedCreation`, the dispatcher's principal) and, with
+  `PILOTSWARM_OWNER_ROUTING=1`, the owner's routing tag
+  ([Owner Routing](#owner-routing-optional)). No request parameter sets
+  either. `createSessionForWorkflow` refuses `onBehalfOfOwner` (`400`).
+- **Read-only sharing.** The owner, or an admin, may share such a
+  session's tree for reading: `read` shares and `shared_read`. The portal
+  refuses `shared_write` and every `write` share but the recorded
+  dispatcher's, for every caller, admins included: `403
+  DELEGATED_SESSION_READ_ONLY`, audited. Otherwise a teammate's prompt would
+  run on the owner's workers with the owner's credentials. The rule reads the
+  tree's stored record, so it holds after `DISPATCHER_SP_OBJECT_ID` changes.
 - **Ending the work.** On a session it holds that write share on, the
   dispatcher may also complete, cancel and delete it (with `force` and
   `settleTimeoutMs`) while the owner's opt-in is on.
@@ -248,7 +261,8 @@ How each rule behaves under `AUTHZ_ENFORCE_OWNERSHIP`:
 
 | Rule | `true` | `false` (default, audit only) |
 |---|---|---|
-| `onBehalfOfOwner` | Dispatcher and opted-in owner only | Same — a new capability, always enforced |
+| `onBehalfOfOwner` | Dispatcher and opted-in owner only | Refused: `403 OWNERSHIP_NOT_ENFORCED`, audited, before any lookup. Without enforcement nothing would keep the session to its owner |
+| Read-only sharing of a delegated tree | `403 DELEGATED_SESSION_READ_ONLY` for `shared_write` and other write shares | Same — always enforced |
 | Opt-in off | `403 DELEGATION_REVOKED`, left out of listings, subscriptions stop | Audited as `would_deny`; access unchanged, like every other session rule in this mode |
 | Delegated complete / cancel / delete | Allowed with the write share and the opt-in, audited first | Same |
 | `force` on `deleteSession` | Owner, admin or delegated dispatcher, also on a deleted tree (above) | Same — always enforced, except on a session that is already deleted, which passes unchecked like every call on a session the portal can't find |
@@ -660,11 +674,11 @@ unless you turn it on, and it needs orchestration 1.0.84 or later.
 
 | Setting | Where | What it does |
 |---|---|---|
-| `ownerRouting: true` or `PILOTSWARM_OWNER_ROUTING=1` | `PilotSwarmClient` and `PilotSwarmManagementClient` (the option wins over the env var) | When the client starts a top-level user session, it records the owner's routing tag `owner.<subject>` in the session's orchestration input. System sessions and sessions without an owner stay untagged. A sub-agent created during a tagged turn takes that turn's tag and busy policy, whatever the client's setting. In a tagged tree no Workflow is started or tested: an agent's `spawn_workflow` and `workflow_definition` `start` and `test` are refused (`WORKFLOW_OWNER_ROUTED`), and so is `create_agent_session`. The management client refuses a person's start there (409 `WORKFLOW_OWNER_ROUTED`): a session whose creation config, or its root's, carries a tag and, with this setting, any user session's tree. Default: off (`0`) |
+| `PILOTSWARM_OWNER_ROUTING=1` | Portal | When the dispatcher creates a session for a user (`onBehalfOfOwner`, see [Dispatcher delegation](#dispatcher-delegation)), the portal records that user's routing tag `owner.<subject>` in the session's creation config. No request parameter sets it. Whichever client starts the session copies the stored tag into its orchestration input, whatever that client's settings. Sessions people start themselves, system sessions and every session without a stored tag stay untagged. A sub-agent created during a tagged turn takes that turn's tag and busy policy. In a tagged tree no Workflow is started or tested: an agent's `spawn_workflow` and `workflow_definition` `start` and `test` are refused (`WORKFLOW_OWNER_ROUTED`), and so is `create_agent_session`. The management client refuses a person's start there (409 `WORKFLOW_OWNER_ROUTED`): in a session whose creation config, or its root's, carries a tag. Default: off (`0`) |
 | `ownerTag: "owner.<subject>"` | `PilotSwarmWorker` option; `PILOTSWARM_WORKER_OWNER_TAG` in `examples/worker.js` | The worker also runs the activities tagged for this owner. Each activity of a tagged session runs only on a worker with its tag, and waits in the queue while there is none. The tag has no spaces or control characters and is at most 256 bytes. Default: none |
 | `ownerOnly: true` | `PilotSwarmWorker` option; `PILOTSWARM_WORKER_OWNER_ONLY=1` in `examples/worker.js` (`0` or unset: off; any other value stops the worker) | The worker runs only the activities tagged for its `ownerTag`: the turns and other session-scoped activities of that owner's sessions. It runs no untagged work (system sessions' turns, titles, the manager activities before and after every turn), no capability-tagged activity and no capacity request, even with a capacity requester. Another worker without `ownerOnly` must run that work, or the owner's sessions wait. Without `ownerTag` the worker refuses to start |
 | `worker.setOwnerCapacityRequester(fn)` | `PilotSwarmWorker`, before `start()`; a worker with an `ownerTag` and without `ownerOnly` refuses to start with one | The worker answers capacity requests: before each turn of a tagged session, the orchestration asks one worker with a requester. `fn({ sessionId, rootSessionId, ownerTag }, signal)` returns `{ decision: "ok" }`, `{ decision: "deny", message?, code? }` (the turn ends and is not retried) or `{ decision: "busy", message?, code?, retryAfterMs? }` (the prompt waits and the session asks again). After 15 s the signal fires and the session waits a minute (`CAPACITY_UNAVAILABLE`). With owner routing on and no worker with a requester, tagged sessions wait |
-| `workspaceBusyFastRelease: true` or `PILOTSWARM_WORKSPACE_BUSY_FAST_RELEASE=1` | `PilotSwarmClient` (the option wins over the env var) | Sessions the client starts, and the sessions they create, use the fast busy policy: a `WORKSPACE_BUSY` refusal releases the worker at once and retries after 10 s, 20 s, 1 min, then every 3 min, instead of 30 s, 2 min, 5 min, then every 15 min with a release after two refusals on one worker. Default: off (unset) |
+| `workspaceBusyFastRelease: true` or `PILOTSWARM_WORKSPACE_BUSY_FAST_RELEASE=1` | `PilotSwarmClient` (the option wins over the env var) | The owner-routed top-level sessions the client starts (a tag in their creation config), and the sessions they create, use the fast busy policy: a `WORKSPACE_BUSY` refusal releases the worker at once and retries after 10 s, 20 s, 1 min, then every 3 min, instead of 30 s, 2 min, 5 min, then every 15 min with a release after two refusals on one worker. Other sessions keep the default policy. Default: off (unset) |
 
 A worker's Duroxide tag filter holds the four capability tags, plus its owner
 tag or, with a capacity requester, the capacity tag `pilotswarm.owner-capacity.v1`:
@@ -674,9 +688,10 @@ admits that one tag. Duroxide applies the filter to activities only: every
 worker runs orchestrations. But `ctx.utcNow()` and `ctx.newGuid()` are untagged
 Duroxide activities, so an orchestration also needs a worker without
 `ownerOnly` to move on. Start the workers that declare owner tags and the
-capacity requester before you turn on `PILOTSWARM_OWNER_ROUTING`. Sessions
-that started before the upgrade, on orchestration 1.0.82 or older, stay
-untagged. See the [orchestration design](../../architecture/orchestration/design.md#owner-routing-and-capacity-requests-1084)
+capacity requester before you turn on `PILOTSWARM_OWNER_ROUTING` on the
+portal. Sessions that started before the upgrade, on orchestration 1.0.83 or
+older, stay untagged, and so does every session created without a stored tag.
+See the [orchestration design](../../architecture/orchestration/design.md#owner-routing-and-capacity-requests-1084)
 and its [owner-only workers](../../architecture/orchestration/design.md#owner-only-workers).
 
 ### Coordination Host on Azure
@@ -999,8 +1014,7 @@ new PilotSwarmClient({
     dehydrateThreshold: 10,   // seconds — waits above this trigger dehydration
     dehydrateOnIdle: 120,     // seconds an idle top-level session keeps its worker (default: 1800)
     dehydrateOnInputRequired: 60, // seconds to wait before dehydrating on user input
-    ownerRouting: false,      // tag user sessions for their owner's workers (default: PILOTSWARM_OWNER_ROUTING=1)
-    workspaceBusyFastRelease: false, // fast busy policy (default: PILOTSWARM_WORKSPACE_BUSY_FAST_RELEASE=1)
+    workspaceBusyFastRelease: false, // fast busy policy for owner-routed sessions (default: PILOTSWARM_WORKSPACE_BUSY_FAST_RELEASE=1)
 
     // Schema isolation (must match worker)
     duroxideSchema: "ps_duroxide",      // default: "ps_duroxide"

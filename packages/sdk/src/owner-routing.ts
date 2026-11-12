@@ -2,12 +2,16 @@
  * Owner routing: tags that keep a user's sessions on that user's workers, and
  * the capacity requests that tell a deployment an owner needs a worker.
  *
- * The client records `ownerTag` in the orchestration input of a top-level
- * user session (`PilotSwarmClientOptions.ownerRouting`). Orchestration 1.0.84
- * then tags every session-scoped activity with it, and a worker with the
- * same `PilotSwarmWorkerOptions.ownerTag` runs them. Before each turn the
+ * An owner-routed session is one whose creation config carries `ownerTag`:
+ * the portal records it, with PILOTSWARM_OWNER_ROUTING=1, for a session the
+ * deployment's dispatcher creates for a user, and a session created during a
+ * tagged turn takes its turn's. Whichever client starts the session copies
+ * the stored tag into its orchestration input. Orchestration 1.0.84 then
+ * tags every session-scoped activity with it, and a worker with the same
+ * `PilotSwarmWorkerOptions.ownerTag` runs them. Before each turn the
  * orchestration asks for capacity (`requestOwnerCapacity`); a worker with a
- * capacity requester answers.
+ * capacity requester answers. A worker with a capacity requester also refuses
+ * a turn that lacks its session's saved tag (`OWNER_TAG_MISSING`).
  *
  * A Workflow carries no owner tag: its activities carry the workflow-request
  * tag, its agent steps are created inside an activity, outside any turn, and
@@ -83,9 +87,8 @@ export const NEW_ROOT_OWNER_ROUTED_TEXT = "[SYSTEM: create_agent_session refused
 /**
  * The owner tag a session's turns carry, as far as the catalog tells: the tag
  * saved with its creation config (a session created during a tagged turn, or
- * created with one) or its root's, else, with owner routing on, the tag its
- * root takes when the client starts it (client.ts, _routingForStart). A root
- * started before owner routing was on has no tag but counts as tagged here.
+ * created owner-routed) or its root's. A tree with neither is not
+ * owner-routed, whatever any client's settings.
  */
 export async function ownerRoutedTreeTag(
     catalog: {
@@ -99,7 +102,6 @@ export async function ownerRoutedTreeTag(
         getSessionCreationConfig?(sessionId: string): Promise<Record<string, unknown> | null | undefined>;
     },
     sessionId: string,
-    ownerRouting: boolean,
 ): Promise<string | undefined> {
     const savedTag = async (id: string): Promise<string | undefined> => {
         const saved = catalog.getSessionCreationConfig ? await catalog.getSessionCreationConfig(id) : null;
@@ -110,13 +112,7 @@ export async function ownerRoutedTreeTag(
     const own = await savedTag(sessionId);
     if (own) return own;
     const rootId = row.rootSessionId && row.rootSessionId !== sessionId ? row.rootSessionId : null;
-    const root = rootId ? await catalog.getSession(rootId) : row;
-    if (!root) return undefined;
-    if (rootId) {
-        const rootTag = await savedTag(rootId);
-        if (rootTag) return rootTag;
-    }
-    return ownerRouting && !root.parentSessionId ? ownerRoutingTagForRow(root) : undefined;
+    return rootId ? savedTag(rootId) : undefined;
 }
 
 /** A capacity answer as the orchestration acts on it. */

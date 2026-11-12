@@ -28,15 +28,18 @@ const LISTING = [
 
 /**
  * Sessions are `{ owner, visibility?, shares?: { subject: access }, isSystem? }`;
- * `flags` maps a subject to its opt-in. `log` records every side effect in order.
+ * `flags` maps a subject to its opt-in; `delegations` maps a session to the
+ * delegation record of its tree. `log` records every side effect in order.
  */
-function world({ env = {}, flags = {}, sessions = {}, failDelegatedAudit = false } = {}) {
+function world({ env = {}, flags = {}, sessions = {}, delegations = {}, failDelegatedAudit = false } = {}) {
     const runtime = new PortalRuntime({ store: "sqlite::memory:", mode: "local" });
     runtime.start = async () => {};
     runtime.authz = loadAuthzConfig({ AUTHZ_ENFORCE_OWNERSHIP: "true", DISPATCHER_SP_OBJECT_ID: DISPATCHER, ...env });
+    runtime.ownerRouting = env.PILOTSWARM_OWNER_ROUTING === "1";
     const log = [];
     const audits = [];
     const lookups = [];
+    const delegationReads = [];
     const optIns = new Map(Object.entries(flags));
     runtime._logDelegatedCall = (entry) => log.push(["logLine", entry.action, entry.sessionId]);
     runtime.transport = {
@@ -68,6 +71,12 @@ function world({ env = {}, flags = {}, sessions = {}, failDelegatedAudit = false
             log.push(["audit", entry.action, entry.decision]);
         },
         grantSessionShare: async (sessionId, grantee, access) => { log.push(["share", sessionId, grantee.subject, access]); },
+        setSessionVisibility: async (sessionId, visibility) => { log.push(["visibility", sessionId, visibility]); },
+        getSessionDelegation: async (sessionId) => {
+            delegationReads.push(sessionId);
+            const dispatcherSubject = delegations[sessionId];
+            return dispatcherSubject ? { rootSessionId: sessionId, dispatcher: { provider: "entra", subject: dispatcherSubject } } : null;
+        },
         createSession: async (options) => { log.push(["create", options]); return { sessionId: "new-1" }; },
         createSessionForAgent: async (agentName, options) => { log.push(["createForAgent", agentName, options]); return { sessionId: "new-2" }; },
         deleteSession: async (...args) => { log.push(["delete", ...args]); },
@@ -91,7 +100,7 @@ function world({ env = {}, flags = {}, sessions = {}, failDelegatedAudit = false
             },
         },
     };
-    return { runtime, log, audits, lookups, optIns };
+    return { runtime, log, audits, lookups, optIns, delegationReads };
 }
 
 async function refusal(promise) {
@@ -150,10 +159,37 @@ test("onBehalfOfOwner is refused for every caller but the dispatcher, admins inc
         assert.equal(w.log.some(([kind]) => kind === "create"), false);
         assert.ok(w.audits.some((entry) => entry.action === "createSession" && entry.decision === "deny"));
     }
-    const unset = world({ env: { DISPATCHER_SP_OBJECT_ID: "" }, flags: { "owner-on": true } });
-    const error = await refusal(unset.runtime.call("createSession", { onBehalfOfOwner: { subject: "owner-on" } }, dispatcher));
-    assert.deepEqual([error.status, error.code], [403, "FORBIDDEN"], "with no dispatcher configured nobody may delegate");
-    assert.equal(unset.log.some(([kind]) => kind === "create"), false);
+});
+
+test("with no dispatcher configured onBehalfOfOwner is ignored, as before it existed", async () => {
+    for (const caller of [dispatcher, as("someone")]) {
+        const unset = world({ env: { DISPATCHER_SP_OBJECT_ID: "" }, flags: { "owner-on": true } });
+        assert.equal((await unset.runtime.call("createSession", { onBehalfOfOwner: { subject: "owner-on" } }, caller)).sessionId, "new-1");
+        await unset.runtime.call("createSessionForAgent", { agentName: "builder", onBehalfOfOwner: { subject: "owner-on" } }, caller);
+        const created = unset.log.filter(([kind]) => kind === "create" || kind === "createForAgent").map((entry) => entry.at(-1));
+        assert.equal(created.length, 2);
+        for (const options of created) {
+            assert.equal(options.owner.subject, caller.principal.subject, "the caller's own session");
+            assert.ok(!("delegatedCreation" in options) && !("ownerTag" in options));
+        }
+        assert.equal(unset.log.some(([kind]) => kind === "share"), false);
+        assert.deepEqual(unset.lookups, []);
+        assert.equal(unset.audits.some((entry) => entry.decision === "delegated" || entry.decision === "deny"), false);
+    }
+});
+
+test("onBehalfOfOwner needs AUTHZ_ENFORCE_OWNERSHIP=true: otherwise 403 OWNERSHIP_NOT_ENFORCED, audited, before any lookup", async () => {
+    const w = world({ env: { AUTHZ_ENFORCE_OWNERSHIP: "false" }, flags: { "owner-on": true } });
+    for (const [method, params] of [["createSession", {}], ["createSessionForAgent", { agentName: "builder" }]]) {
+        const error = await refusal(w.runtime.call(method, { ...params, groupId: "group-of-owner-on", onBehalfOfOwner: { subject: "owner-on" } }, dispatcher));
+        assert.deepEqual([error.status, error.code], [403, "OWNERSHIP_NOT_ENFORCED"], method);
+        assert.ok(w.audits.some((entry) => entry.action === method && entry.decision === "deny" && entry.details?.code === "OWNERSHIP_NOT_ENFORCED"), method);
+    }
+    assert.deepEqual(w.lookups, [], "no opt-in lookup");
+    assert.deepEqual(w.log.filter(([kind]) => ["groups", "create", "createForAgent", "share"].includes(kind)), [], "no group lookup, nothing made");
+    // Anyone else is refused as before: the parameter is the dispatcher's.
+    const other = await refusal(w.runtime.call("createSession", { onBehalfOfOwner: { subject: "owner-on" } }, as("someone")));
+    assert.deepEqual([other.status, other.code], [403, "FORBIDDEN"]);
 });
 
 test("onBehalfOfOwner needs the owner's opt-in, another user and a private session", async () => {
@@ -179,6 +215,8 @@ test("a delegated session is the owner's, private, with the dispatcher's write s
     assert.deepEqual(create.owner, { provider: "entra", subject: "owner-on", email: null, displayName: null });
     assert.equal(create.visibility, "private", "not the deployment's shared_write default");
     assert.equal(create.model, "provider:model");
+    assert.deepEqual(create.delegatedCreation, { dispatcher: { provider: "entra", subject: DISPATCHER } }, "the delegated creation is recorded");
+    assert.ok(!("ownerTag" in create), "no owner tag while the portal's PILOTSWARM_OWNER_ROUTING is off");
     const kinds = w.log.map(([kind, action, detail]) => [kind, kind === "share" ? `${action}:${detail}` : action]);
     const order = (step) => kinds.findIndex(([kind, detail]) => kind === step[0] && (step[1] === undefined || detail === step[1]));
     assert.ok(order(["groups", "owner-on"]) < order(["create"]), "the group must be one of the owner's");
@@ -197,7 +235,50 @@ test("a delegated session is the owner's, private, with the dispatcher's write s
     assert.equal(forAgent[2].owner.subject, "owner-on");
     assert.equal(forAgent[2].isAdmin, false, "the owner's agent catalog, without admin reach");
     assert.equal(forAgent[2].visibility, "private");
+    assert.deepEqual(forAgent[2].delegatedCreation, { dispatcher: { provider: "entra", subject: DISPATCHER } });
     assert.equal(w.audits.find((entry) => entry.action === "createSessionForAgent").details.agentName, "builder");
+});
+
+test("with PILOTSWARM_OWNER_ROUTING=1 the portal also records the owner's tag, owner.<subject>, and only on a delegated creation", async () => {
+    const w = world({ env: { PILOTSWARM_OWNER_ROUTING: "1" }, flags: { "owner-on": true } });
+    await w.runtime.call("createSession", { onBehalfOfOwner: { subject: "owner-on" } }, dispatcher);
+    await w.runtime.call("createSessionForAgent", { agentName: "builder", onBehalfOfOwner: { subject: "owner-on" } }, dispatcher);
+    await w.runtime.call("createSession", {}, owner);
+    await w.runtime.call("createSession", {}, dispatcher);
+    const created = w.log.filter(([kind]) => kind === "create" || kind === "createForAgent").map((entry) => entry.at(-1));
+    assert.deepEqual(created.map((options) => options.ownerTag), ["owner.owner-on", "owner.owner-on", undefined, undefined]);
+    assert.deepEqual(created.map((options) => options.delegatedCreation?.dispatcher.subject), [DISPATCHER, DISPATCHER, undefined, undefined]);
+
+    // An owner whose ID cannot be a tag is refused before anything is made.
+    const spaced = world({ env: { PILOTSWARM_OWNER_ROUTING: "1" }, flags: { "owner on": true } });
+    const error = await refusal(spaced.runtime.call("createSession", { onBehalfOfOwner: { subject: "owner on" } }, dispatcher));
+    assert.equal(error.code, "INVALID_REQUEST");
+    assert.equal(spaced.log.some(([kind]) => kind === "create"), false);
+});
+
+test("request parameters set neither the owner tag nor the delegation record, on any route", async () => {
+    const forged = {
+        ownerTag: "owner.someone-else",
+        delegatedCreation: { dispatcher: { provider: "entra", subject: "forged" } },
+        workspaceBusyFastRelease: true,
+    };
+    const w = world({ env: { PILOTSWARM_OWNER_ROUTING: "1" }, flags: { "owner-on": true } });
+    // An ordinary creation, and one by the dispatcher as itself.
+    await w.runtime.call("createSession", forged, owner);
+    await w.runtime.call("createSessionForAgent", { agentName: "builder", ...forged }, owner);
+    await w.runtime.call("createSession", forged, dispatcher);
+    // A delegated creation: the portal's own values, whatever the request says.
+    await w.runtime.call("createSession", { ...forged, onBehalfOfOwner: { subject: "owner-on" } }, dispatcher);
+    await w.runtime.call("createSessionForAgent", { agentName: "builder", ...forged, onBehalfOfOwner: { subject: "owner-on" } }, dispatcher);
+    const created = w.log.filter(([kind]) => kind === "create" || kind === "createForAgent").map((entry) => entry.at(-1));
+    for (const options of created.slice(0, 3)) {
+        assert.ok(!("ownerTag" in options) && !("delegatedCreation" in options) && !("workspaceBusyFastRelease" in options), JSON.stringify(options));
+    }
+    for (const options of created.slice(3)) {
+        assert.equal(options.ownerTag, "owner.owner-on");
+        assert.deepEqual(options.delegatedCreation, { dispatcher: { provider: "entra", subject: DISPATCHER } });
+        assert.ok(!("workspaceBusyFastRelease" in options));
+    }
 });
 
 test("createSessionForWorkflow takes no onBehalfOfOwner, from the dispatcher or anyone, and makes nothing", async () => {
@@ -217,6 +298,60 @@ test("createSessionForWorkflow takes no onBehalfOfOwner, from the dispatcher or 
     w.runtime.transport.createSessionForWorkflow = async (ref, options) => { made.push([ref, options.owner?.subject]); return { sessionId: "new-3" }; };
     assert.equal((await w.runtime.call("createSessionForWorkflow", { ref: "tools/review" }, dispatcher)).sessionId, "new-3");
     assert.deepEqual(made, [["tools/review", DISPATCHER]]);
+
+    // With no dispatcher configured the parameter is ignored, as before it existed.
+    const unset = world({ env: { DISPATCHER_SP_OBJECT_ID: "" } });
+    const madeUnset = [];
+    unset.runtime.transport.createSessionForWorkflow = async (ref, options) => { madeUnset.push([ref, options.owner?.subject]); return { sessionId: "new-3" }; };
+    await unset.runtime.call("createSessionForWorkflow", { ref: "tools/review", onBehalfOfOwner: { subject: "owner-on" } }, as("someone"));
+    assert.deepEqual(madeUnset, [["tools/review", "someone"]]);
+});
+
+const DELEGATED = {
+    "d-1": { owner: "owner-on", shares: { [DISPATCHER]: "write" } },
+    "s-3": { owner: "owner-on" },
+};
+
+test("a delegated session is shared for reading only, for every caller, admins included; other sessions as before", async () => {
+    for (const caller of [owner, as("admin-1", "admin")]) {
+        const w = world({ flags: { "owner-on": true }, sessions: DELEGATED, delegations: { "d-1": DISPATCHER } });
+        const refusals = [
+            ["grantSessionShare", { sessionId: "d-1", user: { provider: "entra", subject: "teammate" }, access: "write" }],
+            ["grantSessionShare", { sessionId: "d-1", user: { provider: "dev", subject: DISPATCHER }, access: "write" }],
+            ["setSessionVisibility", { sessionId: "d-1", visibility: "shared_write" }],
+        ];
+        for (const [method, params] of refusals) {
+            const error = await refusal(w.runtime.call(method, params, caller));
+            assert.deepEqual([error.status, error.code], [403, "DELEGATED_SESSION_READ_ONLY"], `${method} ${JSON.stringify(params)}`);
+            assert.ok(w.audits.some((entry) => entry.action === method && entry.sessionId === "d-1" && entry.decision === "deny"
+                && entry.details?.code === "DELEGATED_SESSION_READ_ONLY"), method);
+        }
+        assert.equal(w.log.some(([kind]) => kind === "share" || kind === "visibility"), false, "nothing changed");
+
+        // Reading stays open to share, and the recorded dispatcher may get its write share back.
+        await w.runtime.call("grantSessionShare", { sessionId: "d-1", user: { provider: "entra", subject: "teammate" }, access: "read" }, caller);
+        await w.runtime.call("setSessionVisibility", { sessionId: "d-1", visibility: "shared_read" }, caller);
+        await w.runtime.call("setSessionVisibility", { sessionId: "d-1", visibility: "private" }, caller);
+        await w.runtime.call("grantSessionShare", { sessionId: "d-1", user: { provider: "entra", subject: DISPATCHER }, access: "write" }, caller);
+        // An undelegated session shares for writing as before.
+        await w.runtime.call("grantSessionShare", { sessionId: "s-3", user: { provider: "entra", subject: "teammate" }, access: "write" }, caller);
+        await w.runtime.call("setSessionVisibility", { sessionId: "s-3", visibility: "shared_write" }, caller);
+        assert.deepEqual(w.log.filter(([kind]) => kind === "share" || kind === "visibility"), [
+            ["share", "d-1", "teammate", "read"],
+            ["visibility", "d-1", "shared_read"],
+            ["visibility", "d-1", "private"],
+            ["share", "d-1", DISPATCHER, "write"],
+            ["share", "s-3", "teammate", "write"],
+            ["visibility", "s-3", "shared_write"],
+        ]);
+        // Only a write share or shared_write reads the record.
+        assert.deepEqual(w.delegationReads, ["d-1", "d-1", "d-1", "d-1", "s-3", "s-3"]);
+    }
+
+    // The stored record holds after the deployment stops naming a dispatcher.
+    const unset = world({ env: { DISPATCHER_SP_OBJECT_ID: "" }, sessions: DELEGATED, delegations: { "d-1": DISPATCHER } });
+    const error = await refusal(unset.runtime.call("setSessionVisibility", { sessionId: "d-1", visibility: "shared_write" }, owner));
+    assert.equal(error.code, "DELEGATED_SESSION_READ_ONLY");
 });
 
 test("a delegated creation fails when its audit cannot be written, and removes the session", async () => {

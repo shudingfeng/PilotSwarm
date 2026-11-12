@@ -24,7 +24,8 @@ import type {
     SessionWorkspace,
 } from "./types.js";
 import { validateWorkspaceText } from "./workspace-check.js";
-import { isOwnerRoutingTag, ownerRoutingTagForRow } from "./owner-routing.js";
+import { isOwnerRoutingTag } from "./owner-routing.js";
+import { delegatedCreationOf, type DelegatedCreation } from "./delegated-creation.js";
 import type { SessionCatalog, SessionEvent, SessionVisibility, SessionRow } from "./cms.js";
 import type { MessageSender } from "./message-sender.js";
 import { normalizeMessageSender } from "./message-sender.js";
@@ -159,8 +160,7 @@ export class PilotSwarmClient {
     systemSessions = new Set<string>();
     /** Owner routing given at create; also saved with the creation config. */
     private sessionRouting = new Map<string, SessionRouting>();
-    /** Owner routing settings for the top-level sessions this client starts. */
-    private ownerRouting = false;
+    /** The fast busy policy for the owner-routed top-level sessions this client starts. */
     private workspaceBusyFastRelease = false;
     private activeOrchestrations = new Map<string, string>();
     /**
@@ -199,7 +199,6 @@ export class PilotSwarmClient {
             ...options,
             waitThreshold: options.waitThreshold ?? 30,
         };
-        this.ownerRouting = options.ownerRouting ?? process.env.PILOTSWARM_OWNER_ROUTING === "1";
         this.workspaceBusyFastRelease = options.workspaceBusyFastRelease
             ?? process.env.PILOTSWARM_WORKSPACE_BUSY_FAST_RELEASE === "1";
     }
@@ -226,12 +225,22 @@ export class PilotSwarmClient {
         /** Sharing level for a new ROOT session (children resolve through their root). */
         visibility?: SessionVisibility | null;
         /**
-         * Owner routing: the owner tag a session created during a turn takes
-         * from that turn. Set by the worker; saved with the creation config.
+         * Owner routing: the owner tag `owner.<subject>` of an owner-routed
+         * session, saved with the creation config. Whichever client starts
+         * the session copies it into the orchestration input. A worker sets
+         * it for a session created during a tagged turn; the portal, for a
+         * session a dispatcher creates for its owner with
+         * PILOTSWARM_OWNER_ROUTING=1. Never taken from a request.
          */
         ownerTag?: string;
         /** The fast workspace busy policy a session created during a turn takes from that turn. */
         workspaceBusyFastRelease?: boolean;
+        /**
+         * Dispatcher delegation: the record of a root session that the
+         * deployment's dispatcher created for its owner, saved with the
+         * creation config. The portal sets it, never from a request.
+         */
+        delegatedCreation?: DelegatedCreation | null;
         /**
          * Stage 2 review S2RT-F3: a sub-agent that counts toward its parent's budget of running children (spawn_agent): the
          * catalog counts it under the parent's lock in the creation's transaction (child-budget.ts) and refuses a full one.
@@ -283,6 +292,10 @@ export class PilotSwarmClient {
 
         const sessionId = config?.sessionId ?? crypto.randomUUID();
         const routing = savedSessionRouting(config);
+        const delegatedCreation = config?.delegatedCreation == null ? null : delegatedCreationOf(config.delegatedCreation);
+        if (config?.delegatedCreation != null && !delegatedCreation) {
+            throw Object.assign(new Error("delegatedCreation must be { dispatcher: { provider, subject } }."), { code: "INVALID_REQUEST", status: 400 });
+        }
         const resolved = await this._resolveCreationModel(config ?? {}, false);
         const { workspace: _rawWorkspace, ...configWithoutWorkspace } = config ?? {};
         const resolvedConfig = {
@@ -344,6 +357,7 @@ export class PilotSwarmClient {
                     ...JSON.parse(JSON.stringify(projectSerializableSessionConfig(configForRow, this.config.waitThreshold))),
                     ...(config?.nestingLevel !== undefined ? { bootstrapNestingLevel: config.nestingLevel } : {}),
                     ...routing,
+                    ...(delegatedCreation ? { delegatedCreation } : {}),
                 }
                 : null,
         });
@@ -407,6 +421,10 @@ export class PilotSwarmClient {
         visibility?: SessionVisibility | null;
         /** Session workspaces: the working folder, { root, folder? }. */
         workspace?: SessionWorkspace | { root: string; folder?: string } | null;
+        /** Owner routing: as createSession's. */
+        ownerTag?: string;
+        /** Dispatcher delegation: as createSession's. */
+        delegatedCreation?: DelegatedCreation | null;
     }): Promise<PilotSwarmSession> {
         // Validate the agent exists and is non-system
         const allowed = this._allowedAgentNames;
@@ -429,6 +447,8 @@ export class PilotSwarmClient {
             groupId: opts?.groupId ?? null,
             visibility: opts?.visibility ?? null,
             ...(opts?.workspace != null ? { workspace: opts.workspace } : {}),
+            ...(opts?.ownerTag !== undefined ? { ownerTag: opts.ownerTag } : {}),
+            ...(opts?.delegatedCreation != null ? { delegatedCreation: opts.delegatedCreation } : {}),
         });
 
         // Set agent metadata in CMS (agentId + prefixed title)
@@ -883,11 +903,13 @@ export class PilotSwarmClient {
     }
 
     /**
-     * Owner routing: what a session's orchestration starts with. A session
-     * created during a turn has the turn's tag and busy policy, saved with
-     * its creation config. A top-level session gets this client's busy
-     * policy and, with owner routing, the tag of the owner on its row: the
-     * first message may reach another process than the create did.
+     * Owner routing: what a session's orchestration starts with. The tag is
+     * the one saved with the session's creation config, on whichever process
+     * starts it and whatever this client's settings: the portal saves it for
+     * a session a dispatcher creates for its owner, and a session created
+     * during a turn takes that turn's. A session without one gets none. This
+     * client's fast busy policy applies to the owner-routed top-level
+     * sessions it starts; a child keeps the policy saved from its turn.
      */
     private _routingForStart(
         sessionId: string,
@@ -896,12 +918,9 @@ export class PilotSwarmClient {
         saved: SessionRouting,
     ): SessionRouting {
         const system = this.systemSessions.has(sessionId) || row?.isSystem === true;
-        let ownerTag = system ? undefined : saved.ownerTag;
-        let workspaceBusyFastRelease = saved.workspaceBusyFastRelease === true;
-        if (!parentSessionId) {
-            if (!ownerTag && !system && this.ownerRouting) ownerTag = ownerRoutingTagForRow(row);
-            if (this.workspaceBusyFastRelease) workspaceBusyFastRelease = true;
-        }
+        const ownerTag = system ? undefined : saved.ownerTag;
+        const workspaceBusyFastRelease = saved.workspaceBusyFastRelease === true
+            || (!parentSessionId && !!ownerTag && this.workspaceBusyFastRelease);
         return {
             ...(ownerTag ? { ownerTag } : {}),
             ...(workspaceBusyFastRelease ? { workspaceBusyFastRelease: true } : {}),
@@ -971,13 +990,17 @@ export class PilotSwarmClient {
                 bootstrapNestingLevel: storedDepth,
                 ownerTag: storedOwnerTag,
                 workspaceBusyFastRelease: storedFastRelease,
+                delegatedCreation: _delegatedCreation,
                 ...storedSessionConfig
             } = stored ?? {};
             bootstrapNestingLevel = storedDepth;
+            // The stored routing wins: this process's map and opts only fill
+            // what the creation config does not hold, so they never change a
+            // saved owner tag.
             savedRouting = {
-                ...savedSessionRouting({ ownerTag: storedOwnerTag, workspaceBusyFastRelease: storedFastRelease }),
-                ...this.sessionRouting.get(sessionId),
                 ...savedSessionRouting(opts),
+                ...this.sessionRouting.get(sessionId),
+                ...savedSessionRouting({ ownerTag: storedOwnerTag, workspaceBusyFastRelease: storedFastRelease }),
             };
             if (stored && !fullConfig) {
                 trace(`[client] creation config restored from catalog row (in-memory config miss)`);

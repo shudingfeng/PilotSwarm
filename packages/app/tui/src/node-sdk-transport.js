@@ -1109,6 +1109,11 @@ export class NodeSdkTransport {
         return this.mgmt.setSessionVisibility(sessionId, visibility);
     }
 
+    /** The delegation record of the session's tree, or null: the portal keeps such a tree shared for reading only. */
+    async getSessionDelegation(sessionId) {
+        return this.mgmt.getSessionDelegation(sessionId);
+    }
+
     async grantSessionShare(sessionId, grantee, access, grantedBy) {
         return this.mgmt.grantSessionShare(sessionId, grantee, access, grantedBy);
     }
@@ -1536,7 +1541,9 @@ export class NodeSdkTransport {
         return model || null;
     }
 
-    async createSession({ model, reasoningEffort, contextTier, owner, groupId, visibility, workspace } = {}) {
+    // ownerTag and delegatedCreation are trusted fields: only the portal
+    // runtime sets them, for a dispatcher's delegated creation.
+    async createSession({ model, reasoningEffort, contextTier, owner, groupId, visibility, workspace, ownerTag, delegatedCreation } = {}) {
         const session = await this.client.createSession({
             ...(model ? { model } : {}),
             ...(reasoningEffort ? { reasoningEffort } : {}),
@@ -1545,6 +1552,8 @@ export class NodeSdkTransport {
             ...(groupId ? { groupId } : {}),
             ...(visibility ? { visibility } : {}),
             ...(workspace != null ? { workspace } : {}),
+            ...(ownerTag ? { ownerTag } : {}),
+            ...(delegatedCreation ? { delegatedCreation } : {}),
         });
         this.sessionHandles.set(session.sessionId, session);
         const created = await this.mgmt.getSession(session.sessionId).catch(() => null);
@@ -1556,7 +1565,7 @@ export class NodeSdkTransport {
         };
     }
 
-    async createSessionForAgent(agentName, { model, reasoningEffort, contextTier, title, splash, splashMobile, initialPrompt, owner, isAdmin, groupId, visibility, workspace } = {}) {
+    async createSessionForAgent(agentName, { model, reasoningEffort, contextTier, title, splash, splashMobile, initialPrompt, owner, isAdmin, groupId, visibility, workspace, ownerTag, delegatedCreation } = {}) {
         // Registry (package) agents are not in the static baked allowlist —
         // resolve the union, enforce user-scope ownership, then delegate the
         // CANONICAL catalog name (the client's allowlist and the CMS row use
@@ -1574,6 +1583,8 @@ export class NodeSdkTransport {
             ...(groupId ? { groupId } : {}),
             ...(visibility ? { visibility } : {}),
             ...(workspace != null ? { workspace } : {}),
+            ...(ownerTag ? { ownerTag } : {}),
+            ...(delegatedCreation ? { delegatedCreation } : {}),
         });
         this.sessionHandles.set(session.sessionId, session);
         const created = await this.mgmt.getSession(session.sessionId).catch(() => null);

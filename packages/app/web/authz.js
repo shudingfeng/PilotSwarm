@@ -82,6 +82,22 @@ export function delegationRevokedError(message = "This session's owner does not 
     return Object.assign(new Error(message), { code: "DELEGATION_REVOKED", status: 403 });
 }
 
+/** `onBehalfOfOwner` while AUTHZ_ENFORCE_OWNERSHIP is off: nothing would keep the owner's session to the owner. */
+export function ownershipNotEnforcedError() {
+    return Object.assign(new Error("onBehalfOfOwner needs AUTHZ_ENFORCE_OWNERSHIP=true: without it, every user could reach the session created for its owner."), {
+        code: "OWNERSHIP_NOT_ENFORCED",
+        status: 403,
+    });
+}
+
+/** A write share or shared_write on a tree the dispatcher created for its owner. */
+export function delegatedSessionReadOnlyError() {
+    return Object.assign(new Error("A session created on behalf of its owner can be shared for reading only."), {
+        code: "DELEGATED_SESSION_READ_ONLY",
+        status: 403,
+    });
+}
+
 export function auditUnavailableError(cause) {
     return Object.assign(new Error("The authorization audit could not be written, so the delegated call was refused."), {
         code: "AUDIT_UNAVAILABLE",

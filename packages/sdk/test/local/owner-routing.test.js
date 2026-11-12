@@ -18,7 +18,7 @@ import { createTestEnv, useSuiteEnv } from "../helpers/local-env.js";
 import { createCatalog, waitForSessionState } from "../helpers/cms-helpers.js";
 import { startScriptedModel } from "../helpers/scripted-model.mjs";
 import { registerScriptedProvider, FIXTURE_QUALIFIED_MODEL } from "../helpers/scripted-workers.js";
-import { pinSessionStartVersion, sessionOrchestrationVersion } from "../helpers/pinned-start.mjs";
+import { patchSessionStartInput, pinSessionStartVersion, sessionOrchestrationVersion } from "../helpers/pinned-start.mjs";
 import { PilotSwarmClient, PilotSwarmManagementClient, PilotSwarmWorker } from "../../src/index.ts";
 import { createSessionManagerProxy, createSessionProxy } from "../../src/session-proxy.ts";
 import { OWNER_CAPACITY_CAPABILITY, workerTagFilter } from "../../src/activity-routing.ts";
@@ -33,6 +33,8 @@ const SUBJECT = {
 };
 const TAG = Object.fromEntries(Object.entries(SUBJECT).map(([who, subject]) => [who, `owner.${subject}`]));
 const OWNER = (who) => ({ provider: "test", subject: SUBJECT[who], displayName: `user ${who}` });
+/** An owner-routed session: its owner and the tag saved with its creation config, as the Portal records a dispatcher's delegated creation. */
+const ROUTED = (who) => ({ owner: OWNER(who), ownerTag: TAG[who] });
 const WORKSPACE = { schema: 1, root: "repos", folder: "app" };
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -247,7 +249,8 @@ describe("owner routing on Duroxide runtimes", () => {
 
 /**
  * PilotSwarm workers bound to owners, the scripted model, and a client with
- * owner routing and the fast busy policy. `startWorker(id, undefined, true)`
+ * the fast busy policy and no owner routing setting: the tests create their
+ * sessions owner-routed (ROUTED). `startWorker(id, undefined, true)`
  * starts a worker without an owner tag that has the capacity requester, which
  * records every request, as the coordination host does: a worker with an
  * owner tag takes no capacity requests (with a requester it refuses to start).
@@ -291,7 +294,7 @@ async function withOwnerCluster(env, { respond, capacity, worker = {}, client: c
             await workers.get(id)?.stop();
             workers.delete(id);
         }
-        client = new PilotSwarmClient({ ...stores, ownerRouting: true, workspaceBusyFastRelease: true, ...clientOptions });
+        client = new PilotSwarmClient({ ...stores, workspaceBusyFastRelease: true, ...clientOptions });
         mgmt = new PilotSwarmManagementClient(stores);
         catalog = await createCatalog(env);
         await fn({
@@ -362,8 +365,8 @@ describe("owner routing with PilotSwarm workers", () => {
             await startWorker("owner-a", TAG.a);
             await startWorker("owner-b", TAG.b);
             await startClients();
-            const parent = await client.createSession({ sessionId: randomUUID(), model: qualifiedModel, owner: OWNER("a") });
-            const other = await client.createSession({ sessionId: randomUUID(), model: qualifiedModel, owner: OWNER("b") });
+            const parent = await client.createSession({ sessionId: randomUUID(), model: qualifiedModel, ...ROUTED("a") });
+            const other = await client.createSession({ sessionId: randomUUID(), model: qualifiedModel, ...ROUTED("b") });
             expect(await parent.sendAndWait("spawn the child", TIMEOUT)).toContain("spawned");
             expect(await other.sendAndWait("hello from b", TIMEOUT)).toContain("ok:");
             const childId = await spawnedChild(catalog, parent.sessionId);
@@ -413,7 +416,7 @@ describe("owner routing with PilotSwarm workers", () => {
             await startWorker("owner-a", TAG.a);
             await startClients();
 
-            const denied = await client.createSession({ sessionId: randomUUID(), model: qualifiedModel, owner: OWNER("a") });
+            const denied = await client.createSession({ sessionId: randomUUID(), model: qualifiedModel, ...ROUTED("a") });
             await denied.send("first try");
             const refused = await waitForSessionState(catalog, denied.sessionId, ["error"], 60_000);
             expect(refused.lastError).toBe("This owner has no capacity.");
@@ -423,7 +426,7 @@ describe("owner routing with PilotSwarm workers", () => {
             await mgmt.completeSession(denied.sessionId, "done after a refusal");
             expect((await catalog.getSession(denied.sessionId)).state).toBe("completed");
 
-            const held = await client.createSession({ sessionId: randomUUID(), model: qualifiedModel, owner: OWNER("c") });
+            const held = await client.createSession({ sessionId: randomUUID(), model: qualifiedModel, ...ROUTED("c") });
             await held.send("wait for a worker");
             const waiting = await waitForSessionState(catalog, held.sessionId, ["waiting"], 60_000);
             expect(waiting.waitReason).toBe("No capacity for this owner yet.");
@@ -459,7 +462,7 @@ describe("owner routing with PilotSwarm workers", () => {
             await startWorker("owner-a", TAG.a);
             await startWorker("owner-b", TAG.b);
             await startClients();
-            const parent = await client.createSession({ sessionId: randomUUID(), model: qualifiedModel, owner: OWNER("a") });
+            const parent = await client.createSession({ sessionId: randomUUID(), model: qualifiedModel, ...ROUTED("a") });
             expect(await parent.sendAndWait("spawn the child", TIMEOUT)).toContain("spawned");
             const childId = await spawnedChild(catalog, parent.sessionId);
             await waitForSessionState(catalog, childId, ["waiting"], 120_000);
@@ -488,7 +491,7 @@ describe("owner routing with PilotSwarm workers", () => {
             await startClients();
             // Owner c has no worker: a root, a child created with its tag, and
             // another root all wait for capacity.
-            const root = await client.createSession({ sessionId: randomUUID(), model: qualifiedModel, owner: OWNER("c") });
+            const root = await client.createSession({ sessionId: randomUUID(), model: qualifiedModel, ...ROUTED("c") });
             await root.send("wait for a worker");
             await waitForSessionState(catalog, root.sessionId, ["waiting"], 60_000);
             const child = await client.createSession({
@@ -497,7 +500,7 @@ describe("owner routing with PilotSwarm workers", () => {
             });
             await child.send("the child waits too");
             await waitForSessionState(catalog, child.sessionId, ["waiting"], 60_000);
-            const lone = await client.createSession({ sessionId: randomUUID(), model: qualifiedModel, owner: OWNER("c") });
+            const lone = await client.createSession({ sessionId: randomUUID(), model: qualifiedModel, ...ROUTED("c") });
             await lone.send("wait as well");
             await waitForSessionState(catalog, lone.sessionId, ["waiting"], 60_000);
             const instance = (id) => client._getDuroxideClient().getStatus(`session-${id}`).then((s) => s?.status);
@@ -526,11 +529,17 @@ describe("owner routing with PilotSwarm workers", () => {
             await startWorker("owner-a", TAG.a);
             await startClients();
             const sessionId = randomUUID();
+            // A session from before the upgrade: no tag saved with its creation
+            // config, so a worker with a capacity requester runs its untagged
+            // 1.0.82 turns. Its start input still names the owner and the fast
+            // policy, as a 1.0.84 client's would for an owner-routed session.
             const pin = pinSessionStartVersion(client, "1.0.82", { sessionId });
+            const named = patchSessionStartInput(client, (input) => ({ ...input, ownerTag: TAG.a, workspaceBusyFastRelease: true }), { sessionId });
             try {
                 const session = await client.createSession({ sessionId, model: qualifiedModel, owner: OWNER("a") });
                 expect(await session.sendAndWait("on the old version", TIMEOUT)).toContain("ok:");
             } finally {
+                named.restore();
                 pin.restore();
             }
             expect(pin.starts.map((s) => s.used)).toEqual(["1.0.82"]);
@@ -540,8 +549,7 @@ describe("owner routing with PilotSwarm workers", () => {
             await eventually(async () => (await sessionOrchestrationVersion(client, sessionId)) === "1.0.84", "the move to 1.0.84");
             await eventually(async () => (await turnWorkers(catalog, sessionId)).length >= 2, "the turn after the move");
             const inputs = await executionInputs(client, sessionId);
-            // The client's start input names the owner; 1.0.82 ignores it and
-            // carries neither field into the next execution.
+            // 1.0.82 ignores both fields and carries neither into the next execution.
             expect(inputs[0]).toMatchObject({ ownerTag: TAG.a, workspaceBusyFastRelease: true });
             expect(inputs.at(-1)).toMatchObject({ sourceOrchestrationVersion: "1.0.82" });
             expect(inputs.at(-1)).not.toHaveProperty("ownerTag");

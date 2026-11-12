@@ -1062,6 +1062,10 @@ export class WebPilotSwarmManagementClient {
         throw webModeUnsupported("recordAuthzAudit", "the portal records authz audit server-side");
     }
 
+    getSessionDelegation(): never {
+        throw webModeUnsupported("getSessionDelegation", "the portal applies a delegated session's sharing rule server-side");
+    }
+
     recordUserRole(): never {
         throw webModeUnsupported("recordUserRole", "the portal records the sign-in role server-side; a remote writer would be privilege escalation");
     }

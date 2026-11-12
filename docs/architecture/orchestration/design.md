@@ -612,7 +612,7 @@ in-flight histories of either replay on their frozen copy, and each such
 session moves to 1.0.84 at its next continue-as-new, with everything 1.0.83
 carries, its intake state included.
 
-For 1.0.84, deploy the workers before turning on owner routing in any client.
+For 1.0.84, deploy the workers before turning on owner routing on the portal.
 An owner-tagged activity runs only on a worker that declares the owner's tag,
 and a capacity request only on a worker with a capacity requester; until such
 a worker exists, the activity waits in the queue. A session started on 1.0.82
@@ -820,10 +820,15 @@ turn-control routing contract. Workspace releases retain their capability tag.
 
 ### Owner routing and capacity requests (1.0.84)
 
-A client with owner routing on (`ownerRouting`, or `PILOTSWARM_OWNER_ROUTING=1`)
-starts a top-level user session with `ownerTag: "owner.<subject>"`, from the
-owner on the session's row. A system session, or a session without an owner,
-gets no tag. A session created during a turn (a `spawn_agent` child, a
+An owner-routed session is one whose creation config carries
+`ownerTag: "owner.<subject>"`. The portal saves it, with
+`PILOTSWARM_OWNER_ROUTING=1`, for a session the deployment's dispatcher
+creates for a user (`onBehalfOfOwner`), next to the record of that delegated
+creation; no request parameter sets either. Whichever client starts the
+session copies the stored tag into the orchestration input, whatever that
+client's own settings, and the stored value wins over the client's in-memory
+record of the create. A system session, and every session saved without a
+tag, gets none. A session created during a turn (a `spawn_agent` child, a
 regeneration distiller) takes the tag and the busy policy of that turn, from
 the turn's input or from the orchestration's `spawnChildSession` input; a
 system child gets neither. Both fields ride every continue-as-new. In a tagged
@@ -924,8 +929,9 @@ A `deny` parks it as a non-retryable failure.
 
 ### Fast busy policy (1.0.84)
 
-A session started with `workspaceBusyFastRelease` (client option
-`workspaceBusyFastRelease`, or `PILOTSWARM_WORKSPACE_BUSY_FAST_RELEASE=1`)
+A session started with `workspaceBusyFastRelease` (a client with the option
+`workspaceBusyFastRelease`, or `PILOTSWARM_WORKSPACE_BUSY_FAST_RELEASE=1`,
+sets it on the owner-routed top-level sessions it starts)
 treats a refusal with the code `WORKSPACE_BUSY` (from the workspace check, a
 capacity request, or any other gate that answers with that code) differently:
 

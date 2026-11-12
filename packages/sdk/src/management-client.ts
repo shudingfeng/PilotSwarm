@@ -186,6 +186,7 @@ import { createRegistryWorkflowAgentResolver } from "./workflow/agent-resolver.j
 import { assertWorkflowHumanInputAllowed, workflowInputCapabilities, type WorkflowInputCapabilities } from "./workflow/input-policy.js";
 import { WorkflowStoreError, type WorkflowActor } from "./workflow/store.js";
 import { ownerRoutedTreeTag, WORKFLOW_OWNER_ROUTED, WORKFLOW_OWNER_ROUTED_TEXT } from "./owner-routing.js";
+import { delegatedCreationOf, type SessionDelegation } from "./delegated-creation.js";
 import type { JsonValue } from "./workflow/json.js";
 import { workflowAdapterFailure } from "./workflow/failure.js";
 import { applyOperatorCommandToWorkflow, type WorkflowHost } from "./workflow/service.js";
@@ -895,15 +896,6 @@ export interface PilotSwarmManagementClientOptions {
      * server pass what their own process's setting says (workflowScriptsOptionFromEnv: on unless it is 0, false, no or off).
      */
     workflowScripts?: boolean;
-    /**
-     * Owner routing: whether this deployment's clients start top-level user
-     * sessions with their owner's tag (`PilotSwarmClientOptions.ownerRouting`).
-     * A person's start of a Workflow in an owner-routed tree is refused
-     * (409 WORKFLOW_OWNER_ROUTED): a session whose creation config, or its
-     * root's, carries an owner tag, and with this on any user session's tree.
-     * Default: `PILOTSWARM_OWNER_ROUTING=1`.
-     */
-    ownerRouting?: boolean;
 }
 
 // ─── Management Client ──────────────────────────────────────────
@@ -1506,6 +1498,23 @@ export class PilotSwarmManagementClient {
             throw Object.assign(new TypeError("setMyDispatcherDelegation: enabled must be true or false"), { code: "INVALID_REQUEST" });
         }
         return { enabled: await this._catalog!.setUserDispatcherDelegation(principal ?? LOCAL_DEFAULT_USER_PRINCIPAL, enabled) };
+    }
+
+    /**
+     * The delegation record of a session's tree: the dispatcher that created
+     * its root for the owner, as the root's creation config saved it
+     * (`delegatedCreation`), or null for a tree nobody created on a user's
+     * behalf, and for a missing session. The portal reads it to keep such a
+     * tree shared for reading only.
+     */
+    async getSessionDelegation(sessionId: string): Promise<SessionDelegation | null> {
+        this._ensureStarted();
+        const row = await this._catalog!.getSession(sessionId);
+        if (!row) return null;
+        const rootSessionId = row.rootSessionId || sessionId;
+        const config = this._catalog!.getSessionCreationConfig ? await this._catalog!.getSessionCreationConfig(rootSessionId) : null;
+        const record = delegatedCreationOf(config?.delegatedCreation);
+        return record ? { rootSessionId, ...record } : null;
     }
 
     /**
@@ -2494,7 +2503,8 @@ export class PilotSwarmManagementClient {
 
     /**
      * Stage 2.1: a person starts a Workflow from a revision (Start; Run again names the Workflow it repeats). Refused in an
-     * owner-routed tree (409 WORKFLOW_OWNER_ROUTED), whose turns run on its owner's workers and a Workflow's would not.
+     * owner-routed tree (409 WORKFLOW_OWNER_ROUTED): one whose session or root has an owner tag saved with its creation
+     * config. Its turns run on its owner's workers, and a Workflow's would not.
      */
     async startSessionWorkflowDefinition(ownerSessionId: string, request: { definitionId: string; revision?: number | null; runAgainOf?: string | null;
         inputs?: unknown; vars?: Record<string, unknown> | null; notifyParent?: boolean; operationId: string;
@@ -2504,8 +2514,7 @@ export class PilotSwarmManagementClient {
         try {
             this._requirePersonCommands();
             const host = await this._sessionForDefinitions(ownerSessionId);
-            const ownerRouting = this.config.ownerRouting ?? process.env.PILOTSWARM_OWNER_ROUTING === "1";
-            if (await ownerRoutedTreeTag(this._catalog!, ownerSessionId, ownerRouting)) {
+            if (await ownerRoutedTreeTag(this._catalog!, ownerSessionId)) {
                 throw new WorkflowStoreError(WORKFLOW_OWNER_ROUTED, WORKFLOW_OWNER_ROUTED_TEXT);
             }
             const provider = String(options.principal?.provider ?? "").trim();

@@ -1,6 +1,7 @@
 import { NodeSdkTransport } from "pilotswarm/host";
 import {
     factsManagerPrefixFor,
+    ownerRoutingTagForRow,
     personalSecretsMode,
     requiresFineGrainedGitHubTokens,
     resolveSessionMessageScope,
@@ -21,6 +22,8 @@ import {
     parseOnBehalfOfOwner,
     delegationRevokedError,
     auditUnavailableError,
+    ownershipNotEnforcedError,
+    delegatedSessionReadOnlyError,
 } from "./authz.js";
 
 /**
@@ -278,6 +281,9 @@ export class PortalRuntime {
         // The workers' setting, read here too: "owner" also keeps non-admins
         // out of the shared knowledge every session's prompt reads.
         this.sessionMessageScope = resolveSessionMessageScope(process.env.PILOTSWARM_SESSION_MESSAGE_SCOPE);
+        // Owner routing: the portal records the owner's tag on each session a
+        // dispatcher creates for a user; clients copy it from there.
+        this.ownerRouting = process.env.PILOTSWARM_OWNER_ROUTING === "1";
         // Throttle repeated break-glass audit rows for the same actor+session
         // (the portal polls events continuously while a session is open).
         this._breakGlassSeen = new Map(); // key -> expiry epoch ms
@@ -520,6 +526,8 @@ export class PortalRuntime {
     //
     // Everything below is inert unless DISPATCHER_SP_OBJECT_ID names the
     // deployment's dispatcher, and costs other callers one string comparison.
+    // The one exception is the read-only sharing of a tree the dispatcher
+    // created, which a write share or shared_write checks on the tree's record.
 
     _isDispatcher(authContext) {
         return isDispatcherPrincipal(authContext?.principal, this.authz);
@@ -632,13 +640,16 @@ export class PortalRuntime {
 
     /**
      * `onBehalfOfOwner` on session creation: only the deployment's dispatcher
-     * (never an admin as such), and only for a user who allows it. Enforced
-     * whatever AUTHZ_ENFORCE_OWNERSHIP says — creating a session that someone
-     * else owns is a new capability with no earlier behavior to keep. Returns
-     * the owner, or null when the request does not ask for delegation.
+     * (never an admin as such), only while ownership is enforced, and only
+     * for a user who allows it. On a deployment that names no dispatcher the
+     * parameter is ignored, as before it existed. Returns the owner and the
+     * trusted fields the session is created with: the record of the delegated
+     * creation and, with PILOTSWARM_OWNER_ROUTING=1, the owner's routing tag,
+     * both built here, never taken from the request. Null when the request
+     * does not ask for delegation.
      */
-    async _delegatedCreateOwner(method, safeParams, authContext) {
-        if (safeParams.onBehalfOfOwner == null) return null;
+    async _delegatedCreate(method, safeParams, authContext) {
+        if (safeParams.onBehalfOfOwner == null || !this.authz.dispatcherSubject) return null;
         if (!this._isDispatcher(authContext)) {
             this._recordAudit({
                 actor: this._auditActor(authContext),
@@ -648,6 +659,18 @@ export class PortalRuntime {
             });
             throw forbiddenError("onBehalfOfOwner is reserved for the deployment's dispatcher.");
         }
+        // Without enforcement every rule that keeps the session to its owner
+        // is only audited, so nothing would hold it private or read-only.
+        if (!this.authz.enforce) {
+            this._recordAudit({
+                actor: this._auditActor(authContext),
+                action: method,
+                decision: "deny",
+                reason: "onBehalfOfOwner needs AUTHZ_ENFORCE_OWNERSHIP=true",
+                details: { code: "OWNERSHIP_NOT_ENFORCED" },
+            });
+            throw ownershipNotEnforcedError();
+        }
         const requested = parseOnBehalfOfOwner(safeParams.onBehalfOfOwner, authContext?.principal);
         const owner = this._delegatingOwner(requested, authContext);
         if (!owner) {
@@ -655,6 +678,10 @@ export class PortalRuntime {
         }
         if (safeParams.visibility != null && normalizeVisibility(safeParams.visibility, null) !== "private") {
             throw Object.assign(new Error("A session created on behalf of its owner stays private."), { code: "INVALID_REQUEST" });
+        }
+        const ownerTag = this.ownerRouting ? ownerRoutingTagForRow({ owner }) : undefined;
+        if (this.ownerRouting && !ownerTag) {
+            throw Object.assign(new Error("onBehalfOfOwner names a user whose ID cannot be an owner routing tag."), { code: "INVALID_REQUEST" });
         }
         if (!(await this._ownerAllowsDelegation(owner))) {
             this._recordAudit({
@@ -666,7 +693,14 @@ export class PortalRuntime {
             });
             throw delegationRevokedError("This user does not allow the deployment's dispatcher to create sessions for them.");
         }
-        return { ...requested, ...owner };
+        const dispatcher = normalizeSessionOwner(authContext);
+        return {
+            owner: { ...requested, ...owner },
+            fields: {
+                delegatedCreation: { dispatcher: { provider: dispatcher.provider, subject: dispatcher.subject } },
+                ...(ownerTag ? { ownerTag } : {}),
+            },
+        };
     }
 
     /**
@@ -686,6 +720,32 @@ export class PortalRuntime {
             }
             throw error;
         }
+    }
+
+    /**
+     * A tree the dispatcher created for its owner is shared for reading only,
+     * or a teammate's prompt would run with the owner's credentials: no
+     * `shared_write` visibility, and no write share but the recorded
+     * dispatcher's. It holds for every caller, admins included, and reads the
+     * tree's stored record, so it outlives a later change of
+     * DISPATCHER_SP_OBJECT_ID. Only these share changes pay the read.
+     */
+    async _assertDelegatedTreeReadOnly(method, sessionId, authContext, { grantee = null, change }) {
+        if (typeof this.transport.getSessionDelegation !== "function") return;
+        const delegation = await this.transport.getSessionDelegation(String(sessionId));
+        if (!delegation) return;
+        const dispatcher = delegation.dispatcher;
+        if (grantee && grantee.provider === dispatcher.provider && grantee.subject === dispatcher.subject) return;
+        this._recordAudit({
+            actor: this._auditActor(authContext),
+            action: method,
+            sessionId: String(sessionId),
+            ...(grantee ? { target: `${grantee.provider}/${grantee.subject}` } : {}),
+            decision: "deny",
+            reason: `${change} on a session created on behalf of its owner, which is shared for reading only`,
+            details: { code: "DELEGATED_SESSION_READ_ONLY" },
+        });
+        throw delegatedSessionReadOnlyError();
     }
 
     /**
@@ -1499,7 +1559,8 @@ export class PortalRuntime {
             case "createSession": {
                 // With onBehalfOfOwner the group, owner and visibility are the
                 // owner's: the dispatcher acts for them, not as itself.
-                const delegatedOwner = await this._delegatedCreateOwner(method, safeParams, authContext);
+                const delegated = await this._delegatedCreate(method, safeParams, authContext);
+                const delegatedOwner = delegated?.owner ?? null;
                 const placementAuth = delegatedOwner ? { principal: delegatedOwner } : authContext;
                 const placementAdmin = delegatedOwner ? false : isAdmin;
                 await this._assertPlacementGroupOwned(safeParams.groupId, placementAuth, { isAdmin: placementAdmin });
@@ -1511,12 +1572,14 @@ export class PortalRuntime {
                     owner: delegatedOwner ?? owner,
                     visibility: delegatedOwner ? "private" : normalizeVisibility(safeParams.visibility, this.authz.defaultVisibility),
                     ...(safeParams.workspace != null ? { workspace: safeParams.workspace } : {}),
+                    ...(delegated ? delegated.fields : {}),
                 });
                 if (delegatedOwner) await this._completeDelegatedCreate(method, created, delegatedOwner, authContext);
                 return this._ensureCreatedPlacement(created, safeParams.groupId, placementAuth, placementAdmin);
             }
             case "createSessionForAgent": {
-                const delegatedOwner = await this._delegatedCreateOwner(method, safeParams, authContext);
+                const delegated = await this._delegatedCreate(method, safeParams, authContext);
+                const delegatedOwner = delegated?.owner ?? null;
                 const placementAuth = delegatedOwner ? { principal: delegatedOwner } : authContext;
                 const placementAdmin = delegatedOwner ? false : isAdmin;
                 await this._assertPlacementGroupOwned(safeParams.groupId, placementAuth, { isAdmin: placementAdmin });
@@ -1534,6 +1597,7 @@ export class PortalRuntime {
                     isAdmin: delegatedOwner ? false : resourceAdmin,
                     visibility: delegatedOwner ? "private" : normalizeVisibility(safeParams.visibility, this.authz.defaultVisibility),
                     ...(safeParams.workspace != null ? { workspace: safeParams.workspace } : {}),
+                    ...(delegated ? delegated.fields : {}),
                 });
                 if (delegatedOwner) {
                     await this._completeDelegatedCreate(method, created, delegatedOwner, authContext, { agentName: safeParams.agentName ?? null });
@@ -1548,9 +1612,10 @@ export class PortalRuntime {
                 return this.transport.listCreatableWorkflows(owner);
             case "createSessionForWorkflow": {
                 // No delegation: a session created for a user is owner-routed,
-                // and no Workflow starts in an owner-routed tree. /api/v1 never
-                // passes the param on (the operation does not declare it).
-                if (safeParams.onBehalfOfOwner != null) {
+                // and no Workflow starts in an owner-routed tree. Declared on
+                // the operation so /api/v1 refuses it as /api/rpc does; a
+                // deployment without a dispatcher ignores it, as before.
+                if (safeParams.onBehalfOfOwner != null && this.authz.dispatcherSubject) {
                     throw Object.assign(new Error("createSessionForWorkflow does not take onBehalfOfOwner: no Workflow starts in a session created on behalf of a user."),
                         { code: "INVALID_REQUEST", status: 400 });
                 }
@@ -1799,6 +1864,9 @@ export class PortalRuntime {
                 if (!visibility) {
                     throw Object.assign(new Error("visibility must be private | shared_read | shared_write"), { code: "INVALID_REQUEST" });
                 }
+                if (visibility === "shared_write") {
+                    await this._assertDelegatedTreeReadOnly(method, safeParams.sessionId, authContext, { change: "shared_write visibility" });
+                }
                 await this.transport.setSessionVisibility(safeParams.sessionId, visibility);
                 this._recordAudit({
                     actor: this._auditActor(authContext),
@@ -1814,6 +1882,9 @@ export class PortalRuntime {
                 const access = safeParams.access === "write" ? "write" : safeParams.access === "read" ? "read" : null;
                 if (!grantee.provider || !grantee.subject || !access) {
                     throw Object.assign(new Error("grantSessionShare requires user { provider, subject } and access read|write"), { code: "INVALID_REQUEST" });
+                }
+                if (access === "write") {
+                    await this._assertDelegatedTreeReadOnly(method, safeParams.sessionId, authContext, { grantee, change: "a write share" });
                 }
                 await this.transport.grantSessionShare(safeParams.sessionId, grantee, access, owner);
                 this._recordAudit({
@@ -1891,7 +1962,8 @@ export class PortalRuntime {
                 return this.transport.completeSessionGroup(safeParams.groupId, safeParams.options || {});
             case "deleteSession":
                 if (safeParams.force === true) this._assertMayForceDelete(gate, safeParams.sessionId, authContext, isAdmin);
-                return this.transport.deleteSession(safeParams.sessionId, safeParams.reason, {
+                // A reason is the forced delete's; a plain delete keeps today's default reason.
+                return this.transport.deleteSession(safeParams.sessionId, safeParams.force === true ? safeParams.reason : undefined, {
                     ...(safeParams.force === true ? { force: true } : {}),
                     ...(safeParams.settleTimeoutMs !== undefined ? { settleTimeoutMs: safeParams.settleTimeoutMs } : {}),
                 });

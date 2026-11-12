@@ -98,6 +98,9 @@ test("dispatcher delegation: the caller's own opt-in, and onBehalfOfOwner in the
     assert.deepEqual(buildOperationRequest("createSession", { model: "m", onBehalfOfOwner: owner }).body, { model: "m", onBehalfOfOwner: owner });
     assert.deepEqual(buildOperationRequest("createSessionForAgent", { agentName: "a", onBehalfOfOwner: owner }).body,
         { agentName: "a", onBehalfOfOwner: owner });
+    // Declared so the portal sees it on /api/v1 and refuses it there as on /api/rpc.
+    assert.deepEqual(buildOperationRequest("createSessionForWorkflow", { ref: "p/w", onBehalfOfOwner: owner }).body,
+        { ref: "p/w", onBehalfOfOwner: owner });
 });
 
 test("moveSessionsToGroup carries nullable groupId in body", () => {
