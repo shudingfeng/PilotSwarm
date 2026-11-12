@@ -39,10 +39,8 @@ a session can use a faster policy for `WORKSPACE_BUSY` refusals. Both come from
 two optional orchestration inputs, `ownerTag` and `workspaceBusyFastRelease`,
 which the client sets only when it is configured to (see
 [§10](#owner-routing-and-capacity-requests-1084)). Without them, 1.0.84
-schedules exactly what 1.0.83 schedules, with one fix: a session without a
-workspace that a workspace-gate wait held starts the busy schedule again after
-a turn runs (see [handleTurnResult](#handleturnresult)). Version 1.0.83 and
-older ignore both inputs.
+schedules exactly what 1.0.83 schedules. Version 1.0.83 and older ignore both
+inputs.
 
 ---
 
@@ -498,13 +496,16 @@ The big switch on `result.type`. Two pre-passes:
 
 A result that gets past the gates ends a workspace hold. For a session with a
 workspace, the status returns to `ready`, `workspaceRetry` is cleared and
-`session.workspace_available` is recorded. In 1.0.84, a session without a
-workspace can also be held on the workspace timer: by a capacity request's
-`busy` answer, or by any other turn result with the workspace gate. Its status
-and `workspaceRetry` are cleared without an event, so the next hold starts the
-schedule again at its first step, with one failure on the worker, and a
-continue-as-new carries no retry count. Up to 1.0.82 such a session kept the
-status and the retry state, so every later hold went on up the schedule.
+`session.workspace_available` is recorded. A session without a workspace can
+also be held on the workspace timer: by any turn result with the workspace
+gate, such as a default folder that fails to attach or a `busy` answer from an
+admission hook or a credential resolver, and in 1.0.84 by a capacity request's
+`busy` answer. Such a session keeps the status and the retry state, so every
+later hold goes on up the schedule, as on 1.0.83. In 1.0.84, when its input
+carries an owner tag or the fast busy flag, the status and `workspaceRetry`
+are cleared without an event instead: the next hold starts the schedule again
+at its first step, with one failure on the worker, and a continue-as-new
+carries no retry count. Frozen 1.0.83 keeps the hold for every session.
 
 ### Stop, Steer, and carried guidance (1.0.81)
 
@@ -851,15 +852,26 @@ answers:
 | Answer | Effect |
 |---|---|
 | `ok` (or anything else) | the turn runs |
-| `deny` | the turn ends as a refusal that is not retried: the session shows the requester's message, the prompt is dropped, a child reports the failure to its parent, and the next prompt asks again; no turn index is taken |
+| `deny` | the turn ends as a refusal that is not retried: the session shows the requester's message, the prompt is dropped, a child reports the failure to its parent, and the next prompt asks again; no turn index is taken. The status names the refusal's response before the catalog shows the error, so a client that then syncs its response cursor never reads the refusal back as its next turn's answer; other non-retryable failures keep 1.0.83's order, status first |
 | `busy` | the prompt is held on the workspace timer, as for a `WORKSPACE_BUSY` refusal, at least `retryAfterMs`, with the message as the session's wait reason, and the session asks again when the timer fires; `done`, `cancel` and `delete` reach it meanwhile |
-| no answer within 15 s, a failed request, or no row for the session | `busy` with code `CAPACITY_UNAVAILABLE` and a one-minute wait; it is not counted as a failure, so it releases no affinity, even under the fast policy |
+| no answer within 15 s, a failed request, or no row for the session | `busy` with code `CAPACITY_UNAVAILABLE` and `retryAfterMs` of a minute. It is not counted as a failure: the session waits the answer's `retryAfterMs`, a minute, whatever the schedule's step, also after busy answers and under the fast policy; the step and the failure count stay as they were, and no affinity is released |
 
 A set-workspace command of a tagged session answers a `deny` or `busy` with
 that refusal and keeps the workspace. Otherwise it races `checkWorkspace`
 against `WORKSPACE_CHECK_CAP_MS` (20 minutes); when the cap wins it answers
 `WORKSPACE_BUSY` and keeps the workspace. An untagged session yields its check
 as before.
+
+A worker with a capacity requester is also the backstop for a session whose
+orchestration was started without its tag, by a client that didn't copy it.
+Before each turn it runs, ahead of the admission hook and before the session is
+loaded there, it reads the session's creation config. When the config holds an
+owner tag that the turn's input lacks or replaces, the turn ends as an error
+that is not retried, `OWNER_TAG_MISSING`, instead of running off the owner's
+workers. The orchestration gives every later turn the same tag, or none, so
+those are refused too. A config the worker can't read fails the turn with an
+error that is retried. No other worker reads the config, so without a
+requester nothing changes.
 
 ### Owner-only workers
 

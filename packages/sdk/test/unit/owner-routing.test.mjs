@@ -670,6 +670,23 @@ function lifeOf(handler, extra = {}) {
     });
 }
 
+const noWorkspace = (extra = {}) => baseInput({ config: { model: "test:model" }, ...extra });
+
+/**
+ * A session without a workspace that a workspace-gate wait holds twice, as an
+ * admission hook, a credential resolver or a failed default folder answers,
+ * with a turn that runs in between; then a model switch continues it as new.
+ */
+const twoHolds = (refusal = busy("w1")) => ({
+    queue: [
+        prompt("first"),
+        { msg: prompt("second"), when: (h) => turnsOf(h) >= 2 },
+        { msg: command("set_model", { model: "test:other" }), when: (h) => turnsOf(h) >= 3 },
+    ],
+    turns: [refusal, { type: "completed", content: "ok" }, refusal, { type: "completed", content: "on the new model" }],
+    fireTimers: 1,
+});
+
 test("without an owner tag or the fast policy, 1.0.84 yields exactly what 1.0.83 yields", () => {
     const frozen = lifeOf(durableSessionOrchestration_1_0_83);
     const now = lifeOf(durableSessionOrchestration_1_0_84);
@@ -691,6 +708,13 @@ test("without an owner tag or the fast policy, 1.0.84 yields exactly what 1.0.83
         const control = drive(durableSessionOrchestration_1_0_83, carried, { queue: [command("done")] });
         assert.deepEqual(upgraded.log, control.log);
         assert.equal(upgraded.result, "done");
+    }
+    // A session without a workspace that a gate wait holds, with a busy
+    // refusal or a failed attach (a default folder's): the same yields too.
+    for (const refusal of [busy("w1"), { ...busy("w1"), code: "WORKSPACE_ATTACH_FAILED", reason: "workspace unavailable: attach failed" }]) {
+        const held = drive(durableSessionOrchestration_1_0_84, noWorkspace(), twoHolds(refusal));
+        assert.deepEqual(held.log, drive(durableSessionOrchestration_1_0_83, noWorkspace(), twoHolds(refusal)).log, refusal.code);
+        assert.equal(held.count("runTurnV5"), 4, refusal.code);
     }
 });
 
@@ -751,6 +775,38 @@ test("a deny ends the turn without a retry and takes no turn index; the next pro
     assert.ok(run.statuses.some((s) => s.status === "error" && s.nonRetryable === true && s.error === "This owner has no capacity."));
 });
 
+test("a deny: the status names the refusal's response before the catalog shows the error; other non-retryable failures keep 1.0.83's order", () => {
+    // The last status and the latest response when the catalog's error write
+    // is scheduled: a client that sees the error and then syncs its response
+    // cursor from the status reads at least this status.
+    const atCatalogError = (run) => {
+        const at = run.log.findIndex((line) => line.startsWith("updateCmsState@") && line.includes('"state":"error"'));
+        assert.ok(at > 0, "the catalog's error write");
+        const before = run.log.slice(0, at);
+        return {
+            status: JSON.parse(before.filter((line) => line.startsWith("status ")).at(-1).slice("status ".length)),
+            latest: JSON.parse(before.filter((line) => line.startsWith("kv response.latest=")).at(-1).slice("kv response.latest=".length)),
+        };
+    };
+    const denied = drive(durableSessionOrchestration_1_0_84, baseInput({ ownerTag: OWNER }), {
+        queue: [prompt("first")],
+        capacity: [{ decision: "deny", message: "This owner has no capacity." }],
+    });
+    const { status, latest } = atCatalogError(denied);
+    assert.deepEqual([latest.type, latest.content], ["error", "This owner has no capacity."]);
+    assert.equal(status.responseVersion, latest.version, "the status names the refusal's response");
+    assert.deepEqual([status.status, status.error, status.retriesExhausted, status.nonRetryable], ["error", "This owner has no capacity.", true, true]);
+
+    // An untagged session's non-retryable failure, such as an admission
+    // hook's deny, yields exactly what frozen 1.0.83 yields.
+    const refusal = sessionAdmissionTurnResult({ decision: "deny", message: "no drive is leased here" }, { workerNodeId: "w1", orchestrationVersion: "1.0.84" });
+    assert.equal(refusal.retryable, false);
+    const script = () => ({ queue: [prompt("first")], turns: [refusal] });
+    const untagged = drive(durableSessionOrchestration_1_0_84, noWorkspace(), script());
+    assert.deepEqual(untagged.log, drive(durableSessionOrchestration_1_0_83, noWorkspace(), script()).log);
+    assert.equal(atCatalogError(untagged).latest.content, "Session admission denied this turn: no drive is leased here");
+});
+
 test("a busy answer holds the prompt on the busy timer without a turn, and a done command completes within the release cap", () => {
     const run = drive(durableSessionOrchestration_1_0_84, baseInput({ ownerTag: OWNER }), {
         queue: [prompt("hello", { clientMessageIds: ["m-1"] }), { msg: command("done"), when: (h) => h.count("requestOwnerCapacity") >= 1 }],
@@ -799,6 +855,46 @@ test("a requester that does not answer: busy CAPACITY_UNAVAILABLE keeps the work
     assert.equal(destroy.sessionId, "s-1");
 });
 
+test("an unanswered capacity request always waits its retryAfterMs, a minute, before or after busy answers, and leaves the step and the failure count", () => {
+    const silent = { decision: "busy", code: CAPACITY_UNAVAILABLE, retryAfterMs: 60_000, message: "no answer" };
+    const counted = { decision: "busy", retryAfterMs: 1_000, message: "The owner's VM is starting." };
+    const released = (run) => run.log.filter((line) => line.includes('"eventType":"session.affinity_released"')).length;
+    const held = (extra, capacity) => drive(durableSessionOrchestration_1_0_84, baseInput({ ownerTag: OWNER, ...extra }), {
+        queue: [prompt("hello")],
+        capacity,
+        turns: [ran({ type: "completed", content: "ok" })],
+        fireTimers: capacity.length,
+    });
+    // Each policy's first three WORKSPACE_BUSY steps, and whether each busy answer releases the worker.
+    for (const [extra, steps, releasesEach] of [[{}, [30_000, 120_000, 300_000], false], [{ workspaceBusyFastRelease: true }, [10_000, 20_000, 60_000], true]]) {
+        const what = JSON.stringify(extra);
+        // Before any busy answer.
+        const before = held(extra, [silent, silent, silent]);
+        assert.deepEqual(before.timersFired, [60_000, 60_000, 60_000], what);
+        assert.equal(released(before), 0, what);
+        const turn = before.activities.find((a) => a.name === "runTurnV5");
+        assert.equal(turn.sessionId, "s-1", `${what}: the turn runs under the session's first affinity key`);
+        assert.deepEqual(turn.input.stashedPrompts, ["hello"]);
+        // After two busy answers: a minute each, and the next busy answer
+        // takes the step the second one left.
+        const after = held(extra, [counted, counted, silent, silent, counted]);
+        assert.deepEqual(after.timersFired, [steps[0], steps[1], 60_000, 60_000, steps[2]], what);
+        assert.equal(released(after), releasesEach ? 3 : 0, `${what}: only the busy answers release`);
+        assert.equal(after.count("requestOwnerCapacity"), 6);
+        assert.equal(after.count("runTurnV5"), 1);
+    }
+    // The failure count rides through too: a refusal of the turn on w1, an
+    // unanswered request, then another refusal there, two in a row, release w1.
+    const refusedTwice = drive(durableSessionOrchestration_1_0_84, baseInput({ ownerTag: OWNER }), {
+        queue: [prompt("hello")],
+        capacity: [{ decision: "ok" }, silent, { decision: "ok" }],
+        turns: [busy("w1"), busy("w1"), ran({ type: "completed", content: "ok" })],
+        fireTimers: 3,
+    });
+    assert.deepEqual(refusedTwice.timersFired, [30_000, 60_000, 120_000]);
+    assert.equal(released(refusedTwice), 1);
+});
+
 test("the fast busy policy: the first WORKSPACE_BUSY refusal releases the worker and retries follow 10 s, 20 s, 1 min, 3 min", () => {
     const refusals = [busy("w1"), busy("w2"), busy("w2"), busy("w3")];
     const fast = drive(durableSessionOrchestration_1_0_84, baseInput({ workspaceBusyFastRelease: true }), {
@@ -820,69 +916,76 @@ test("the fast busy policy: the first WORKSPACE_BUSY refusal releases the worker
     assert.equal(missing.count("releaseWorkspace"), 0);
 });
 
-test("a session without a workspace, tagged or not, starts the busy schedule again after a turn runs; 1.0.82 and 1.0.83 keep escalating", () => {
-    const noWorkspace = (extra = {}) => baseInput({ config: { model: "test:model" }, ...extra });
-    // A workspace-gate busy wait (as an admission hook or a credential
-    // resolver answers), a retry that runs, then another busy wait.
-    const twoHolds = () => ({
-        queue: [
-            prompt("first"),
-            { msg: prompt("second"), when: (h) => turnsOf(h) >= 2 },
-            { msg: command("set_model", { model: "test:other" }), when: (h) => turnsOf(h) >= 3 },
-        ],
-        turns: [busy("w1"), { type: "completed", content: "ok" }, busy("w1"), { type: "completed", content: "on the new model" }],
-        fireTimers: 1,
-    });
+test("a gate-held session without a workspace: untagged it escalates exactly as on 1.0.83; tagged or flagged it starts the schedule again after a turn runs", () => {
     // What happened before the model switch continued as new.
     const beforeSwitch = (run) => run.log.slice(0, run.log.findIndex((line) => line.startsWith("can(")));
     const holds = (run) => beforeSwitch(run).filter((line) => line.startsWith("status ")).map((line) => JSON.parse(line.slice(7)))
         .filter((s) => s.status === "waiting" && s.gate === "workspace").map((s) => s.waitSeconds);
     const released = (run) => beforeSwitch(run).filter((line) => line.includes('"eventType":"session.affinity_released"')).length;
 
-    for (const extra of [{}, { ownerTag: OWNER }]) {
-        const run = drive(durableSessionOrchestration_1_0_84, noWorkspace(extra), twoHolds());
-        assert.equal(run.count("runTurnV5"), 4);
-        assert.deepEqual(holds(run), [30, 30], "the second hold starts at step 0");
-        assert.equal(released(run), 0, "one refusal on the worker releases nothing");
-        assert.deepEqual(run.cans[0].input.workspaceRetry, { step: 1, failures: { workerNodeId: "w1", count: 1 } });
-        assert.ok(!run.activities.some((a) => a.name === "recordSessionEvent" && a.input.events[0].eventType === "session.workspace_available"));
-    }
-    // 1.0.82 and frozen 1.0.83 keep escalating: the restart is new in 1.0.84.
-    for (const handler of [durableSessionOrchestration_1_0_82, durableSessionOrchestration_1_0_83]) {
-        const old = drive(handler, noWorkspace(), twoHolds());
-        assert.deepEqual(holds(old), [30, 120]);
-        assert.equal(released(old), 1);
-        assert.deepEqual(old.cans[0].input.workspaceRetry, { step: 2, failures: { workerNodeId: "w1", count: 2 } });
+    // Untagged and without the fast policy, 1.0.84 is 1.0.83: the second
+    // hold takes the next step, and the second refusal on the worker releases it.
+    const untagged = drive(durableSessionOrchestration_1_0_84, noWorkspace(), twoHolds());
+    assert.deepEqual(untagged.log, drive(durableSessionOrchestration_1_0_83, noWorkspace(), twoHolds()).log);
+    for (const handler of [durableSessionOrchestration_1_0_82, durableSessionOrchestration_1_0_83, durableSessionOrchestration_1_0_84]) {
+        const run = drive(handler, noWorkspace(), twoHolds());
+        assert.deepEqual(holds(run), [30, 120]);
+        assert.equal(released(run), 1);
+        assert.deepEqual(run.cans[0].input.workspaceRetry, { step: 2, failures: { workerNodeId: "w1", count: 2 } });
     }
 
-    // A continue-as-new after the turn that ran carries no hold.
+    // With an owner tag or the fast policy, the turn that ran ended the hold:
+    // the second starts at the schedule's first step, with one failure on the worker.
+    for (const [extra, expected, releases] of [
+        [{ ownerTag: OWNER }, [30, 30], 0],
+        [{ workspaceBusyFastRelease: true }, [10, 10], 2],
+        [{ ownerTag: OWNER, workspaceBusyFastRelease: true }, [10, 10], 2],
+    ]) {
+        const what = JSON.stringify(extra);
+        const run = drive(durableSessionOrchestration_1_0_84, noWorkspace(extra), twoHolds());
+        assert.equal(run.count("runTurnV5"), 4, what);
+        assert.deepEqual(holds(run), expected, `${what}: the second hold starts at step 0`);
+        assert.equal(released(run), releases, what);
+        assert.deepEqual(run.cans[0].input.workspaceRetry, { step: 1, failures: { workerNodeId: "w1", count: 1 } }, what);
+        assert.ok(!run.activities.some((a) => a.name === "recordSessionEvent" && a.input.events[0].eventType === "session.workspace_available"));
+    }
+
+    // A continue-as-new after the turn that ran: untagged, it carries the hold
+    // as 1.0.82 and 1.0.83 do; tagged or flagged, it carries none.
     const idleSwitch = {
         queue: [prompt("first"), { msg: command("set_model", { model: "test:other" }), when: (h) => turnsOf(h) >= 2 }],
         turns: [busy("w1"), { type: "completed", content: "ok" }, { type: "completed", content: "on the new model" }],
         fireTimers: 1,
     };
-    const carried = drive(durableSessionOrchestration_1_0_84, noWorkspace(), idleSwitch).cans[0].input;
-    assert.ok(!("workspaceStatus" in carried) && !("workspaceRetry" in carried));
-    assert.equal(carried.retryCount, 0);
-    const carriedOld = drive(durableSessionOrchestration_1_0_82, noWorkspace(), idleSwitch).cans[0].input;
-    assert.deepEqual(carriedOld.workspaceStatus, { state: "unavailable", code: "WORKSPACE_BUSY" });
-    assert.deepEqual(carriedOld.workspaceRetry, { step: 1, failures: { workerNodeId: "w1", count: 1 } });
+    for (const handler of [durableSessionOrchestration_1_0_82, durableSessionOrchestration_1_0_83, durableSessionOrchestration_1_0_84]) {
+        const carried = drive(handler, noWorkspace(), idleSwitch).cans[0].input;
+        assert.deepEqual(carried.workspaceStatus, { state: "unavailable", code: "WORKSPACE_BUSY" });
+        assert.deepEqual(carried.workspaceRetry, { step: 1, failures: { workerNodeId: "w1", count: 1 } });
+    }
+    for (const extra of [{ ownerTag: OWNER }, { workspaceBusyFastRelease: true }]) {
+        const carried = drive(durableSessionOrchestration_1_0_84, noWorkspace(extra), idleSwitch).cans[0].input;
+        assert.ok(!("workspaceStatus" in carried) && !("workspaceRetry" in carried), JSON.stringify(extra));
+        assert.equal(carried.retryCount, 0);
+    }
 });
 
-test("the admission hook's and the credential resolver's busy answers hold like a busy workspace, and start over after a turn runs", () => {
+test("the admission hook's and the credential resolver's busy answers hold like a busy workspace; a tagged or flagged session starts over after a turn runs", () => {
     const admission = sessionAdmissionTurnResult({ decision: "busy", message: "the owner's disk is in use" }, { workerNodeId: "w1", orchestrationVersion: "1.0.84" });
     const credential = personalCredentialTurnResult(new PersonalCredentialError("busy", "github", "the secret store is busy"), "w1", "1.0.84");
     for (const refusal of [admission, credential]) {
         assert.deepEqual([refusal.type, refusal.gate, refusal.code, refusal.workerNodeId], ["wait", "workspace", "WORKSPACE_BUSY", "w1"]);
-        const run = drive(durableSessionOrchestration_1_0_84, baseInput({ config: { model: "test:model" } }), {
-            queue: [prompt("first"), { msg: prompt("second"), when: (h) => turnsOf(h) >= 2 }],
-            turns: [refusal, { type: "completed", content: "ok" }, refusal, { type: "completed", content: "ok" }],
-            fireTimers: 2,
-        });
-        assert.equal(run.count("runTurnV5"), 4, refusal.reason);
-        const holds = run.log.filter((line) => line.startsWith("status ")).map((line) => JSON.parse(line.slice(7)))
-            .filter((s) => s.status === "waiting" && s.gate === "workspace").map((s) => s.waitSeconds);
-        assert.deepEqual(holds, [30, 30], `${refusal.reason}: the second hold starts at step 0`);
+        // Untagged and without the fast policy, the second hold escalates, as on 1.0.83.
+        for (const [extra, expected] of [[{}, [30, 120]], [{ ownerTag: OWNER }, [30, 30]], [{ workspaceBusyFastRelease: true }, [10, 10]]]) {
+            const run = drive(durableSessionOrchestration_1_0_84, noWorkspace(extra), {
+                queue: [prompt("first"), { msg: prompt("second"), when: (h) => turnsOf(h) >= 2 }],
+                turns: [refusal, { type: "completed", content: "ok" }, refusal, { type: "completed", content: "ok" }],
+                fireTimers: 2,
+            });
+            assert.equal(run.count("runTurnV5"), 4, refusal.reason);
+            const holds = run.log.filter((line) => line.startsWith("status ")).map((line) => JSON.parse(line.slice(7)))
+                .filter((s) => s.status === "waiting" && s.gate === "workspace").map((s) => s.waitSeconds);
+            assert.deepEqual(holds, expected, `${refusal.reason} ${JSON.stringify(extra)}`);
+        }
     }
 });
 

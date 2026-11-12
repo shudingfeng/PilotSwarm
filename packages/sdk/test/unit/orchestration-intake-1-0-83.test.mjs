@@ -453,7 +453,8 @@ test("1.0.83 (orchestration_1_0_83/) is the frozen 1.0.82 plus the intake: the f
 /**
  * The lines of the frozen 1.0.83 that 1.0.84 does not keep, by file: owner routing's (U18). Each session proxy now takes the
  * session's routing; the destroys are capped for an owner-tagged session; a set-workspace check is raced against its cap;
- * the workspace retry takes the fast busy schedule; and the version and its handler's name.
+ * the workspace retry takes the fast busy schedule, and a hold that is no failure keeps its step; and the version and its
+ * handler's name.
  */
 const DROPPED_FROM_83 = {
     "agents.ts": [
@@ -489,6 +490,7 @@ const DROPPED_FROM_83 = {
         "        ? { workerNodeId: failedOn, count: previous.failures.count + 1 }",
         "        : { workerNodeId: failedOn, count: 1 };",
         "    const delayMs = workspaceRetryDelayMs(previous.step, wait.retryAfterMs, state.workspaceRetryScheduleMs);",
+        "    state.workspaceRetry = { step: previous.step + 1, failures };",
         "    // Two failures in a row on one worker: release affinity so the next",
         "    // attempt may land elsewhere. The count is not reset by the release, so",
         "    // every further failure there releases again, until a check passes.",

@@ -6,7 +6,7 @@ import type { PromptAttachmentRef } from "../types.js";
 import type { OrchestrationInput, TurnResult } from "../types.js";
 import { SESSION_STATE_MISSING_PREFIX, sanitizePromptAttachmentRefs } from "../types.js";
 import { createSessionProxy } from "../session-proxy.js";
-import { CAPACITY_UNAVAILABLE } from "../owner-routing.js";
+import { CAPACITY_UNAVAILABLE, CAPACITY_UNAVAILABLE_RETRY_MS } from "../owner-routing.js";
 import { sameWorkspace, validateWorkspaceText } from "../workspace-check.js";
 import { planHoldRelease } from "../wait-affinity.js";
 import {
@@ -293,6 +293,12 @@ function* projectNonRetryableTurnFailure(
     runtime: DurableSessionRuntime,
     errorMessage: string,
     clientMessageIds?: string[],
+    // 1.0.84, the capacity deny only: publish the status again once the
+    // response is written, in the same episode, so the status names the
+    // refusal's response before the catalog shows the error. A client that
+    // then syncs its response cursor from the status never reads the refusal
+    // again as its next turn's answer. Other callers keep 1.0.83's order.
+    opts: { statusAfterResponse?: boolean } = {},
 ): Generator<any, void, any> {
     yield* noteIntakeAttempt(runtime, { kind: "failed", cause: "non_retryable" });
     runtime.state.blockedError = { message: errorMessage };
@@ -306,6 +312,9 @@ function* projectNonRetryableTurnFailure(
         type: "error",
         content: errorMessage,
     });
+    if (opts.statusAfterResponse) {
+        publishStatus(runtime, "error", { error: errorMessage, retriesExhausted: true, nonRetryable: true });
+    }
     const closed: any = yield runtime.manager.updateCmsState(runtime.input.sessionId, "error", errorMessage, null, { closeControls: true });
     yield* dropConvertedMessages(runtime, closed?.replacedClientMessageIds);
     runtime.state.carriedSteers = [];
@@ -490,7 +499,7 @@ export function* processPrompt(
         if (capacity.decision !== "ok") {
             state.config.turnSystemPrompt = undefined;
             if (capacity.decision === "deny") {
-                yield* projectNonRetryableTurnFailure(runtime, capacity.message, clientMessageIds);
+                yield* projectNonRetryableTurnFailure(runtime, capacity.message, clientMessageIds, { statusAfterResponse: true });
                 return;
             }
             // 1.0.83's intake (design 5.5): this attempt ends at a gate before
@@ -1260,7 +1269,9 @@ function holdRefusedTurnNote(runtime: DurableSessionRuntime, sourcePrompt: strin
  * 1.0.84: a capacity `busy` answer holds the prompt the same way. With the
  * fast busy policy, a WORKSPACE_BUSY refusal releases the worker at once and
  * retries follow WORKSPACE_BUSY_RETRY_SCHEDULE_SECONDS. A hold that is not a
- * failure (`countsAsFailure: false`, no capacity answer) releases nothing.
+ * failure (`countsAsFailure: false`, no capacity answer) waits the answer's
+ * `retryAfterMs`, a minute by default, whatever the schedule's step; it
+ * leaves the step and the failure count as they were and releases nothing.
  */
 function* holdForWorkspace(
     runtime: DurableSessionRuntime,
@@ -1295,13 +1306,17 @@ function* holdForWorkspace(
         : failedOn && previous.failures.workerNodeId === failedOn
             ? { workerNodeId: failedOn, count: previous.failures.count + 1 }
             : { workerNodeId: failedOn, count: 1 };
-    const delayMs = workspaceRetryDelayMs(
-        previous.step,
-        wait.retryAfterMs,
-        state.workspaceRetryScheduleMs,
-        fastBusy ? WORKSPACE_BUSY_RETRY_SCHEDULE_SECONDS : undefined,
-    );
-    state.workspaceRetry = { step: previous.step + 1, failures };
+    const delayMs = !countsAsFailure
+        ? (typeof wait.retryAfterMs === "number" && Number.isFinite(wait.retryAfterMs) && wait.retryAfterMs > 0
+            ? wait.retryAfterMs
+            : CAPACITY_UNAVAILABLE_RETRY_MS)
+        : workspaceRetryDelayMs(
+            previous.step,
+            wait.retryAfterMs,
+            state.workspaceRetryScheduleMs,
+            fastBusy ? WORKSPACE_BUSY_RETRY_SCHEDULE_SECONDS : undefined,
+        );
+    state.workspaceRetry = { step: countsAsFailure ? previous.step + 1 : previous.step, failures };
     state.workspaceStatus = { state: "unavailable", ...(code ? { code } : {}) };
     ctx.traceInfo(
         `[orch] workspace unavailable (${code ?? "unknown"}) on ${failedOn || "unknown worker"}: `
@@ -1425,9 +1440,12 @@ export function* handleTurnResult(
     // 1.0.84: a session without a workspace is held on the same timer by a
     // capacity request's busy answer, and by any turn result with the
     // workspace gate, such as a busy answer from an admission hook or a
-    // credential resolver. A turn got past the gates, so that hold is over:
-    // the next one starts the schedule again, and no retry count is carried.
-    if (pastGates && !state.config.workspace && state.workspaceStatus?.state === "unavailable") {
+    // credential resolver. For a session with an owner tag or the fast busy
+    // policy, a turn that got past the gates ends that hold: the next one
+    // starts the schedule again, and no retry count is carried. Any other
+    // session keeps 1.0.83's schedule (C4).
+    if (pastGates && !state.config.workspace && (options.ownerTag || options.workspaceBusyFastRelease)
+        && state.workspaceStatus?.state === "unavailable") {
         state.workspaceStatus = null;
         state.workspaceRetry = null;
     }
