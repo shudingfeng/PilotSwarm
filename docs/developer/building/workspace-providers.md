@@ -189,8 +189,8 @@ It acts on the answer:
 
 The busy schedule starts over when a turn gets past the gates: for a session
 with a workspace, when a turn gets past its workspace check, and on
-orchestration 1.0.83 and later, for a session without one, when a turn runs.
-Only orchestrations before 1.0.83 keep a session without a workspace in its
+orchestration 1.0.84 and later, for a session without one, when a turn runs.
+Only orchestrations before 1.0.84 keep a session without a workspace in its
 place in the schedule after a turn runs, so that each later busy answer waits
 at least as long as the one before, and two busy answers on one worker,
 however far apart, release it from that worker.

@@ -161,7 +161,8 @@ test("the worker's activities hand their scope to both tools: two registrations,
             };
             registerActivities({ registerActivity: (name, handler) => { handlers[name] = handler; } }, sessionManager,
                 null, undefined, catalog, undefined, "sqlite::memory:",
-                undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, scope);
+                // The 17th parameter is the Workflow intake's test options; the scope is the 18th.
+                undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, scope);
             const result = await handlers.runTurn({ traceInfo() {}, isCancelled: () => false }, {
                 sessionId: "alice-1", prompt: "Ask Bob's session for the release notes.", config: {}, turnIndex: 0,
             });

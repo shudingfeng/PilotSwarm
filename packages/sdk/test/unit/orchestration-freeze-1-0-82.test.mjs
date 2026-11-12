@@ -1,29 +1,92 @@
 /**
- * Freezing 1.0.82 and opening 1.0.83 (owner routing).
+ * Freezing 1.0.82 and opening 1.0.83 (the durable workflow intake; design
+ * docs/proposals/workflow-durable-intake.md section 8; owner decision
+ * 2026-11-08T15:30Z, pse/decision/always-on-scope-20261108T1530).
  *
- * 1.0.83 adds yields for owner-tagged sessions: a capacity request before
- * each turn and before a set-workspace check, a capped destroy, and a capped
- * workspace check. It also changes the busy policy for sessions that ask for
- * the fast one. So 1.0.82 is frozen, and in-flight 1.0.82 sessions keep
- * replaying on the frozen copy.
+ * The intake changes the session orchestration's yields, so 1.0.82 is frozen
+ * in orchestration_1_0_82/ (the live code of v0.8.10 with only its version
+ * literal) and in-flight 1.0.82 sessions keep replaying on it. The registry
+ * registers it, and a later version (orchestration/) is the latest version: new
+ * starts and every continue-as-new target it, the frozen copy's included.
+ * 1.0.83 was frozen in turn (orchestration-freeze-1-0-83.test.mjs) when 1.0.84
+ * added owner routing; the frozen 1.0.82 copy keeps 1.0.82's routing and busy
+ * policy.
  *
  * Run: node --test test/unit/orchestration-freeze-1-0-82.test.mjs
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { DURABLE_SESSION_ORCHESTRATION_REGISTRY } from "../../dist/orchestration-registry.js";
+import { DURABLE_SESSION_LATEST_VERSION, DURABLE_SESSION_ORCHESTRATION_REGISTRY } from "../../dist/orchestration-registry.js";
 
-const read = name => readFileSync(new URL(`../../src/${name}`, import.meta.url), "utf8").replace(/\r\n/g, "\n");
+const SRC = new URL("../../src/", import.meta.url);
+const read = name => readFileSync(new URL(name, SRC), "utf8").replace(/\r\n/g, "\n");
+const tsFiles = dir => readdirSync(new URL(`${dir}/`, SRC)).filter(name => name.endsWith(".ts")).sort();
 
-test("registry freezes 1.0.82 and activates a separate 1.0.83 handler", () => {
-    assert.equal(DURABLE_SESSION_ORCHESTRATION_REGISTRY.find(r => r.version === "1.0.82").handler.name, "durableSessionOrchestration_1_0_82");
-    assert.equal(DURABLE_SESSION_ORCHESTRATION_REGISTRY.at(-1).version, "1.0.83");
-    assert.equal(DURABLE_SESSION_ORCHESTRATION_REGISTRY.at(-1).handler.name, "durableSessionOrchestration_1_0_83");
-    assert.match(read("orchestration-registry.ts"), /from "\.\/orchestration_1_0_82\/index\.js"/);
-    assert.match(read("orchestration_1_0_82/runtime.ts"), /CURRENT_ORCHESTRATION_VERSION = "1\.0\.82"/);
-    assert.match(read("orchestration_1_0_82/index.ts"), /latestVersion: DURABLE_SESSION_LATEST_VERSION/);
+/** Every .ts file under src, as paths relative to src. */
+function allSourceFiles(dir = "") {
+    const out = [];
+    for (const name of readdirSync(new URL(dir || ".", SRC))) {
+        const path = dir ? `${dir}/${name}` : name;
+        if (statSync(new URL(path, SRC)).isDirectory()) out.push(...allSourceFiles(path));
+        else if (name.endsWith(".ts")) out.push(path);
+    }
+    return out;
+}
+
+/** The module specifiers a source file imports: import/export ... from, a closing "} from", and import("...") types. */
+function importsOf(text) {
+    return [...text.matchAll(/^(?:import|export)\b[^\n]*?\sfrom\s+"([^"]+)"|^\}\s+from\s+"([^"]+)"|\bimport\("([^"]+)"\)/gm)]
+        .map(match => match[1] ?? match[2] ?? match[3]);
+}
+
+const LIVE_VERSION_LINE = "export const CURRENT_ORCHESTRATION_VERSION = DURABLE_SESSION_LATEST_VERSION;";
+const FROZEN_VERSION_LINE = 'export const CURRENT_ORCHESTRATION_VERSION = "1.0.82";';
+// The latest version's handler; orchestration-freeze-1-0-83.test.mjs pins the version itself.
+const LATEST_HANDLER = `durableSessionOrchestration_${DURABLE_SESSION_LATEST_VERSION.replaceAll(".", "_")}`;
+
+function versionNumbers(version) {
+    assert.match(version, /^\d+\.\d+\.\d+$/);
+    return version.split(".").map(Number);
+}
+
+function compareVersions(a, b) {
+    const [x, y] = [versionNumbers(a), versionNumbers(b)];
+    for (let index = 0; index < 3; index += 1) if (x[index] !== y[index]) return x[index] - y[index];
+    return 0;
+}
+
+test("the registry freezes 1.0.82 on its copy and registers a later version, from the live tree, as the latest version", () => {
+    assert.ok(compareVersions(DURABLE_SESSION_LATEST_VERSION, "1.0.82") > 0);
+    const frozen = DURABLE_SESSION_ORCHESTRATION_REGISTRY.find(entry => entry.version === "1.0.82");
+    assert.equal(frozen.handler.name, "durableSessionOrchestration_1_0_82");
+    const latest = DURABLE_SESSION_ORCHESTRATION_REGISTRY.at(-1);
+    assert.deepEqual([latest.version, latest.handler.name], [DURABLE_SESSION_LATEST_VERSION, LATEST_HANDLER]);
+    assert.equal(DURABLE_SESSION_ORCHESTRATION_REGISTRY.filter(entry => entry.version === "1.0.82").length, 1);
+    const registry = read("orchestration-registry.ts");
+    assert.match(registry, /import \{ durableSessionOrchestration_1_0_82 \} from "\.\/orchestration_1_0_82\/index\.js";/);
+    assert.match(registry, new RegExp(`import \\{ ${LATEST_HANDLER} \\} from "\\.\\/orchestration\\/index\\.js";`));
+    assert.match(registry, new RegExp(`\\{ version: DURABLE_SESSION_LATEST_VERSION, handler: ${LATEST_HANDLER} \\}`));
+    assert.ok(read("orchestration-version.ts").includes(`export const DURABLE_SESSION_LATEST_VERSION = "${DURABLE_SESSION_LATEST_VERSION}";`));
+});
+
+test("the latest version is at or above every registered version", () => {
+    for (const entry of DURABLE_SESSION_ORCHESTRATION_REGISTRY) {
+        assert.ok(compareVersions(DURABLE_SESSION_LATEST_VERSION, entry.version) >= 0, `${entry.version} is above the latest ${DURABLE_SESSION_LATEST_VERSION}`);
+    }
+});
+
+test("the live tree names its version as the latest, never as a literal", () => {
+    assert.equal(read("orchestration/runtime.ts").split(LIVE_VERSION_LINE).length, 2, "the live version line appears once");
+    assert.ok(!read("orchestration/runtime.ts").includes(FROZEN_VERSION_LINE));
+});
+
+test("frozen 1.0.82 names its version as a literal and continues as new to the live latest", () => {
+    assert.match(read("orchestration_1_0_82/runtime.ts"), /^export const CURRENT_ORCHESTRATION_VERSION = "1\.0\.82";$/m);
+    const index = read("orchestration_1_0_82/index.ts");
+    assert.match(index, /latestVersion: DURABLE_SESSION_LATEST_VERSION/);
+    assert.match(index, /export function\* durableSessionOrchestration_1_0_82\(/);
 });
 
 const frozenHashes = {
@@ -36,11 +99,44 @@ const frozenHashes = {
     "turn.ts": "9c11110bc861eea2109da120becaf4a58256bb761b811a204d2367ad23a5dbd6",
     "utils.ts": "4d1cbe7be647e10f728e2c6e29cfea68ec92181e934924c90f7da62114b577e7",
 };
+
+test("frozen 1.0.82 has exactly its files", () => {
+    assert.deepEqual(tsFiles("orchestration_1_0_82"), Object.keys(frozenHashes).sort());
+});
+
 for (const [name, hash] of Object.entries(frozenHashes)) {
     test(`frozen 1.0.82 ${name} remains unchanged`, () => {
         assert.equal(createHash("sha256").update(read(`orchestration_1_0_82/${name}`)).digest("hex"), hash);
     });
 }
+
+/** The modules the frozen copy imports: shared ones and its own files, never the live orchestration or another version. */
+const frozenImports = [
+    "../child-notifications.js", "../cron-at.js", "../message-sender.js", "../orchestration-version.js", "../prompt-system-context.js",
+    "../provider-budgets.js", "../session-list-timestamps.js", "../session-proxy.js", "../turn-control-contract.js", "../types.js",
+    "../wait-affinity.js", "../workspace-check.js",
+    "./agents.js", "./lifecycle.js", "./queue.js", "./runtime.js", "./state.js", "./turn.js", "./utils.js",
+];
+
+test("frozen 1.0.82 imports only shared modules and its own files", () => {
+    const seen = new Set();
+    for (const name of tsFiles("orchestration_1_0_82")) {
+        for (const specifier of importsOf(read(`orchestration_1_0_82/${name}`))) {
+            assert.ok(frozenImports.includes(specifier), `${name} imports ${specifier}`);
+            seen.add(specifier);
+        }
+    }
+    assert.deepEqual([...seen].sort(), [...frozenImports].sort());
+});
+
+test("only the registry imports the frozen 1.0.82 copy", () => {
+    for (const path of allSourceFiles()) {
+        if (path.startsWith("orchestration_1_0_82/")) continue;
+        for (const specifier of importsOf(read(path))) {
+            if (specifier.includes("orchestration_1_0_82")) assert.equal(path, "orchestration-registry.ts", `${path} imports ${specifier}`);
+        }
+    }
+});
 
 test("frozen 1.0.82 keeps the 1.0.82 routing and busy policy", () => {
     for (const name of Object.keys(frozenHashes)) {

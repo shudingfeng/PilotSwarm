@@ -161,6 +161,24 @@ export type PersonalCredentialResolver = (request: PersonalCredentialRequest) =>
 
 export type PersonalCredentialOutcome = "refused" | "busy" | "unavailable";
 
+/**
+ * Whether a message reads as an authentication failure to the session
+ * orchestration (orchestration/utils.ts isAuthFailureError), which then ends
+ * the turn instead of retrying it. A copy: only the orchestration registry
+ * imports the orchestration tree, whose versions are frozen whole. A unit
+ * test keeps the two the same.
+ */
+export function readsAsAuthFailure(message?: string): boolean {
+    const text = String(message || "");
+    return (
+        /\bNo authentication info available\b/i.test(text)
+        || /\bBad credentials\b/i.test(text)
+        || /\bAuthentication failed\b/i.test(text)
+        || /\bunauthorized\b/i.test(text)
+        || /\b401\b/.test(text)
+    );
+}
+
 /** A turn's credential could not be used. `outcome` says how the turn ends. */
 export class PersonalCredentialError extends Error {
     readonly outcome: PersonalCredentialOutcome;

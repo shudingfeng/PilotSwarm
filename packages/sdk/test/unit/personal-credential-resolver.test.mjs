@@ -22,11 +22,12 @@ import { join } from "node:path";
 import { SessionManager } from "../../dist/session-manager.js";
 import { ModelProviderRegistry } from "../../dist/model-providers.js";
 import { buildRuntimeRegistry } from "../../dist/provider-catalog.js";
-import { PersonalCredentialError } from "../../dist/personal-secret-store.js";
+import { PersonalCredentialError, readsAsAuthFailure } from "../../dist/personal-secret-store.js";
 import { personalCredentialTurnResult } from "../../dist/session-proxy.js";
 import { isAuthFailureError } from "../../dist/orchestration/utils.js";
 import { createInitialState, deriveOptions } from "../../dist/orchestration/state.js";
 import { handleTurnResult } from "../../dist/orchestration/turn.js";
+import { DURABLE_SESSION_LATEST_VERSION } from "../../dist/orchestration-version.js";
 
 const WORKER_TOKEN = "worker-default-github-token";
 const LEGACY_KEY = "legacy-user-key";
@@ -163,7 +164,8 @@ function orchestrate(result) {
     const runtime = {
         ctx,
         input,
-        versions: { currentVersion: "test", latestVersion: "test" },
+        // The live tree's own version: since 1.0.83 a continue-as-new refuses a target that cannot read its state.
+        versions: { currentVersion: DURABLE_SESSION_LATEST_VERSION, latestVersion: DURABLE_SESSION_LATEST_VERSION },
         manager: new Proxy({}, { get: (_target, name) => effect(`manager.${String(name)}`) }),
         session: new Proxy({}, { get: (_target, name) => effect(`session.${String(name)}`) }),
         options: deriveOptions(input),
@@ -243,6 +245,13 @@ test("a busy answer holds the session on the busy policy, without re-authenticat
     assert.equal(state.activeTimer?.originalDurationMs, 900_000, "the resolver's retry-after sets the wait");
     assert.equal(state.budgetStash?.[0]?.prompt, "Please check the build.", "the prompt is held for the retry");
     assert.equal(statuses.at(-1)?.workspaceCode, "WORKSPACE_BUSY");
+});
+
+test("the session manager reads an authentication failure as the orchestration does", () => {
+    for (const message of ["No authentication info available", "Bad credentials", "Authentication failed: refused", "request unauthorized",
+        "HTTP 401", "HTTP 4010", "connect ECONNREFUSED 10.0.0.5:443", "", undefined]) {
+        assert.equal(readsAsAuthFailure(message), isAuthFailureError(message), String(message));
+    }
 });
 
 test("without a resolver, the turn fails with an ordinary error and uses no other key", async (t) => {

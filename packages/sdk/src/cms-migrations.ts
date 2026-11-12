@@ -18,7 +18,9 @@ import { motdMigration } from "./migrations/motd-0084.js";
 import { motdHistoryMigration } from "./migrations/motd-history-0085.js";
 import { motdSchedulingMigration } from "./migrations/motd-scheduling-0086.js";
 import { motdSupersessionMigration } from "./migrations/motd-supersession-0087.js";
-import { dispatcherDelegationMigration } from "./migrations/dispatcher-delegation-0088.js";
+import { workflowMigration } from "./migrations/workflow-0088.js";
+import { workflowSessionNamesMigration } from "./migrations/workflow-session-names-0089.js";
+import { dispatcherDelegationMigration } from "./migrations/dispatcher-delegation-0090.js";
 
 /**
  * Return the ordered list of CMS migrations for a given schema.
@@ -417,7 +419,9 @@ export function CMS_MIGRATIONS(schema: string): MigrationEntry[] {
         { version: "0085", name: "motd_history", sql: motdHistoryMigration(schema) },
         { version: "0086", name: "motd_scheduling", sql: motdSchedulingMigration(schema) },
         { version: "0087", name: "motd_supersession", sql: motdSupersessionMigration(schema) },
-        { version: "0088", name: "dispatcher_delegation", sql: dispatcherDelegationMigration(schema) },
+        { version: "0088", name: "workflow", steps: workflowMigration(schema) },
+        { version: "0089", name: "workflow_session_names", sql: workflowSessionNamesMigration(schema) },
+        { version: "0090", name: "dispatcher_delegation", sql: dispatcherDelegationMigration(schema) },
     ];
 }
 

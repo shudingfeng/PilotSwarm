@@ -337,7 +337,14 @@ test("rendered: 3 replicas without the pool, 0 with the pool alone, 2 with the h
     assert.equal(deployment.spec.replicas, replicas, JSON.stringify(extra));
     assert.equal(Boolean(objects["SecretProviderClass/copilot-worker-secrets"]), !coordinationHost);
     assert.equal(Boolean(objects["PodDisruptionBudget/copilot-runtime-worker"]), coordinationHost);
-    assert.equal(Boolean(objects["NetworkPolicy/copilot-runtime-worker-egress"]), coordinationHost);
+    // The base's worker egress policy, whose rules the host's replace: one policy for the worker's pods either way.
+    const policies = Object.values(objects).filter((o) => o.kind === "NetworkPolicy" && matches(o.spec.podSelector.matchLabels, WORKER_LABELS));
+    assert.deepEqual(policies.map((o) => o.metadata.name), ["copilot-runtime-worker-egress"]);
+    const opens = (port) => policies[0].spec.egress.some((rule) => (rule.ports ?? []).some((p) => p.port === port));
+    assert.equal(opens(COORDINATION_PORT), coordinationHost, "only the host's rules open the controller's port");
+    assert.ok(policies[0].spec.egress.flatMap((rule) => rule.to ?? [])
+      .every((to) => to.ipBlock?.cidr !== "0.0.0.0/0" || to.ipBlock.except?.includes("169.254.169.254/32")),
+      "no rule reaches the instance metadata address");
   }
 });
 
@@ -412,6 +419,9 @@ test("the component deletes the secret store, its volume and the secretRef, and 
 
 test("the egress NetworkPolicy: DNS to the cluster's DNS pods, 3005 to the controller's pods, Blob, and 443 and 5432 outside the VNet only", () => {
   const policy = yamlFile(join(COMPONENT, "network-policy.yaml"));
+  // A patch of the base's worker egress policy that replaces its spec (policies add up).
+  assert.equal(policy.metadata.name, yamlFile(join(AZURE, "gitops/worker/base/network-policy.yaml")).metadata.name);
+  assert.equal(policy.spec.$patch, "replace");
   assert.deepEqual(policy.spec.podSelector, { matchLabels: WORKER_LABELS });
   assert.deepEqual(policy.spec.policyTypes, ["Egress"]);
   assert.deepEqual(policy.spec.egress, [
@@ -422,7 +432,7 @@ test("the egress NetworkPolicy: DNS to the cluster's DNS pods, 3005 to the contr
     { to: [{ podSelector: { matchLabels: CONTROLLER_LABELS } }], ports: [{ protocol: "TCP", port: COORDINATION_PORT }] },
     { to: [{ ipBlock: { cidr: "10.20.33.4/32" } }], ports: [{ protocol: "TCP", port: 443 }] },
     {
-      to: [{ ipBlock: { cidr: "0.0.0.0/0", except: ["10.20.0.0/16", "169.254.169.254/32"] } }],
+      to: [{ ipBlock: { cidr: "0.0.0.0/0", except: ["10.20.0.0/16", "169.254.169.254/32", "168.63.129.16/32"] } }],
       ports: [{ protocol: "TCP", port: 443 }, { protocol: "TCP", port: 5432 }],
     },
   ]);

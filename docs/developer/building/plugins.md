@@ -229,8 +229,8 @@ pilotswarm (root, system: true, id: "pilotswarm")
 By default a system agent's session can use the Copilot CLI's built-in tools,
 such as the shell and file tools, as well as its PilotSwarm tools. With
 `PILOTSWARM_LIMIT_SYSTEM_SESSION_TOOLS=1` on the workers, system sessions and
-the sessions they spawn keep only their PilotSwarm tools and the CLI's `skill`
-tool, and their Copilot sessions are created and resumed with
+the sessions they spawn keep only their PilotSwarm tools, without the Workflow
+tools, and the CLI's `skill` tool, and their Copilot sessions are created and resumed with
 `enableSessionStore: false` and `skipEmbeddingRetrieval: true`. Keep the
 setting off if your system agents need other tools, such as an MCP server's.
 See [Configuration](../reference/configuration.md#worker-runtime-tuning).

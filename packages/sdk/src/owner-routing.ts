@@ -3,11 +3,17 @@
  * the capacity requests that tell a deployment an owner needs a worker.
  *
  * The client records `ownerTag` in the orchestration input of a top-level
- * user session (`PilotSwarmClientOptions.ownerRouting`). Orchestration 1.0.83
+ * user session (`PilotSwarmClientOptions.ownerRouting`). Orchestration 1.0.84
  * then tags every session-scoped activity with it, and a worker with the
  * same `PilotSwarmWorkerOptions.ownerTag` runs them. Before each turn the
  * orchestration asks for capacity (`requestOwnerCapacity`); a worker with a
  * capacity requester answers.
+ *
+ * A Workflow carries no owner tag: its activities carry the workflow-request
+ * tag, its agent steps are created inside an activity, outside any turn, and
+ * its scripts' tool sessions attach the root's workspace on whichever worker
+ * runs them. So a Workflow is not started or tested in an owner-routed tree,
+ * and no new root session is created from one.
  */
 import { SYSTEM_USER_PRINCIPAL } from "./cms.js";
 import type { OwnerCapacityRequest, OwnerCapacityRequester } from "./types.js";
@@ -55,6 +61,62 @@ export function ownerRoutingTagForRow(row: {
     if (provider === SYSTEM_USER_PRINCIPAL.provider && subject === SYSTEM_USER_PRINCIPAL.subject) return undefined;
     const tag = `${OWNER_TAG_PREFIX}${subject}`;
     return isOwnerRoutingTag(tag) ? tag : undefined;
+}
+
+/** The code of a Workflow start or test refused in an owner-routed tree. */
+export const WORKFLOW_OWNER_ROUTED = "WORKFLOW_OWNER_ROUTED";
+
+/** Its words. */
+export const WORKFLOW_OWNER_ROUTED_TEXT = "This session tree runs on its owner's workers (owner routing), and a Workflow would run "
+    + "off them, without the owner's drive or credentials: a Workflow is not started or tested here. Nothing was started.";
+
+/** The refusal as the workflow tools answer it: their JSON refusal with its code. */
+export function workflowOwnerRoutedRefusal(): string {
+    return JSON.stringify({ ok: false, error: { code: WORKFLOW_OWNER_ROUTED, message: WORKFLOW_OWNER_ROUTED_TEXT } });
+}
+
+/** create_agent_session's refusal in an owner-routed tree. */
+export const NEW_ROOT_OWNER_ROUTED_TEXT = "[SYSTEM: create_agent_session refused — this session tree runs on its owner's workers "
+    + "(owner routing), and a new root session would hold no drive there. Use spawn_agent for a sub-agent of this session; "
+    + "the deployment's dispatcher creates any other root session. Nothing was created.]";
+
+/**
+ * The owner tag a session's turns carry, as far as the catalog tells: the tag
+ * saved with its creation config (a session created during a tagged turn, or
+ * created with one) or its root's, else, with owner routing on, the tag its
+ * root takes when the client starts it (client.ts, _routingForStart). A root
+ * started before owner routing was on has no tag but counts as tagged here.
+ */
+export async function ownerRoutedTreeTag(
+    catalog: {
+        getSession(sessionId: string): Promise<{
+            sessionId?: string;
+            parentSessionId?: string | null;
+            rootSessionId?: string | null;
+            isSystem?: boolean | null;
+            owner?: { provider?: string | null; subject?: string | null } | null;
+        } | null | undefined>;
+        getSessionCreationConfig?(sessionId: string): Promise<Record<string, unknown> | null | undefined>;
+    },
+    sessionId: string,
+    ownerRouting: boolean,
+): Promise<string | undefined> {
+    const savedTag = async (id: string): Promise<string | undefined> => {
+        const saved = catalog.getSessionCreationConfig ? await catalog.getSessionCreationConfig(id) : null;
+        return isOwnerRoutingTag(saved?.ownerTag) ? saved!.ownerTag as string : undefined;
+    };
+    const row = await catalog.getSession(sessionId);
+    if (!row) return undefined;
+    const own = await savedTag(sessionId);
+    if (own) return own;
+    const rootId = row.rootSessionId && row.rootSessionId !== sessionId ? row.rootSessionId : null;
+    const root = rootId ? await catalog.getSession(rootId) : row;
+    if (!root) return undefined;
+    if (rootId) {
+        const rootTag = await savedTag(rootId);
+        if (rootTag) return rootTag;
+    }
+    return ownerRouting && !root.parentSessionId ? ownerRoutingTagForRow(root) : undefined;
 }
 
 /** A capacity answer as the orchestration acts on it. */

@@ -16,6 +16,7 @@ multi-hour multi-agent workflows.
 
 - [Terminal UI track](./user-guide/tui.md) · [Browser portal track](./user-guide/portal.md)
 - [Keybindings](./user-guide/keybindings.md) — TUI controls and slash commands
+- [Workflows](./user-guide/workflows.md) — hand a fixed procedure to the server and watch it as a graph: the portal walkthrough, the SDK, HTTP API, MCP server and terminal, and the agent tools
 - [Working in folders and repos](./user-guide/workspaces.md) — session workspaces: repo clones, your own folder, the shared folder
 
 ## 3. [Architecture](./architecture/README.md)
@@ -73,4 +74,5 @@ Building **on** PilotSwarm, deploying it, and contributing **to** it.
 - [Queued prompts behind timer items](./proposals/queued-prompts-timer-stall.md) — approved: queued user prompts never wait for a timer, one turn takes the whole backlog, schedules keep their time, and the session queue never drops work silently (issue \#192).
 - [Windows worker pool](./proposals/windows-worker-pool.md) — proposed: optional Windows worker VMs that each serve one owner, with a managed workspace drive per session tree, a disk controller and an Azure deployment profile; everything is off by default and lands as a series of small changes.
 - [No tools for the title session by default](./proposals/title-session-without-tools.md) — proposed: the session that writes titles reads other sessions' messages, so its model gets no tool and every permission request is refused unless a deployment opts out.
-- [Cap the destroy wait for every session](./proposals/destroy-wait-cap.md) — proposed: complete, cancel and delete stop waiting without a limit for the session's destroy, which a dead, busy or hung worker can hold back, as the owner-tagged sessions of orchestration `1.0.83` already do.
+- [Cap the destroy wait for every session](./proposals/destroy-wait-cap.md) — proposed: complete, cancel and delete stop waiting without a limit for the session's destroy, which a dead, busy or hung worker can hold back, as the owner-tagged sessions of orchestration `1.0.84` already do.
+- [A dynamic-workflow kind for durable Workflows](./proposals/dynamic-workflow-kind.md) — proposal, not committed work: a possible future plan to run Copilot dynamic workflows (`.mjs`) as a second kind of durable Workflow, beside today's YAML state machines.

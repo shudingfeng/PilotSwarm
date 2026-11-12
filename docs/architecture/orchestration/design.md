@@ -11,10 +11,18 @@ It does **not** own tool implementations or Copilot SDK session state. Those
 live in worker activities and the session manager.
 
 Primary source: [`packages/sdk/src/orchestration/`](../../../packages/sdk/src/orchestration).
-The current latest version is `1.0.83`. Frozen prior versions live as siblings
-(single files `packages/sdk/src/orchestration_1_0_47.ts` … `_1_0_51.ts`, then
-directories `orchestration_1_0_52/` … `orchestration_1_0_82/`) and run
-unchanged for any in-flight execution that started against them.
+The current latest version is `1.0.84`: 1.0.83 plus owner routing (see
+[Owner routing and capacity requests](#owner-routing-and-capacity-requests-1084)).
+1.0.83 is 1.0.82 plus the durable workflow
+intake (design `docs/proposals/workflow-durable-intake.md`; its turns are
+workflow request turns). The intake ships switched off: no worker sets the
+`workflowIntake` capability, so no send creates a durable exchange, and a
+Workflow's messages reach a session through the session queue as before. Frozen prior versions live as siblings (single files
+`packages/sdk/src/orchestration_1_0_47.ts` … `_1_0_51.ts`, then directories
+`orchestration_1_0_52/` … `orchestration_1_0_83/`) and run unchanged for any
+in-flight execution that started against them. The sections below describe
+1.0.82's queue and turn behaviour, which 1.0.83 and 1.0.84 keep; the intake's
+additions are in the intake design.
 
 In 1.0.81, Stop and Steer are handled inside the worker's turn activity through
 the session catalog. The orchestration yields that activity directly; it no
@@ -26,14 +34,14 @@ queued prompts and answers at once whatever timer is armed, and `decide` merges
 every queued prompt past timer items into one turn. The KV FIFO compacts
 instead of dropping items. Version 1.0.81 and older keep the old queue.
 
-In 1.0.83, a session can be bound to its owner's workers (owner routing), and
+In 1.0.84, a session can be bound to its owner's workers (owner routing), and
 a session can use a faster policy for `WORKSPACE_BUSY` refusals. Both come from
 two optional orchestration inputs, `ownerTag` and `workspaceBusyFastRelease`,
 which the client sets only when it is configured to (see
-[§10](#owner-routing-and-capacity-requests-1083)). Without them, 1.0.83
-schedules exactly what 1.0.82 schedules, with one fix: a session without a
+[§10](#owner-routing-and-capacity-requests-1084)). Without them, 1.0.84
+schedules exactly what 1.0.83 schedules, with one fix: a session without a
 workspace that a workspace-gate wait held starts the busy schedule again after
-a turn runs (see [handleTurnResult](#handleturnresult)). Version 1.0.82 and
+a turn runs (see [handleTurnResult](#handleturnresult)). Version 1.0.83 and
 older ignore both inputs.
 
 ---
@@ -93,9 +101,9 @@ interface DurableSessionRuntime {
 
 `options` holds per-execution thresholds derived from input
 (`idleTimeout`, `inputGracePeriod`, `isSystem`, `parentSessionId`,
-`nestingLevel`, `baseSystemMessage`, and in 1.0.83 `ownerTag` and
+`nestingLevel`, `baseSystemMessage`, and in 1.0.84 `ownerTag` and
 `workspaceBusyFastRelease`, each only when the input sets it). These do not
-change inside an execution, and continue-as-new carries the two 1.0.83 fields
+change inside an execution, and continue-as-new carries the two 1.0.84 fields
 when set. Legacy `dehydrateThreshold` and `checkpointInterval` inputs are
 accepted but ignored.
 
@@ -426,7 +434,7 @@ sequenceDiagram
     Decide->>Turn: prompt, bootstrap?, requiredTool?, clientMessageIds?
     Turn->>Life: wrapWithResumeContext for legacy hydration input
     Turn->>Turn: normalize prompt and trailing system context
-    opt ownerTag set (1.0.83)
+    opt ownerTag set (1.0.84)
         Turn->>Manager: requestOwnerCapacity: deny ends the turn, busy holds the prompt
     end
     Turn->>Session: hydrate (with retry) if needed
@@ -490,7 +498,7 @@ The big switch on `result.type`. Two pre-passes:
 
 A result that gets past the gates ends a workspace hold. For a session with a
 workspace, the status returns to `ready`, `workspaceRetry` is cleared and
-`session.workspace_available` is recorded. In 1.0.83, a session without a
+`session.workspace_available` is recorded. In 1.0.84, a session without a
 workspace can also be held on the workspace timer: by a capacity request's
 `busy` answer, or by any other turn result with the workspace gate. Its status
 and `workspaceRetry` are cleared without an event, so the next hold starts the
@@ -575,12 +583,41 @@ existing continue-as-new mechanism. Disabling Steer is not an orchestration
 rollback. Retain V4-capable workers until 1.0.81 sessions drain, unless a
 separately authorized coordinated rollback restores both code and durable state.
 
-For 1.0.83, deploy the workers before turning on owner routing in any client.
+1.0.83 (the durable workflow intake, released with the Workflow work and
+switched off: no worker sets the `workflowIntake` capability) keeps the same
+version pattern. 1.0.82 is frozen in `orchestration_1_0_82/` and
+stays registered: in-flight 1.0.82 histories replay on it, and each such
+session moves to 1.0.83 at its next continue-as-new, which carries its queued
+prompts (the KV FIFO), its pending child digest, its rehydration notice and
+its model.
+
+Its deployment is not rolling (owner decision 2026-11-08): stop every worker,
+deploy, then start them. Duroxide does not route orchestration items by
+version. A worker of the previous image that fetches a 1.0.83 (or Workflow
+controller) item has no such version registered and abandons it with
+duroxide's unregistered-version backoff; after its maximum attempts (10 by
+default) duroxide marks the item poison and the session fails. Nothing makes
+a worker of the new image win that race, so no old worker may run once a
+1.0.83 item can exist: that is, once a worker, portal, MCP server or terminal
+UI of the new release has started. 1.0.83's turn and intake activities carry
+the workflow-request capability tag, which the previous image does not
+declare, so an old worker never fetches those activities. The commands are in
+`deploy/scripts/README.md` ("Upgrading to this release: stop, deploy, start").
+Run one image per database and leave no old workers in another namespace.
+
+1.0.84 (owner routing) keeps the same version pattern and the same stop,
+deploy, start upgrade. 1.0.83 is frozen in `orchestration_1_0_83/`, as v0.8.11
+released it but for its version literal, and stays registered beside 1.0.82:
+in-flight histories of either replay on their frozen copy, and each such
+session moves to 1.0.84 at its next continue-as-new, with everything 1.0.83
+carries, its intake state included.
+
+For 1.0.84, deploy the workers before turning on owner routing in any client.
 An owner-tagged activity runs only on a worker that declares the owner's tag,
 and a capacity request only on a worker with a capacity requester; until such
 a worker exists, the activity waits in the queue. A session started on 1.0.82
-keeps its routing: 1.0.82 does not carry `ownerTag` or
-`workspaceBusyFastRelease` across continue-as-new, so after its move to 1.0.83
+or 1.0.83 keeps its routing: neither carries `ownerTag` or
+`workspaceBusyFastRelease` across continue-as-new, so after its move to 1.0.84
 the session stays untagged.
 
 ### processTimer
@@ -693,7 +730,7 @@ For `delete`, `cancelSession` additionally enumerates descendants via
 `getDescendantSessionIds` and calls `deleteSession` on each before deleting
 self.
 
-In 1.0.83, the `destroySession` of an owner-tagged session (in
+In 1.0.84, the `destroySession` of an owner-tagged session (in
 `completeSession`, `cancelSession` and `failPendingShutdown`) is raced against
 `WORKSPACE_RELEASE_CAP_MS` (10 s), as `releaseAffinity` races
 `releaseWorkspace`. When no worker of the owner runs, the timer wins and the
@@ -755,7 +792,7 @@ worker's preamble; they do not ask the orchestration for a hydration probe.
 | Connection-closed error during retry | `"error"` |
 | Connection-closed retries exhausted | `"lossy_handoff"` |
 | Two or more consecutive workspace failures on one worker | `"workspace_unavailable"` |
-| The first `WORKSPACE_BUSY` refusal under the fast busy policy (1.0.83) | `"workspace_unavailable"` |
+| The first `WORKSPACE_BUSY` refusal under the fast busy policy (1.0.84) | `"workspace_unavailable"` |
 
 Before rotating the recorded affinity GUID, workspace sessions release their
 workspace through the worker activity, bounded by a durable cap. A cleared
@@ -781,18 +818,19 @@ storeless session cannot hand off: it writes the give-up error with
 The rotation uses `yield ctx.newGuid()` and rebuilds `runtime.session` with the
 turn-control routing contract. Workspace releases retain their capability tag.
 
-### Owner routing and capacity requests (1.0.83)
+### Owner routing and capacity requests (1.0.84)
 
 A client with owner routing on (`ownerRouting`, or `PILOTSWARM_OWNER_ROUTING=1`)
 starts a top-level user session with `ownerTag: "owner.<subject>"`, from the
 owner on the session's row. A system session, or a session without an owner,
 gets no tag. A session created during a turn (a `spawn_agent` child, a
-`create_agent_session` session, a regeneration distiller) takes the tag and
-the busy policy of that turn, from the turn's input or from the orchestration's
-`spawnChildSession` input; a system child gets neither. Both fields ride every
-continue-as-new.
+regeneration distiller) takes the tag and the busy policy of that turn, from
+the turn's input or from the orchestration's `spawnChildSession` input; a
+system child gets neither. Both fields ride every continue-as-new. In a tagged
+tree `create_agent_session` is refused, and no Workflow is started or tested
+(see [Owner routing and durable workflows](#owner-routing-and-durable-workflows-1084)).
 
-With a tag, every session-scoped activity (`runTurnV4`, `runTurnEpochV4`,
+With a tag, every session-scoped activity (`runTurnV5`, `runTurnEpochV5`,
 `hydrateSession`, `checkWorkspace`, `releaseWorkspace`, `destroySession`, and
 the rest of the session proxy) carries the owner tag instead of its capability
 tag, so only a worker started with that `ownerTag` runs it, also after an
@@ -843,11 +881,48 @@ runs. A deployment with owner-only workers therefore needs another worker for
 every turn of every session. That worker resolves agents and checks the
 creation policy, so give it the same plugins, agents and session policy as the
 owners' workers. A user session's sub-agents are still created inside its turn
-(`spawn_agent`, `create_agent_session`), on its owner's worker, with the
-turn's tag. A complete, cancel or delete still ends at once while the owner's
+(`spawn_agent`), on its owner's worker, with the turn's tag. A complete, cancel or delete still ends at once while the owner's
 worker holds the session: that worker runs the destroy.
 
-### Fast busy policy (1.0.83)
+### Owner routing and durable workflows (1.0.84)
+
+1.0.84 keeps 1.0.83's `workflow-intake-v1` contract and puts the owner tag on
+top of it. Duroxide gives an activity one tag:
+
+| Activity | Untagged session | Owner-tagged session |
+|---|---|---|
+| A turn (`runTurnV5`, `runTurnEpochV5`), with or without an intake invocation | `pilotswarm.workflow-request.v1` | the owner tag |
+| The intake's writes (claim, settle, bind, end) and a failed Workflow agent turn's report | `pilotswarm.workflow-request.v1` | `pilotswarm.workflow-request.v1` |
+
+The owner tag stands for the workflow-request capability, as it does for turn
+control and workspaces: every worker of this release registers the V5 turn
+names. So an owner's intake turns, like its other turns, run only on its
+owner's workers. The intake's writes are catalog writes that run no session,
+like the manager activities, so they keep their tag.
+
+Every Workflow activity, the script runner and the agent-step spawner
+included, carries the workflow-request tag. An owner-only worker declares its
+owner tag alone, never that tag, so it runs no Workflow activity and no intake
+write. A Workflow started inside an owner-routed tree would escape the owner's
+tag: its agent steps are created inside an activity, outside any turn, and its
+scripts' tool sessions attach the root's workspace on whichever worker runs
+them. So in a tree whose turns carry an owner tag the worker refuses
+`spawn_workflow`, `workflow_definition` `start` and `test`, and
+`create_agent_session`, whose new root would hold no drive, and the
+management client refuses a person's start. `createSessionForWorkflow` takes
+no `onBehalfOfOwner`.
+
+A worker's default filter has four capability tags. `ownerTag` adds the owner
+tag, or a capacity requester the capacity tag: either makes five, Duroxide's
+`MAX_WORKER_TAGS`, which duroxide-node 0.2.4 does not check. A worker that
+has both, outside `ownerOnly`, refuses to start.
+
+A capacity request's `busy` answer ends the turn attempt before any turn ran,
+as a worker's gate refusal does: an intake invocation the attempt carried is
+noted not sent and parked for the gate, so the busy timer's attempt carries it.
+A `deny` parks it as a non-retryable failure.
+
+### Fast busy policy (1.0.84)
 
 A session started with `workspaceBusyFastRelease` (client option
 `workspaceBusyFastRelease`, or `PILOTSWARM_WORKSPACE_BUSY_FAST_RELEASE=1`)
@@ -939,8 +1014,9 @@ src/orchestration_1_0_53/     │ frozen — replay only (directory form)
 src/orchestration_1_0_54/     │
 src/orchestration_1_0_55/     │
 ...                          │
-src/orchestration_1_0_82/     ┘
-src/orchestration/            ← current latest (1.0.83)
+src/orchestration_1_0_82/     │
+src/orchestration_1_0_83/     ┘
+src/orchestration/            ← current latest (1.0.84: 1.0.83 plus owner routing; 1.0.83 is 1.0.82 plus the durable workflow intake)
 ```
 
 All registered versions are listed in

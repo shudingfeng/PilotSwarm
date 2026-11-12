@@ -1,9 +1,9 @@
 /**
- * Migration 0088 — each user's opt-in to the deployment's dispatcher, and its
+ * Migration 0090 — each user's opt-in to the deployment's dispatcher, and its
  * two stored procedures. Database only: no workers, no model.
  *
  * Why each block exists:
- *  - 0088 may change number before it merges, so it must only ADD objects: a
+ *  - 0090 may change number before it merges, so it must only ADD objects: a
  *    column with a constant default and two new procedures. The upgrade test
  *    compares every procedure and every row across the migration.
  *  - The flag has its own column because profile_settings is replaced
@@ -56,7 +56,7 @@ async function functionDefinitions(pool, schema) {
     return rows;
 }
 
-describe("dispatcher delegation in the CMS (migration 0088)", () => {
+describe("dispatcher delegation in the CMS (migration 0090)", () => {
     it("adds only a false-by-default column and two new procedures, changing no procedure and no row", async () => {
         await withCms(async ({ pool, schema, catalog }) => {
             await catalog.setUserRole(ALICE, "user");
@@ -69,7 +69,7 @@ describe("dispatcher delegation in the CMS (migration 0088)", () => {
             const users = (await pool.query(`SELECT * FROM "${schema}".users ORDER BY user_id`)).rows;
             const shares = (await pool.query(`SELECT * FROM "${schema}".session_shares ORDER BY session_id, user_id`)).rows;
             const records = (await pool.query(`SELECT * FROM "${schema}".schema_migrations ORDER BY version`)).rows;
-            expect(records.at(-1).version).toBe("0087");
+            expect(records.at(-1).version).toBe("0089");
 
             await catalog.initialize();
 
@@ -98,8 +98,8 @@ describe("dispatcher delegation in the CMS (migration 0088)", () => {
 
             const upgradedRecords = (await pool.query(`SELECT * FROM "${schema}".schema_migrations ORDER BY version`)).rows;
             expect(upgradedRecords.slice(0, -1)).toEqual(records);
-            expect(upgradedRecords.at(-1)).toMatchObject({ version: "0088", name: "dispatcher_delegation" });
-        }, "0087");
+            expect(upgradedRecords.at(-1)).toMatchObject({ version: "0090", name: "dispatcher_delegation" });
+        }, "0089");
     });
 
     it("reads false for anyone who never opted in, and stores exactly what the user sets", async () => {

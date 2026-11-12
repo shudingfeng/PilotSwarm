@@ -188,8 +188,8 @@ Key fields:
 | `inputGracePeriod` | number | Keep warm for user input |
 | `checkpointInterval` | number | Periodic checkpoint (-1 disables) |
 | `retryCount` | number | Activity failure retries (resets on success) |
-| `ownerTag` | string? | 1.0.83 owner routing: `owner.<subject>`; session-scoped activities go only to workers that declare it |
-| `workspaceBusyFastRelease` | boolean? | 1.0.83 fast busy policy for `WORKSPACE_BUSY` refusals |
+| `ownerTag` | string? | 1.0.84 owner routing: `owner.<subject>`; session-scoped activities go only to workers that declare it |
+| `workspaceBusyFastRelease` | boolean? | 1.0.84 fast busy policy for `WORKSPACE_BUSY` refusals |
 
 Related session-view fields exposed through `PilotSwarmSessionInfo`, `PilotSwarmSessionView`, and orchestration custom status now include:
 
@@ -239,16 +239,18 @@ These execute on the specific worker holding the session's in-memory state.
 | `destroySession` | sessionId | void | Free in-memory CopilotSession |
 | `checkpointSession` | sessionId | void | Upload to blob without destroying |
 
-**Owner routing (orchestration 1.0.83).** A session whose orchestration input
+**Owner routing (orchestration 1.0.84).** A session whose orchestration input
 has an `ownerTag` schedules every activity above with that tag instead of its
 capability tag, so only a worker started with the same `ownerTag` runs it.
-Each worker's filter is `defaultAnd` over the three capability tags, plus its
-owner tag and `pilotswarm.owner-capacity.v1` when set: at most five tags,
-Duroxide's limit. A worker started with `ownerOnly` has the filter
+Each worker's filter is `defaultAnd` over the four capability tags, plus its
+owner tag or, with a capacity requester, `pilotswarm.owner-capacity.v1`: five
+tags, Duroxide's limit. A worker with both refuses to start. In an owner-tagged
+tree the worker starts and tests no Workflow and `create_agent_session` makes
+no new root. A worker started with `ownerOnly` has the filter
 `{ tags: [ownerTag] }` and runs only these activities of its owner's sessions:
 none of the manager-scoped activities below, and none of Duroxide's untagged
 system activities behind `ctx.utcNow()` and `ctx.newGuid()`, so another
-worker must run those. See the [orchestration design](./orchestration/design.md#owner-routing-and-capacity-requests-1083).
+worker must run those. See the [orchestration design](./orchestration/design.md#owner-routing-and-capacity-requests-1084).
 
 **Turn control.** Next to the lock-bypassing abort primitive, each worker
 runs a `TurnControlHub`: one `LISTEN pilotswarm_turn_control` connection
@@ -284,7 +286,7 @@ These can run on any worker, except a worker started with `ownerOnly`.
 | `recordSessionEvent` | sessionId, events[] | void | Append CMS session events |
 | `getOrchestrationStats` | sessionId | stats | duroxide history size (CAN sizing) |
 | `getWorkerSessionPolicy` | {} | SessionPolicy | Creation-policy gate input |
-| `requestOwnerCapacity` | sessionId, ownerTag | `{ decision, code?, message?, retryAfterMs? }` | Orchestration 1.0.83: asks the worker's capacity requester before a tagged session's turn; tagged `pilotswarm.owner-capacity.v1`, so only a worker with a requester runs it; answers within about 15 s |
+| `requestOwnerCapacity` | sessionId, ownerTag | `{ decision, code?, message?, retryAfterMs? }` | Orchestration 1.0.84: asks the worker's capacity requester before a tagged session's turn; tagged `pilotswarm.owner-capacity.v1`, so only a worker with a requester runs it; answers within about 15 s |
 | `computeCronAtNextFire` | schedule | timestamp | Next wall-clock cron_at occurrence |
 | `loadKnowledgeIndex` | {} | index | Knowledge/skill retrieval index |
 
@@ -316,6 +318,22 @@ ManagedSession injects these tools into every `CopilotSession.send()` call. They
 | `complete_agent` | agent_id: string | **Aborts turn.** Returns `{ type: "complete_agent" }`. |
 | `cancel_agent` | agent_id: string | **Aborts turn.** Returns `{ type: "cancel_agent" }`. |
 | `delete_agent` | agent_id: string | **Aborts turn.** Returns `{ type: "delete_agent" }`. |
+
+### Workflow Tools
+
+A session with Workflows off has only `enable_workflows`; turning them on adds
+the others. Details: [the agent reference](../user-guide/workflows.md#a2-the-tools)
+and [Durable workflows](../developer/building/workflow-sessions.md).
+
+| Tool | Parameters | Behavior |
+|------|-----------|----------|
+| `enable_workflows` | — | **Ends turn.** Turns Workflows on for the session; the next turn starts at once with the Workflow tools. |
+| `workflow_definition` | operation: list \| read \| save \| start \| test \| card, name?, definition_id?, expected_revision?, yaml?, revision?, inputs?, vars?, agent_models?, notify_on_completion?, fixtures?, test_id?, update? | Inline. The session's Workflow Definitions; `start` creates a Workflow session under this one. Not offered inside a Workflow. |
+| `read_workflow` | workflow_id, run_id?, limit?, cursor?, execution_id?, … | Inline. A Workflow's graph, runs, steps and variables. |
+| `update_workflow` | workflow_id, operation: pause \| resume \| stop \| cancel \| set_vars \| recover, operation_id, reason?, grace_seconds?, set?, delete?, expected_kv_revision? | Inline. Controls one of the session's Workflows. Not offered inside a Workflow. |
+| `send_workflow_input` | workflow_id, contract, payload, operation_id, correlation?, run_id?, ttl_seconds? | Inline. Typed input for a waiting `receive` step. |
+| `respond_session_request` | request_id, operation_id, response \| decline | Inline. Answers a Workflow's request once, before its deadline. |
+| `complete_workflow_node` | operation_id, outcome + output \| error, node_execution_id? | Inline. Only in an agent step's own session: finishes the step. |
 
 ---
 
@@ -435,7 +453,7 @@ Two tables in the `copilot_sessions` schema:
 
 ### `users.allow_dispatcher_delegation`
 
-Migration `0088` adds this `boolean NOT NULL DEFAULT false` column to the
+Migration `0090` adds this `boolean NOT NULL DEFAULT false` column to the
 `users` table: whether the user lets the deployment's dispatcher create
 sessions for them and end the ones it holds a write share on. It is a column of
 its own because the portal replaces `users.profile_settings` wholesale on every
@@ -572,9 +590,10 @@ You are a maintenance agent. Your job is to...
 
 The Tools column lists PilotSwarm tools. System sessions also have the Copilot
 CLI's built-in tools unless the worker sets `PILOTSWARM_LIMIT_SYSTEM_SESSION_TOOLS=1`,
-which leaves them, and the sessions they spawn, only their PilotSwarm tools and
-the CLI's `skill` tool, and keeps them out of the CLI's session store and
-embedding retrieval (`enableSessionStore: false`, `skipEmbeddingRetrieval: true`).
+which leaves them, and the sessions they spawn, only their PilotSwarm tools,
+without the Workflow tools, and the CLI's `skill` tool, and keeps them out of
+the CLI's session store and embedding retrieval (`enableSessionStore: false`,
+`skipEmbeddingRetrieval: true`).
 See [configuration](../developer/reference/configuration.md#worker-runtime-tuning).
 
 ### Skill Format (`SKILL.md`)
@@ -875,7 +894,8 @@ Shared UI surfaces display wall-clock cron as `cron` with the next fire in the c
 | 1.0.47 … 1.0.55 | — | Frozen, replay-only (registered for in-flight sessions; compatibility floor 1.0.47) |
 | 1.0.56 | — | Durable stop-turn race + latest loop |
 | 1.0.57 … 1.0.82 | — | Frozen, replay-only (see [orchestration design](./orchestration/design.md)) |
-| **1.0.83** | — | **Current** — owner routing tags, capacity requests and the fast busy policy (see [orchestration design](./orchestration/design.md)) |
+| 1.0.83 | — | Frozen, replay-only — the durable workflow intake, `workflow-intake-v1` (v0.8.11) |
+| **1.0.84** | — | **Current** — owner routing tags, capacity requests and the fast busy policy (see [orchestration design](./orchestration/design.md)) |
 
 **Versioning rule:** Changing yield sequences requires a new version. Existing
 in-flight orchestrations replay against their recorded version; the registry

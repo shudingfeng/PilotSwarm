@@ -783,9 +783,13 @@ back or the dispatcher returns it.
 
 - **Owner tags.** With `PILOTSWARM_OWNER_ROUTING=1` on the Portal, the client
   records `owner.<subject>` of a top-level user session's owner in its
-  orchestration input, and orchestration `1.0.83` tags every session-scoped
-  activity with it. A session created during a turn takes that turn's tag.
+  orchestration input, and orchestration `1.0.84` tags every session-scoped
+  activity with it. A sub-agent created during a turn takes that turn's tag.
   System sessions, and every session under a system root, stay untagged.
+- **Workflows.** A Workflow carries no owner tag: its activities, scripts and
+  agent steps run on the Linux workers. So in a tagged tree no Workflow is
+  started or tested (`WORKFLOW_OWNER_ROUTED`), whether an agent or a person
+  asks, and `create_agent_session` makes no new root.
 - **Bound workers.** The launcher of a bound VM starts the worker with
   `PILOTSWARM_WORKER_OWNER_TAG=owner.<ownerOid>`, so the worker also runs that
   owner's tagged activities, and only a worker with that tag runs them.
@@ -800,7 +804,7 @@ back or the dispatcher returns it.
 
 See [Owner Routing](../reference/configuration.md#owner-routing-optional) and
 the orchestration design's
-[owner routing](../../architecture/orchestration/design.md#owner-routing-and-capacity-requests-1083)
+[owner routing](../../architecture/orchestration/design.md#owner-routing-and-capacity-requests-1084)
 and [owner-only workers](../../architecture/orchestration/design.md#owner-only-workers).
 
 ### Admission
@@ -861,7 +865,10 @@ sequenceDiagram
 - **Who asks.** With the coordination host, its module sends every request to
   `POST /v1/coordination/demand`, and the controller refuses `/v1/vms/demand`
   with `403 COORDINATION_HOST`. Without it, each Windows worker's extension
-  registers a requester and sends `POST /v1/vms/demand`.
+  registers a requester and sends `POST /v1/vms/demand`. But a worker never
+  declares both its owner tag and the capacity tag, which would make six tags:
+  a bound worker without owner-only refuses to start with a requester, so a
+  pool needs the coordination host.
 - **Entra object IDs only.** The controller binds VMs to Entra object IDs. Both
   requesters answer `deny` with `OWNER_NOT_SUPPORTED` for an owner whose subject
   isn't one, without asking the controller, rather than retrying a request it
@@ -870,7 +877,7 @@ sequenceDiagram
   the Portal, a `WORKSPACE_BUSY` refusal releases the session from its worker at
   once and retries after 10 seconds, 20 seconds, a minute, then every 3 minutes,
   instead of 30 seconds, 2 minutes, 5 minutes, then every 15 minutes. See the
-  [fast busy policy](../../architecture/orchestration/design.md#fast-busy-policy-1083).
+  [fast busy policy](../../architecture/orchestration/design.md#fast-busy-policy-1084).
 
 ### Ending a session tree
 
@@ -1294,12 +1301,15 @@ turn, so it mounts no session workspace and loads no workspace provider.
   copies only those into a read-only folder in the plugin's layout, which
   `PLUGIN_DIRS` names, so no tool module or MCP server comes from it. Unset,
   the host loads the image's own plugins.
-- **Network.** An egress NetworkPolicy allows DNS to the cluster's DNS pods,
-  TCP 3005 to the controller's pods, TCP 443 to the blob private endpoint
-  `10.20.33.4`, and TCP 443 and 5432 to addresses outside the stamp VNet
-  `10.20.0.0/16`, for Entra ID, Foundry and PostgreSQL's public endpoint, but
-  never the instance metadata endpoint. A NetworkPolicy can't name hosts, so
-  those two ports reach every internet host. Nothing else in the VNet is
+- **Network.** The host replaces the rules of the worker's egress
+  NetworkPolicy (`copilot-runtime-worker-egress`, which otherwise allows all
+  egress but the instance metadata address and the Azure host endpoint). It
+  allows DNS to the cluster's DNS pods, TCP 3005 to the controller's pods, TCP
+  443 to the blob private endpoint `10.20.33.4`, and TCP 443 and 5432 to
+  addresses outside the stamp VNet `10.20.0.0/16`, for Entra ID, Foundry and
+  PostgreSQL's public endpoint, but never the instance metadata endpoint or
+  the Azure host endpoint `168.63.129.16`. A NetworkPolicy can't name hosts,
+  so those two ports reach every internet host. Nothing else in the VNet is
   reachable.
 - **Availability.** A PodDisruptionBudget keeps one replica up through a node
   drain, and the replicas prefer different nodes. Every turn waits for the

@@ -490,7 +490,7 @@ export function* refreshTrackedSubAgents(
 // ─── Graceful shutdown cascade ──────────────────────────────
 
 /**
- * Free the session on the worker that holds it. 1.0.83: an owner-tagged
+ * Free the session on the worker that holds it. 1.0.84: an owner-tagged
  * session's destroy waits for a worker of its owner, so it is raced against
  * WORKSPACE_RELEASE_CAP_MS. With no such worker nothing is held in memory,
  * the session ends anyway, and duroxide drops the destroy no worker took.
@@ -980,7 +980,7 @@ export function* handleSubAgentAction(
             });
 
             let childSessionId: string;
-            // 1.0.83: the child takes the tag and busy policy; a system child neither.
+            // 1.0.84: the child takes the tag and busy policy; a system child neither.
             const childRouting = agentIsSystem ? undefined : createdSessionRouting(runtime.options);
             try {
                 childSessionId = yield runtime.manager.spawnChildSession(

@@ -118,6 +118,28 @@ test("the setting limits system sessions, the sessions the system user owns and 
     });
 });
 
+test("with the setting, a system session is declared no Workflow tools; an ordinary session keeps them", async (t) => {
+    const WORKFLOW_TOOLS = ["workflow_definition", "update_workflow", "read_workflow", "send_workflow_input", "enable_workflows"];
+    const declared = (sdk) => (sdk.tools ?? []).map((tool) => tool.name);
+    await withSetting(undefined, async () => {
+        for (const id of SYSTEM_SESSIONS) {
+            for (const sdk of await createAndResume(t, id)) {
+                assert.ok(declared(sdk).includes("workflow_definition"), `${id}: without the setting, the Workflow tools as before`);
+            }
+        }
+    });
+    await withSetting("1", async () => {
+        for (const id of SYSTEM_SESSIONS) {
+            for (const sdk of await createAndResume(t, id)) {
+                assert.deepEqual(declared(sdk).filter((name) => WORKFLOW_TOOLS.includes(name)), [], id);
+            }
+        }
+        for (const id of USER_SESSIONS) {
+            for (const sdk of await createAndResume(t, id)) assert.ok(declared(sdk).includes("workflow_definition"), id);
+        }
+    });
+});
+
 test("the root's row is read only when the session's own row does not decide", async () => {
     const reads = [];
     const getSession = async (id) => {

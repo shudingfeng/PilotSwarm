@@ -15,8 +15,9 @@ kind: Component
 #                                  host's settings, the controller's CA, 4 GiB,
 #                                  spread across nodes, no Key Vault secret
 #   pod-disruption-budget.yaml     one replica stays up through a node drain
-#   network-policy.yaml            egress: DNS, the controller's port 3005,
-#                                  Blob, and 443 and 5432 outside the VNet
+#   network-policy.yaml            replaces the base worker egress policy:
+#                                  DNS, the controller's port 3005, Blob, and
+#                                  443 and 5432 outside the VNet
 #   coordination-host.properties   the stamp's values, rewritten by the deploy
 #                                  (an env file; the repository ignores *.env)
 #
@@ -26,10 +27,10 @@ kind: Component
 
 resources:
   - pod-disruption-budget.yaml
-  - network-policy.yaml
 
 patches:
   - path: deployment-patch.yaml
+  - path: network-policy.yaml
   # The database URL is passwordless, and Blob and Foundry take the host's
   # identity, so it loads no secret from the stamp vault.
   - patch: |-

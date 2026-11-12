@@ -214,7 +214,7 @@ Unset, none of the rules below applies and the portal makes no extra lookups.
   the **Dispatcher Delegation** switch in Admin Console → Model Providers →
   My Providers (`g` on the same page of the TUI), or
   `PUT /api/v1/me/dispatcher-delegation`. It is stored in
-  `users.allow_dispatcher_delegation` (CMS migration `0088`) and is off until
+  `users.allow_dispatcher_delegation` (CMS migration `0090`) and is off until
   the user turns it on. The switch shows only on deployments that name a
   dispatcher.
 - **Creating for a user.** `createSession` and `createSessionForAgent` accept
@@ -341,7 +341,9 @@ Duroxide runtime concurrency, and process-wide worker limits.
   whose workers aren't a Kubernetes deployment it should scale. Default: `0`.
 - `PILOTSWARM_LIMIT_SYSTEM_SESSION_TOOLS`
   `1` leaves system sessions only their PilotSwarm tools and the Copilot
-  CLI's `skill` tool: no shell, file, web, MCP or native task tools. Their
+  CLI's `skill` tool: no shell, file, web, MCP or native task tools, and no
+  Workflow tools (the Workflow context `none`), since a Workflow's script runs
+  code with network access. Their
   Copilot sessions are also created and resumed with
   `enableSessionStore: false` and `skipEmbeddingRetrieval: true`, so they stay
   out of the CLI's cross-session store and skip embedding retrieval, whose
@@ -535,6 +537,7 @@ new PilotSwarmWorker({
     sessionMessageScope: "fleet", // "fleet" | "owner"; see Session Message Scope above
     ownerTag: "owner.<subject>", // owner routing: also run this owner's sessions (default: none)
     ownerOnly: false,        // owner routing: run only this owner's sessions, nothing else (needs ownerTag)
+    workflowScripts: { enabled: true },  // run workflow script states; on by default (env PILOTSWARM_WORKFLOW_SCRIPTS=0 turns them off)
 
     // Blob storage for session dehydration
     blobConnectionString: string,   // Azure Storage connection string
@@ -653,27 +656,27 @@ refuses to start unless its session state folder (`sessionStateDir`) is
 
 Owner routing keeps each user's sessions on that user's own workers, for
 deployments where a worker holds one user's files or credentials. It is off
-unless you turn it on, and it needs orchestration 1.0.83 or later.
+unless you turn it on, and it needs orchestration 1.0.84 or later.
 
 | Setting | Where | What it does |
 |---|---|---|
-| `ownerRouting: true` or `PILOTSWARM_OWNER_ROUTING=1` | `PilotSwarmClient` (the option wins over the env var) | When the client starts a top-level user session, it records the owner's routing tag `owner.<subject>` in the session's orchestration input. System sessions and sessions without an owner stay untagged. A session created during a tagged turn (a sub-agent, a `create_agent_session` session) takes that turn's tag and busy policy, whatever the client's setting. Default: off (`0`) |
+| `ownerRouting: true` or `PILOTSWARM_OWNER_ROUTING=1` | `PilotSwarmClient` and `PilotSwarmManagementClient` (the option wins over the env var) | When the client starts a top-level user session, it records the owner's routing tag `owner.<subject>` in the session's orchestration input. System sessions and sessions without an owner stay untagged. A sub-agent created during a tagged turn takes that turn's tag and busy policy, whatever the client's setting. In a tagged tree no Workflow is started or tested: an agent's `spawn_workflow` and `workflow_definition` `start` and `test` are refused (`WORKFLOW_OWNER_ROUTED`), and so is `create_agent_session`. The management client refuses a person's start there (409 `WORKFLOW_OWNER_ROUTED`): a session whose creation config, or its root's, carries a tag and, with this setting, any user session's tree. Default: off (`0`) |
 | `ownerTag: "owner.<subject>"` | `PilotSwarmWorker` option; `PILOTSWARM_WORKER_OWNER_TAG` in `examples/worker.js` | The worker also runs the activities tagged for this owner. Each activity of a tagged session runs only on a worker with its tag, and waits in the queue while there is none. The tag has no spaces or control characters and is at most 256 bytes. Default: none |
 | `ownerOnly: true` | `PilotSwarmWorker` option; `PILOTSWARM_WORKER_OWNER_ONLY=1` in `examples/worker.js` (`0` or unset: off; any other value stops the worker) | The worker runs only the activities tagged for its `ownerTag`: the turns and other session-scoped activities of that owner's sessions. It runs no untagged work (system sessions' turns, titles, the manager activities before and after every turn), no capability-tagged activity and no capacity request, even with a capacity requester. Another worker without `ownerOnly` must run that work, or the owner's sessions wait. Without `ownerTag` the worker refuses to start |
-| `worker.setOwnerCapacityRequester(fn)` | `PilotSwarmWorker`, before `start()` | The worker answers capacity requests: before each turn of a tagged session, the orchestration asks one worker with a requester. `fn({ sessionId, rootSessionId, ownerTag }, signal)` returns `{ decision: "ok" }`, `{ decision: "deny", message?, code? }` (the turn ends and is not retried) or `{ decision: "busy", message?, code?, retryAfterMs? }` (the prompt waits and the session asks again). After 15 s the signal fires and the session waits a minute (`CAPACITY_UNAVAILABLE`). With owner routing on and no worker with a requester, tagged sessions wait |
+| `worker.setOwnerCapacityRequester(fn)` | `PilotSwarmWorker`, before `start()`; a worker with an `ownerTag` and without `ownerOnly` refuses to start with one | The worker answers capacity requests: before each turn of a tagged session, the orchestration asks one worker with a requester. `fn({ sessionId, rootSessionId, ownerTag }, signal)` returns `{ decision: "ok" }`, `{ decision: "deny", message?, code? }` (the turn ends and is not retried) or `{ decision: "busy", message?, code?, retryAfterMs? }` (the prompt waits and the session asks again). After 15 s the signal fires and the session waits a minute (`CAPACITY_UNAVAILABLE`). With owner routing on and no worker with a requester, tagged sessions wait |
 | `workspaceBusyFastRelease: true` or `PILOTSWARM_WORKSPACE_BUSY_FAST_RELEASE=1` | `PilotSwarmClient` (the option wins over the env var) | Sessions the client starts, and the sessions they create, use the fast busy policy: a `WORKSPACE_BUSY` refusal releases the worker at once and retries after 10 s, 20 s, 1 min, then every 3 min, instead of 30 s, 2 min, 5 min, then every 15 min with a release after two refusals on one worker. Default: off (unset) |
 
-A worker's Duroxide tag filter holds the three capability tags, plus its owner
-tag and the capacity tag `pilotswarm.owner-capacity.v1` when set: at most five
-tags, Duroxide's limit. It is `defaultAnd`, so the worker also runs untagged
-activities. An owner-only worker's filter is `{ tags: [ownerTag] }`, which
+A worker's Duroxide tag filter holds the four capability tags, plus its owner
+tag or, with a capacity requester, the capacity tag `pilotswarm.owner-capacity.v1`:
+five tags, Duroxide's limit, so a worker never has both. It is `defaultAnd`, so
+the worker also runs untagged activities. An owner-only worker's filter is `{ tags: [ownerTag] }`, which
 admits that one tag. Duroxide applies the filter to activities only: every
 worker runs orchestrations. But `ctx.utcNow()` and `ctx.newGuid()` are untagged
 Duroxide activities, so an orchestration also needs a worker without
 `ownerOnly` to move on. Start the workers that declare owner tags and the
 capacity requester before you turn on `PILOTSWARM_OWNER_ROUTING`. Sessions
 that started before the upgrade, on orchestration 1.0.82 or older, stay
-untagged. See the [orchestration design](../../architecture/orchestration/design.md#owner-routing-and-capacity-requests-1083)
+untagged. See the [orchestration design](../../architecture/orchestration/design.md#owner-routing-and-capacity-requests-1084)
 and its [owner-only workers](../../architecture/orchestration/design.md#owner-only-workers).
 
 ### Coordination Host on Azure
@@ -1615,3 +1618,18 @@ it refuses a key on `setCurrentUserGitHubCopilotKey`.
 | `npm run tui:remote` | TUI client-only against a remote deployment (`.env.remote` carries `PILOTSWARM_API_URL`) |
 | `npm run worker` | Headless worker process |
 | `npm run db:reset` | Reset database schemas |
+
+## Workflow scripts
+
+Workflows are always on, on the portal, every worker and the MCP server; they
+need no setting. Script nodes are on by default: a workflow's script states
+run as processes on the worker, on its Node with the permission model (file
+access limited to the script's own folder, no child processes). See
+[Durable workflows](../building/workflow-sessions.md).
+
+| Variable | Default | Effect |
+|---|---|---|
+| `PILOTSWARM_WORKFLOW_SCRIPTS` | on | An opt-out. Unset or empty: script states run on this worker. `0`, `false`, `no` or `off` turns them off; `1`, `true` or `yes` keeps them on; any other value keeps them on, with one startup warning. The `workflowScripts.enabled` option wins. Off, a definition with a script node is refused at save and Start (`WORKFLOW_SCRIPTS_DISABLED`). Set the same value on the portal and the MCP server, so a person's save or Start is checked there. |
+| `PILOTSWARM_WORKFLOW_TEST_MODE` | off | Exactly `on` turns test mode on: the `update_workflow` operations `test`, `test_respond` and `test_advance`, test runs in reads, and test controls in the portal and the terminal UI. Unset, empty or any other value: off. A session's Workflow Definition tests (`workflow_definition` `test`) run on every deployment without it. See [Durable workflows](../building/workflow-sessions.md). |
+| `PILOTSWARM_WORKER_SHUTDOWN_GRACE_MS` | `15000` | A worker's shutdown waits for its runtime to drain (`PILOTSWARM_WORKER_SHUTDOWN_TIMEOUT_MS`, 60 s by default), then this long for the release of its sessions and the closes; a step still waiting then is left behind and the process exits. |
+| `PILOTSWARM_PORTAL_SHUTDOWN_TIMEOUT_MS` | `20000` | The portal's whole shutdown ends within this. Unset with embedded workers: their own budget (`PILOTSWARM_WORKER_SHUTDOWN_TIMEOUT_MS` plus `PILOTSWARM_WORKER_SHUTDOWN_GRACE_MS`) plus 5 s. |

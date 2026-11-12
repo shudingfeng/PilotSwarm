@@ -52,12 +52,12 @@ function parsed(value) {
 }
 
 describe("owner routing on Duroxide runtimes", () => {
-    // Schedules what 1.0.83 schedules for an owner-tagged session, through
+    // Schedules what 1.0.84 schedules for an owner-tagged session, through
     // PilotSwarm's own proxies. With `pause`, it waits for the "go" event
     // after the workspace check, so a test can restart a worker there.
     function* probe(ctx, input) {
-        const manager = createSessionManagerProxy(ctx, "turn-control-v1", { childResultProvenance: true });
-        const proxy = (key) => createSessionProxy(ctx, input.sessionId, key, { workspace: WORKSPACE }, "turn-control-v1", { ownerTag: input.ownerTag });
+        const manager = createSessionManagerProxy(ctx, "workflow-intake-v1", { childResultProvenance: true });
+        const proxy = (key) => createSessionProxy(ctx, input.sessionId, key, { workspace: WORKSPACE }, "workflow-intake-v1", { ownerTag: input.ownerTag });
         let session = proxy(`affinity-${input.sessionId}`);
         yield manager.requestOwnerCapacity(input.sessionId, input.ownerTag);
         yield session.runTurn("one", false, 0);
@@ -74,7 +74,7 @@ describe("owner routing on Duroxide runtimes", () => {
 
     // The capped destroy of a completing session whose owner has no worker.
     function* cappedDestroy(ctx, input) {
-        const session = createSessionProxy(ctx, input.sessionId, `affinity-${input.sessionId}`, {}, "turn-control-v1", { ownerTag: input.ownerTag });
+        const session = createSessionProxy(ctx, input.sessionId, `affinity-${input.sessionId}`, {}, "workflow-intake-v1", { ownerTag: input.ownerTag });
         const raced = parsed(yield ctx.race(session.destroy(), ctx.scheduleTimer(1_000)));
         return raced.index;
     }
@@ -86,7 +86,7 @@ describe("owner routing on Duroxide runtimes", () => {
         const executions = [];
         const runtimes = new Map();
         const answers = {
-            runTurnV4: { type: "completed", content: "ok" },
+            runTurnV5: { type: "completed", content: "ok" },
             requestOwnerCapacity: { decision: "ok" },
             checkWorkspace: { ok: true, path: "/work/app" },
         };
@@ -105,7 +105,7 @@ describe("owner routing on Duroxide runtimes", () => {
             });
             runtime.registerOrchestration("owner-probe", probe);
             runtime.registerOrchestration("capped-destroy", cappedDestroy);
-            for (const name of ["runTurnV4", "hydrateSession", "checkWorkspace", "releaseWorkspace", "destroySession", "requestOwnerCapacity"]) {
+            for (const name of ["runTurnV5", "hydrateSession", "checkWorkspace", "releaseWorkspace", "destroySession", "requestOwnerCapacity"]) {
                 runtime.registerActivity(name, async (ctx, input) => {
                     executions.push({ worker: id, name, tag: ctx.tag(), sessionId: input.sessionId, at: Date.now() });
                     return answers[name] ?? null;
@@ -140,7 +140,7 @@ describe("owner routing on Duroxide runtimes", () => {
         return false;
     }
 
-    const SCOPED = ["runTurnV4", "hydrateSession", "checkWorkspace", "releaseWorkspace", "runTurnV4", "destroySession"];
+    const SCOPED = ["runTurnV5", "hydrateSession", "checkWorkspace", "releaseWorkspace", "runTurnV5", "destroySession"];
 
     it("runs each owner's session-scoped activities only on that owner's worker, also under a new affinity key, and capacity requests only on the requester's worker", async () => {
         await withRuntimes("owner_route", async ({ client, executions, start, ran, timeoutMs }) => {
@@ -189,8 +189,8 @@ describe("owner routing on Duroxide runtimes", () => {
             await client.raiseEvent("probe-r", "go", {});
             expect((await client.waitForOrchestration("probe-r", timeoutMs)).status).toBe("Completed");
             expect(ran("sr").map((e) => `${e.worker} ${e.name}`)).toEqual([
-                "owner-a runTurnV4", "owner-a hydrateSession", "owner-a checkWorkspace",
-                "owner-a2 releaseWorkspace", "owner-a2 runTurnV4", "owner-a2 destroySession",
+                "owner-a runTurnV5", "owner-a hydrateSession", "owner-a checkWorkspace",
+                "owner-a2 releaseWorkspace", "owner-a2 runTurnV5", "owner-a2 destroySession",
             ]);
         });
     }, TIMEOUT);
@@ -212,7 +212,7 @@ describe("owner routing on Duroxide runtimes", () => {
             await eventually(() => recorded(client, "probe-s", "ActivityScheduled", "releaseWorkspace"), "the workspace release");
             await sleep(3_000);
             expect(ran("ss").map((e) => `${e.worker} ${e.name}`)).toEqual([
-                "owner-a runTurnV4", "owner-a hydrateSession", "owner-a checkWorkspace",
+                "owner-a runTurnV5", "owner-a hydrateSession", "owner-a checkWorkspace",
             ]);
             // The same ID: the restarted worker takes the session back at once.
             const restartedAt = Date.now();
@@ -247,8 +247,10 @@ describe("owner routing on Duroxide runtimes", () => {
 
 /**
  * PilotSwarm workers bound to owners, the scripted model, and a client with
- * owner routing and the fast busy policy. `startWorker(id, tag, true)` also
- * registers the capacity requester, which records every request.
+ * owner routing and the fast busy policy. `startWorker(id, undefined, true)`
+ * starts a worker without an owner tag that has the capacity requester, which
+ * records every request, as the coordination host does: a worker with an
+ * owner tag takes no capacity requests (with a requester it refuses to start).
  */
 async function withOwnerCluster(env, { respond, capacity, worker = {}, client: clientOptions = {} }, fn) {
     const model = await startScriptedModel({ respond });
@@ -356,7 +358,8 @@ describe("owner routing with PilotSwarm workers", () => {
             return { content: `ok:${text.slice(0, 24)}` };
         };
         await withOwnerCluster(env, { respond }, async ({ startWorker, startClients, client, mgmt, catalog, asked, requests, qualifiedModel }) => {
-            await startWorker("owner-a", TAG.a, true);
+            await startWorker("coordinator", undefined, true);
+            await startWorker("owner-a", TAG.a);
             await startWorker("owner-b", TAG.b);
             await startClients();
             const parent = await client.createSession({ sessionId: randomUUID(), model: qualifiedModel, owner: OWNER("a") });
@@ -383,7 +386,7 @@ describe("owner routing with PilotSwarm workers", () => {
             expect(childInputs.at(-1)).toMatchObject(routed("a"));
 
             // Every turn asked first, on the worker with the requester, with the session's root.
-            expect(requests.every((r) => r.worker === "owner-a")).toBe(true);
+            expect(requests.every((r) => r.worker === "coordinator")).toBe(true);
             expect(asked(parent.sessionId)[0].request).toEqual({ sessionId: parent.sessionId, rootSessionId: parent.sessionId, ownerTag: TAG.a });
             expect(asked(other.sessionId)[0].request).toEqual({ sessionId: other.sessionId, rootSessionId: other.sessionId, ownerTag: TAG.b });
             expect(asked(childId).map((r) => r.request)).toEqual([
@@ -406,7 +409,8 @@ describe("owner routing with PilotSwarm workers", () => {
         };
         const respond = (_body, position) => ({ content: position.lastUserText.includes("second try") ? "second try ran" : "ok" });
         await withOwnerCluster(env, { respond, capacity }, async ({ startWorker, startClients, client, mgmt, catalog, asked, qualifiedModel }) => {
-            await startWorker("owner-a", TAG.a, true);
+            await startWorker("coordinator", undefined, true);
+            await startWorker("owner-a", TAG.a);
             await startClients();
 
             const denied = await client.createSession({ sessionId: randomUUID(), model: qualifiedModel, owner: OWNER("a") });
@@ -451,7 +455,8 @@ describe("owner routing with PilotSwarm workers", () => {
             return { content: `ok:${text.slice(0, 24)}` };
         };
         await withOwnerCluster(env, { respond, worker: { sessionLockTimeoutMs: 5_000 }, client: { waitThreshold: 5 } }, async ({ startWorker, stopWorker, startClients, client, catalog, asked, qualifiedModel }) => {
-            await startWorker("owner-a", TAG.a, true);
+            await startWorker("coordinator", undefined, true);
+            await startWorker("owner-a", TAG.a);
             await startWorker("owner-b", TAG.b);
             await startClients();
             const parent = await client.createSession({ sessionId: randomUUID(), model: qualifiedModel, owner: OWNER("a") });
@@ -461,12 +466,12 @@ describe("owner routing with PilotSwarm workers", () => {
             await waitForSessionState(catalog, parent.sessionId, ["idle"], 120_000);
 
             await stopWorker("owner-a");
-            await startWorker("owner-a2", TAG.a, true);
+            await startWorker("owner-a2", TAG.a);
 
             await eventually(async () => (await turnWorkers(catalog, childId)).length >= 2, "the child's turn after its wait", 180_000);
             await waitForSessionState(catalog, childId, ["idle"], 120_000);
             expect(await turnWorkers(catalog, childId)).toEqual(["owner-a", "owner-a2"]);
-            expect(asked(childId).map((r) => r.worker)).toEqual(["owner-a", "owner-a2"]);
+            expect(asked(childId).map((r) => r.worker)).toEqual(["coordinator", "coordinator"]);
             expect((await turnWorkers(catalog, parent.sessionId)).every((id) => id === "owner-a" || id === "owner-a2")).toBe(true);
         });
     }, TIMEOUT);
@@ -478,7 +483,8 @@ describe("owner routing with PilotSwarm workers", () => {
             : { decision: "ok" });
         const respond = () => ({ content: "ok" });
         await withOwnerCluster(env, { respond, capacity }, async ({ startWorker, startClients, client, mgmt, catalog, qualifiedModel }) => {
-            await startWorker("owner-a", TAG.a, true);
+            await startWorker("coordinator", undefined, true);
+            await startWorker("owner-a", TAG.a);
             await startClients();
             // Owner c has no worker: a root, a child created with its tag, and
             // another root all wait for capacity.
@@ -512,11 +518,12 @@ describe("owner routing with PilotSwarm workers", () => {
             expect(await instance(lone.sessionId)).toBe("NotFound");
         });
     }, TIMEOUT);
-    it("keeps a session started on 1.0.82 untagged on that version and after its continue-as-new to 1.0.83", async () => {
+    it("keeps a session started on 1.0.82 untagged on that version and after its continue-as-new to 1.0.84", async () => {
         const env = getEnv();
         const respond = (_body, position) => ({ content: `ok:${position.lastUserText.slice(0, 24)}` });
         await withOwnerCluster(env, { respond }, async ({ startWorker, startClients, client, mgmt, catalog, asked, qualifiedModel }) => {
-            await startWorker("owner-a", TAG.a, true);
+            await startWorker("coordinator", undefined, true);
+            await startWorker("owner-a", TAG.a);
             await startClients();
             const sessionId = randomUUID();
             const pin = pinSessionStartVersion(client, "1.0.82", { sessionId });
@@ -530,7 +537,7 @@ describe("owner routing with PilotSwarm workers", () => {
             expect(await sessionOrchestrationVersion(client, sessionId)).toBe("1.0.82");
 
             await mgmt.setSessionModel(sessionId, qualifiedModel);
-            await eventually(async () => (await sessionOrchestrationVersion(client, sessionId)) === "1.0.83", "the move to 1.0.83");
+            await eventually(async () => (await sessionOrchestrationVersion(client, sessionId)) === "1.0.84", "the move to 1.0.84");
             await eventually(async () => (await turnWorkers(catalog, sessionId)).length >= 2, "the turn after the move");
             const inputs = await executionInputs(client, sessionId);
             // The client's start input names the owner; 1.0.82 ignores it and

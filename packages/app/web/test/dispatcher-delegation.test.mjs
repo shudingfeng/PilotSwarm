@@ -200,6 +200,25 @@ test("a delegated session is the owner's, private, with the dispatcher's write s
     assert.equal(w.audits.find((entry) => entry.action === "createSessionForAgent").details.agentName, "builder");
 });
 
+test("createSessionForWorkflow takes no onBehalfOfOwner, from the dispatcher or anyone, and makes nothing", async () => {
+    for (const caller of [dispatcher, as("someone"), as("admin-1", "admin")]) {
+        const w = world({ flags: { "owner-on": true } });
+        const made = [];
+        w.runtime.transport.createSessionForWorkflow = async (ref, options) => { made.push([ref, options]); return { sessionId: "new-3" }; };
+        const error = await refusal(w.runtime.call("createSessionForWorkflow", { ref: "tools/review", onBehalfOfOwner: { subject: "owner-on" } }, caller));
+        assert.deepEqual([error.status, error.code], [400, "INVALID_REQUEST"]);
+        assert.match(error.message, /does not take onBehalfOfOwner/);
+        assert.deepEqual(made, []);
+        assert.equal(w.log.some(([kind]) => kind === "share"), false);
+    }
+    // Without it, the caller's own session, as before.
+    const w = world();
+    const made = [];
+    w.runtime.transport.createSessionForWorkflow = async (ref, options) => { made.push([ref, options.owner?.subject]); return { sessionId: "new-3" }; };
+    assert.equal((await w.runtime.call("createSessionForWorkflow", { ref: "tools/review" }, dispatcher)).sessionId, "new-3");
+    assert.deepEqual(made, [["tools/review", DISPATCHER]]);
+});
+
 test("a delegated creation fails when its audit cannot be written, and removes the session", async () => {
     const w = world({ flags: { "owner-on": true }, failDelegatedAudit: true });
     const error = await refusal(w.runtime.call("createSession", { onBehalfOfOwner: { subject: "owner-on" } }, dispatcher));

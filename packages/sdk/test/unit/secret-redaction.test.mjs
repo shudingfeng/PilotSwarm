@@ -187,6 +187,8 @@ test("without the settings, a sub-agent's contract and result and a canvas's nam
 // the orchestration's inputs and PostgreSQL get.
 const ALICE = { provider: "dev", subject: "user-0001", displayName: "Alice Example", email: "alice@example.invalid" };
 const HELPER = { name: "helper", description: "Helps.", prompt: "You help." };
+/** FU-9: a queued message_agent is its parent agent's words. */
+const PARENT_AGENT = { kind: "agent", display: "parent agent", sessionId: "parent" };
 
 /** One place an agent's text leaves its turn, with two GitHub tokens and a deployment credential. */
 const said = (place) => `${place} ghp_${place.padEnd(36, "0")} github_pat_11${place.padEnd(22, "0")}_${"a".repeat(59)} acme_${place}.c2lnbmF0dXJl`;
@@ -321,7 +323,7 @@ test("in external mode, what an agent sends to another session is redacted befor
         "places whose tokens reached the queue, an orchestration input or PostgreSQL");
     // The sub-agent's task, its next-turn message, and a session message and reply.
     assert.equal(child[0].prompt, redactedSaid("spawnTask"));
-    assert.deepEqual(child[1], { prompt: redactedSaid("messageQueued") });
+    assert.deepEqual(child[1], { prompt: redactedSaid("messageQueued"), sender: PARENT_AGENT });
     assert.ok(peer[0].prompt.includes(`subject=${redactedSaid("sessionSubject")}`), peer[0].prompt);
     assert.ok(peer[0].prompt.endsWith(`Request body:\n${redactedSaid("sessionBody")}`), peer[0].prompt);
     assert.ok(peer[1].prompt.endsWith(`\n\n${redactedSaid("sessionReply")}`), peer[1].prompt);
@@ -338,7 +340,7 @@ test("without the settings, what an agent sends to another session is queued and
     assert.deepEqual(PLACES.filter((place) => !tokensOf(place).every((token) => persisted.includes(token))), []);
     assert.equal(persisted.includes("[REDACTED]"), false);
     assert.equal(child[0].prompt, said("spawnTask"));
-    assert.deepEqual(child[1], { prompt: said("messageQueued") });
+    assert.deepEqual(child[1], { prompt: said("messageQueued"), sender: PARENT_AGENT });
     assert.ok(peer[0].prompt.endsWith(`Request body:\n${said("sessionBody")}`), peer[0].prompt);
     assert.ok(peer[1].prompt.endsWith(`\n\n${said("sessionReply")}`), peer[1].prompt);
     assert.equal(JSON.parse(completed.params[3]).current.summary, said("completeResult"));

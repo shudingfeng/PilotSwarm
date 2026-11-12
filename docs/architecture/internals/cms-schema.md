@@ -23,11 +23,22 @@ CREATE TABLE schema_migrations (
 ```
 
 The chain starts at `0001_baseline` (the schema as of v1.0.41) and currently
-runs through twenty-plus migrations listed at the top of `cms-migrations.ts`
+runs through the migrations listed at the top of `cms-migrations.ts`
 (metric summaries, stored procedures, session owners, user profiles,
 reasoning effort, session groups, turn metrics, stop-turn
-`active_turn_index`, …). Every statement is idempotent; fresh and existing
-databases converge to the same shape.
+`active_turn_index`, …), then the Workflow migration, `0088`
+(`migrations/workflow-0088.ts`): the session kind of a Workflow's session, the
+`workflow_*` tables (definitions and their revisions, session-owned definitions,
+runs, node executions, variables, inbox, input receipts, outbox, requests,
+intake, agent invocations, test runs) and the triggers that end a session's or a
+deleted session's Workflows. Migration `0089`
+(`migrations/workflow-session-names-0089.ts`) names the session-owned
+definitions' tables `session_workflow_*` (definitions, revisions, operations,
+seen, notes), the pin columns `session_definition_id` and `session_revision`, and
+the trigger `workflow_owner_session_ended`, in one transaction. Migration `0090`
+(`migrations/dispatcher-delegation-0090.ts`) adds each user's dispatcher-delegation
+opt-in, `users.allow_dispatcher_delegation`, and its two stored procedures. Every statement
+is idempotent; fresh and existing databases converge to the same shape.
 
 ## Table: `sessions`
 
@@ -107,7 +118,7 @@ connection and also looks every 5 s while a turn runs.
 | `session_groups` / `session_group_owners` | session groups + per-user ownership (groups are private per-user organization) |
 | `user_session_group_placements` | migration 0034: `(user_id, root_session_id) → group_id` — each viewer's private placement of a session tree in one of their own groups; composite FK into `session_group_owners` makes cross-user placement structurally impossible |
 | `session_child_outcomes` | terminal outcomes of sub-agents for parent digests |
-| `users` / `session_owners` | principals, per-user profile/keys, the dispatcher-delegation opt-in (`allow_dispatcher_delegation`, migration `0088`), session ownership |
+| `users` / `session_owners` | principals, per-user profile/keys, the dispatcher-delegation opt-in (`allow_dispatcher_delegation`, migration `0090`), session ownership |
 
 ## The catalog client
 

@@ -6,9 +6,13 @@
 #   443      the main storage account's blob private endpoint, 10.20.33.4
 #   443,     addresses outside the stamp VNet (10.20.0.0/16): Entra ID,
 #   5432     Foundry and PostgreSQL's public endpoint, so every internet host
-#            on those two ports. Never the instance metadata endpoint.
+#            on those two ports. Never the instance metadata endpoint or the
+#            Azure host endpoint (168.63.129.16).
 #
-# Nothing else in the VNet is reachable.
+# Nothing else in the VNet is reachable. The worker's base already has a
+# policy of this name, the worker egress policy (base/network-policy.yaml),
+# which allows all egress but those two addresses. Policies add up, so this
+# one is a patch that replaces the base policy's spec, not a second policy.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -17,6 +21,7 @@ metadata:
     app.kubernetes.io/name: pilotswarm
     app.kubernetes.io/component: worker
 spec:
+  $patch: replace
   podSelector:
     matchLabels:
       app.kubernetes.io/name: pilotswarm
@@ -56,6 +61,7 @@ spec:
             except:
               - 10.20.0.0/16
               - 169.254.169.254/32
+              - 168.63.129.16/32
       ports:
         - protocol: TCP
           port: 443

@@ -5,7 +5,7 @@
 Complete, cancel and delete wait for the session's `destroySession` activity
 without a limit, so a session whose destroy can't run, or hangs, holds the
 command: the caller gets no answer, a delete leaves the row, and every later
-command for the session waits behind it. Orchestration `1.0.83` caps that wait
+command for the session waits behind it. Orchestration `1.0.84` caps that wait
 at `WORKSPACE_RELEASE_CAP_MS` (10 seconds) for sessions with an owner tag
 ([Windows worker pools](./windows-worker-pool.md)). This proposal applies the
 same cap to every session, in a new orchestration version.
@@ -49,7 +49,7 @@ tree that doesn't settle, but only for a delete.
 1. In a new orchestration version, `completeSession`, `cancelSession` and
    `failPendingShutdown` race `runtime.session.destroy()` against
    `ctx.scheduleTimer(WORKSPACE_RELEASE_CAP_MS)` for every session, as
-   `1.0.83` does for owner-tagged sessions and `releaseAffinity` does for
+   `1.0.84` does for owner-tagged sessions and `releaseAffinity` does for
    `releaseWorkspace`.
 2. When the timer wins, the orchestration traces it and goes on: it answers
    the command, and a delete removes the descendants and the row, as today.
@@ -105,7 +105,7 @@ can't overlap a later turn of the same orchestration.
   an unbounded wait, though cases 1 to 3 apply to it too.
 - **A setting.** Orchestration code doesn't read `process.env`, so the setting
   would travel in the session's input, as `workspaceBusyFastRelease` does in
-  `1.0.83`. Possible, but a bound that only shortens a wait is simpler as the
+  `1.0.84`. Possible, but a bound that only shortens a wait is simpler as the
   default.
 - **Stop a late destroy.** Checking `isCancelled()` in `destroySession` would
   end it early, which is the opposite of what is wanted: the cleanup should
