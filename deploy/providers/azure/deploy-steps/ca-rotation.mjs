@@ -14,7 +14,7 @@
 //              has applied the dispatcher Ingress's annotation;
 //     cluster  the Secret and the ConfigMap pilotswarm-disk-controller-ca hold
 //              it, for NGINX and the coordination host;
-//     host     (WIN_WORKER_COORDINATION_HOST=true) the host's pod template
+//     host     the coordination host's pod template
 //              carries the hash of the rotation's bundle and its rollout has
 //              finished: the host reads NODE_EXTRA_CA_CERTS only when it
 //              starts;
@@ -38,7 +38,6 @@ import {
   COORDINATION_HOST_CA_ANNOTATION,
   WORKER_DEPLOYMENT,
   caBundleHash,
-  coordinationHostEnabled,
 } from "../../../scripts/lib/coordination-host.mjs";
 import {
   CA_CLUSTER_OBJECT,
@@ -240,7 +239,7 @@ export function promoteChecks({ env, names, next, caBundle, kube, gateway = null
   ];
   if (edgeMode(env) === "afd") checks.push(["appgw", () => appGatewayRefusal(names, namespace, next.der, { runFn, gateway })]);
   checks.push(["cluster", () => clusterRefusal(namespace, next.der, { runFn, kubeEnv: kube() })]);
-  if (coordinationHostEnabled(env)) checks.push(["host", () => hostRefusal(namespace, caBundle, { runFn, kubeEnv: kube() })]);
+  checks.push(["host", () => hostRefusal(namespace, caBundle, { runFn, kubeEnv: kube() })]);
   return evaluate(checks);
 }
 
@@ -419,7 +418,7 @@ export function formatCaRotation(report, envName = "<env>") {
     case "start":
       lines.push(report.created ? "Created the next CA:" : "The next CA exists already:");
       lines.push(describe("next", report.next));
-      lines.push("Next: deploy base-infra and disk-controller (and worker with the coordination host), so every trust store holds it;",
+      lines.push("Next: deploy base-infra, disk-controller and worker, so every trust store holds it;",
         `then watch \`${command("status")}\` until each check holds, and promote.`);
       break;
     case "promote":
@@ -437,7 +436,7 @@ export function formatCaRotation(report, envName = "<env>") {
       if (report.finished) {
         lines.push(`The previous CA is no longer trusted${report.forced ? " (finished WITH --force)" : ""}:`);
         lines.push(describe("previous", report.previous));
-        lines.push("Next: deploy base-infra and disk-controller (and worker with the coordination host) again;",
+        lines.push("Next: deploy base-infra, disk-controller and worker again;",
           `after that deploy, \`${command("cleanup")}\` removes its App Gateway root.`);
       } else {
         lines.push("No rotation to finish: no previous CA is trusted.");

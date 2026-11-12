@@ -1,13 +1,13 @@
 apiVersion: kustomize.config.k8s.io/v1alpha1
 kind: Component
 
-# The coordination host (WIN_WORKER_COORDINATION_HOST=true, with the Windows
-# worker pool): the Linux worker runs the orchestrations, durable timers,
-# system agents, title generator and every turn's bookkeeping, and sends every
-# capacity request to the disk controller, while the Windows workers run only
-# their owner's turns. It runs no user turn
-# (deploy/providers/azure/linux-worker/README.md). The deploy tool adds this
-# component to the staged worker overlay and sets the replica count
+# The coordination host (WIN_WORKER_COORDINATION_HOST=true, which the Windows
+# worker pool requires): the Linux worker runs the orchestrations, durable
+# timers, system agents, title generator, every turn's bookkeeping and the
+# sessions that people start in the Portal, and sends every capacity request
+# to the disk controller, while the Windows workers run only their owner's
+# turns (deploy/providers/azure/linux-worker/README.md). The deploy tool adds
+# this component to the staged worker overlay and sets the replica count
 # (deploy/scripts/lib/coordination-host.mjs), and stages the worker with the
 # host's own identity.
 #

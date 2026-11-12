@@ -21,7 +21,7 @@ import { join } from "node:path";
 import { log, run } from "../../../scripts/lib/common.mjs";
 import { databaseUsesManagedIdentity } from "../../../scripts/lib/database-env.mjs";
 import { settingValue, winWorkersEnabled } from "../../../scripts/lib/aks-env.mjs";
-import { COMPLETE_MARKER, parseDefaultModel, readJobSettings } from "./Setup-WinWorkerDbRole.mjs";
+import { COMPLETE_MARKER, readJobSettings } from "./Setup-WinWorkerDbRole.mjs";
 
 export const DB_ROLE_JOB_NAME = "pilotswarm-db-role";
 export const DB_ROLE_JOB_FILE = "db-role-job.yaml";
@@ -41,8 +41,8 @@ const DEFAULT_TIMEOUT_MS = (JOB_DEADLINE_SECONDS + 300) * 1000;
 
 // The portal's settings the Job reads, by name.
 const DATABASE_SETTINGS = ["DATABASE_URL", "PILOTSWARM_CMS_FACTS_DATABASE_URL", "PILOTSWARM_DB_AAD_USER"];
-const MEMBER_SETTINGS = ["WIN_WORKER_IDENTITY_NAME", "EXPECTED_WIN_WORKER_OID"];
-const COORDINATION_SETTINGS = ["COORDINATION_IDENTITY_NAME", "COORDINATION_IDENTITY_PRINCIPAL_ID"];
+// The two members of the workers' group, from base-infra's outputs.
+const MEMBER_SETTINGS = ["WIN_WORKER_IDENTITY_NAME", "EXPECTED_WIN_WORKER_OID", "COORDINATION_IDENTITY_NAME", "COORDINATION_IDENTITY_PRINCIPAL_ID"];
 
 export function dbRoleJobManifestPath(stagingDir) {
   return join(stagingDir, DB_ROLE_JOB_FILE);
@@ -77,11 +77,12 @@ export function dbRoleJobEnv(env) {
   values.PILOTSWARM_USE_MANAGED_IDENTITY = "1";
   for (const key of MEMBER_SETTINGS) {
     const value = settingValue(env, key);
-    if (!value) throw new Error(`The database role Job needs ${key} from base-infra: deploy base-infra with WIN_WORKERS_ENABLED=true first.`);
+    if (!value) {
+      throw new Error(`The database role Job needs ${key} from base-infra: deploy base-infra with WIN_WORKERS_ENABLED=true ` +
+        "and WIN_WORKER_COORDINATION_HOST=true first.");
+    }
     values[key] = value;
   }
-  const coordination = COORDINATION_SETTINGS.map((key) => settingValue(env, key));
-  if (coordination.some(Boolean)) COORDINATION_SETTINGS.forEach((key, i) => { values[key] = coordination[i]; });
   values.PS_MODEL_PROVIDERS_PATH = `${DB_ROLE_JOB_MOUNT}/${DB_ROLE_JOB_CATALOG}`;
   readJobSettings(values);
   return values;
@@ -92,13 +93,11 @@ export function renderDbRoleJobManifest({ env, catalogText, scriptText }) {
   const image = settingValue(env, "IMAGE");
   if (!image) throw new Error("The database role Job runs in the portal's image: IMAGE is not set.");
   const namespace = settingValue(env, "NAMESPACE") || "pilotswarm";
-  let catalog;
   try {
-    catalog = JSON.parse(catalogText);
+    JSON.parse(catalogText);
   } catch (error) {
     throw new Error(`The portal's staged model catalog is not valid JSON: ${error.message}`);
   }
-  parseDefaultModel(catalog);
   const jobEnv = dbRoleJobEnv(env);
   const labels = { "app.kubernetes.io/name": "pilotswarm", "app.kubernetes.io/component": "db-role-job" };
   const metadata = { name: DB_ROLE_JOB_NAME, namespace, labels };
@@ -136,8 +135,10 @@ export function renderDbRoleJobManifest({ env, catalogText, scriptText }) {
             imagePullPolicy: "IfNotPresent",
             command: ["node", `${DB_ROLE_JOB_MOUNT}/${DB_ROLE_JOB_SCRIPT}`],
             env: Object.entries(jobEnv).map(([name, value]) => ({ name, value })),
-            // The portal's model credentials, which the default model's
-            // provider may need; the Job never prints them.
+            // The portal's model credentials: the clients start as the
+            // portal's do, and on a new database the first client to start
+            // seeds each of the catalog's providers whose credential it has.
+            // The Job never prints them.
             envFrom: [{ secretRef: { name: PORTAL_SECRETS, optional: true } }],
             volumeMounts: [{ name: "db-role-job", mountPath: DB_ROLE_JOB_MOUNT, readOnly: true }],
             resources: { requests: { cpu: "100m", memory: "256Mi" }, limits: { cpu: "1", memory: "1Gi" } },

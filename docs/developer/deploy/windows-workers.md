@@ -21,7 +21,7 @@ the design and the reasons behind it; this page describes what the code does.
 | Windows image, services and scripts | `deploy/providers/azure/windows/` | [README](../../../deploy/providers/azure/windows/README.md) |
 | Disk controller and credential broker | `deploy/providers/azure/disk-controller/` | [README](../../../deploy/providers/azure/disk-controller/README.md) |
 | Key Vault personal secret store | `deploy/providers/azure/secret-store/` | [README](../../../deploy/providers/azure/secret-store/README.md) |
-| Coordination host module and manifests | `deploy/providers/azure/linux-worker/`, `deploy/providers/azure/gitops/worker/components/coordination-host/`, `deploy/scripts/lib/coordination-host.mjs` | [README](../../../deploy/providers/azure/linux-worker/README.md), [orchestrator reference](../../../deploy/scripts/README.md#the-coordination-host) |
+| Coordination host module and manifests | `deploy/providers/azure/linux-worker/`, `deploy/providers/azure/gitops/worker/components/coordination-host*/`, `deploy/scripts/lib/coordination-host.mjs` | [README](../../../deploy/providers/azure/linux-worker/README.md), [orchestrator reference](../../../deploy/scripts/README.md#the-coordination-host) |
 | Settings, Bicep and the deploy step | `deploy/providers/azure/envs/template.env`, `deploy/providers/azure/services/base-infra/bicep/`, `deploy/providers/azure/deploy-steps/win-workers.mjs` | [Orchestrator reference](../../../deploy/scripts/README.md#optional-windows-worker-pool) |
 | Database role Job | `deploy/providers/azure/deploy-steps/Setup-WinWorkerDbRole.mjs`, `deploy/providers/azure/deploy-steps/db-role-job.mjs` | [Orchestrator reference](../../../deploy/scripts/README.md#the-database-role-job) |
 | Entra app roles for applications | `deploy/scripts/auth/` | [Portal Entra app roles](./entra-app-roles.md#roles-for-application-identities) |
@@ -71,11 +71,12 @@ the design and the reasons behind it; this page describes what the code does.
   attaches, grows, resets and refreshes drives, fences VMs that go silent, and
   releases each owner's model token only to that owner's VMs.
 - **The coordination host.** PilotSwarm's Linux worker, at two replicas by
-  default, in the cluster. It runs everything that needs neither a repository
-  nor an owner's token: orchestrations, timers, system agents, titles, the
-  bookkeeping around every turn, and every capacity request. With it the
+  default, in the cluster. It runs everything but the owners' work on the
+  pool: orchestrations, timers, system agents, titles, the bookkeeping around
+  every turn, the sessions that people start in the Portal, with their
+  workspaces, every Workflow activity, and every capacity request. With it the
   Windows VMs run only their owners' work, and the pool can be empty while
-  nothing runs.
+  nothing runs. A pool requires it.
 - **Personal model credentials.** An owner's sessions call models with that
   owner's own GitHub Copilot account, through a fine-grained token the owner
   registers once on the Portal. The token is kept only in a personal Key
@@ -118,7 +119,7 @@ flowchart LR
     CTRL -->|"7 - Read that token"| KV
     VM -->|"8 - Edit and build on Q:"| DRIVE
     VM -->|"9 - Turns, session state"| PG
-    LW -->|"10 - Orchestrations, timers,<br/>system sessions"| PG
+    LW -->|"10 - Orchestrations, timers,<br/>system and Portal sessions"| PG
     LW -->|"11 - Ask for a VM of the owner"| CTRL
     style OUT fill:#3b3b3b,stroke:#9e9e9e,color:#fff
     style AKS fill:#1f4e79,stroke:#9dc3e6,color:#fff
@@ -139,9 +140,10 @@ flowchart LR
   with the owner's token, which the broker releases only to a VM bound to that
   owner and which the worker keeps only in memory. PostgreSQL holds the durable
   queue and the session catalog; Blob holds session state between VMs.
-- **Steps 10 and 11:** the coordination host runs the orchestrations, timers and
-  system sessions. When a session needs a turn and its owner has no free VM,
-  its capacity request reaches the controller from there, which starts one.
+- **Steps 10 and 11:** the coordination host runs the orchestrations, timers,
+  system sessions and the sessions people start in the Portal. When a session
+  needs a turn and its owner has no free VM, its capacity request reaches the
+  controller from there, which starts one.
 
 ## Where everything runs
 
@@ -158,9 +160,9 @@ Linux and the Windows machines are not in one cluster:
   is reachable from them, and nothing reaches them.
 - **One deploy run creates both.** `deploy.mjs` runs base-infra's Bicep, which
   creates the pool's Azure resources, then publishes the cluster's manifests,
-  and the Portal's rollout step runs the database role Job. With the
-  coordination host, `deploy all` deploys the `worker` service just after the
-  `portal` instead of before it, so that Job has run before the host's pods
+  and the Portal's rollout step runs the database role Job. With the pool,
+  `deploy all` deploys the `worker` service, the coordination host, just after
+  the `portal` instead of before it, so that Job has run before the host's pods
   sign in. Each VM takes its code from a hashed release at every start of its
   worker service.
 
@@ -265,6 +267,11 @@ from the controller's private CA.
   firewall admits only the cluster's pinned egress IP (`AllowClusterEgress`) and
   the NAT gateway's (`AllowWinWorkerEgress`). The deploy step deletes an
   `AllowAllAzureServices` rule that an earlier deploy left.
+- **The cluster's egress IP.** So that firewall can name it, the pool pins the
+  AKS cluster's outbound address to the static IP `<prefix>-hdb-egress`, in
+  every edge mode. Turning the pool on for an existing stamp changes the
+  cluster's outbound address: update any allowlist outside the stamp that
+  names the old one.
 - **The personal vault and the controller's state account** have public access
   turned off, or, with `AZURE_POLICY_RESTRICTED=true`, a network security perimeter
   profile with no access rule. Only their private endpoints reach them: the
@@ -289,11 +296,11 @@ from the controller's private CA.
   owner's credential pays for, and they run on the coordination host, which
   never gets a token. Keep `GITHUB_TOKEN`, `GH_TOKEN` and `COPILOT_GITHUB_TOKEN`
   unset on the Portal, the workers and the database role Job, so no shared
-  GitHub provider is seeded. Each run of the
-  [database role Job](#the-database-role-job) sets the cluster and system
-  default model to the `defaultModel` of the Portal's model catalog
-  (`MODEL_PROVIDERS_FILE`, when set), which names the shared provider's model.
-  See
+  GitHub provider is seeded. The `defaultModel` of the Portal's model catalog
+  (`MODEL_PROVIDERS_FILE`, when set), which names the shared provider's model,
+  seeds the cluster default model once, when the first client starts against
+  a new database; after that, the default models are an administrator's choice
+  in the Portal. See
   [Providers With No Key](../reference/configuration.md#providers-with-no-key-workload-identity).
 
 ### Registering a token
@@ -496,12 +503,9 @@ flowchart TB
   start. It removes the association whenever it deletes the VM, drained or
   fenced; a fence removes it beside the deletion, so a slow or failed removal
   never delays the drive's move, and retries it with every retried deletion.
-- **Binding.** With owner-only workers (the coordination host), the launcher of
-  an unbound VM starts the worker only when a heartbeat answer first names an
-  owner, with `PILOTSWARM_WORKER_OWNER_TAG=owner.<ownerOid>`. Without them, an
-  unbound VM runs untagged work until it is bound; the worker then drains for
-  up to two minutes and exits with code 75, and the service manager starts it
-  again with the owner's tag.
+- **Binding.** The Windows workers are owner-only: the launcher of an unbound
+  VM starts the worker only when a heartbeat answer first names an owner, with
+  `PILOTSWARM_WORKER_OWNER_TAG=owner.<ownerOid>`.
 - **A finished session tree doesn't delete its VM.** The VM serves its owner's
   other trees until it has been idle (no attached drive, no active workload)
   for `WIN_WORKER_IDLE_RECYCLE_MINUTES`, or until the pool is full and another
@@ -518,8 +522,8 @@ demand:
 
 1. **Demand.** An owner needs a VM when a root session of theirs that holds a
    live lease has work and none of their bound VMs is free. The controller
-   learns of it from claims and branch syncs, capacity requests
-   (`/v1/coordination/demand` or `/v1/vms/demand`), `/v1/vms/busy` from the
+   learns of it from claims and branch syncs, the coordination host's capacity
+   requests (`/v1/coordination/demand`), `/v1/vms/busy` from the
    owner's VMs, and an admission request on an unbound VM. Unserved demand is
    kept in the controller's state, survives a restart, and is served oldest
    first; an entry lapses 30 minutes after its last signal, and a waiting
@@ -560,9 +564,9 @@ Missed heartbeats can mean a crash, or a network partition while the VM keeps
 writing to its drive. So the controller deletes such a VM, and waits until Azure
 reports it gone, before the drive moves:
 
-- a VM that sends no heartbeat for 60 seconds is fenced. A VM in its binding
-  restart, or one the unfreeze restarted, gets 3 minutes; a VM stopped for an
-  upgrade is never treated as crashed;
+- a VM that sends no heartbeat for 60 seconds is fenced. A VM the unfreeze
+  restarted gets 3 minutes; a VM stopped for an upgrade is never treated as
+  crashed;
 - a bound VM that reports no `running` heartbeat for 10 minutes, or any VM that
   reports a fourth launch ID within 15 minutes, is fenced too, and raises the
   crash-loop alert. Restarts the controller asked for don't count;
@@ -581,7 +585,7 @@ reports it gone, before the drive moves:
 |---|---|
 | Controller tick, VM heartbeat | 15 seconds |
 | Silence before fencing | 60 seconds |
-| Binding restart and unfreeze windows | 3 minutes |
+| Unfreeze window | 3 minutes |
 | Start window (bound VM to `running`) | 10 minutes |
 | Crash loop | a fourth launch ID within 15 minutes |
 | Controller start-up grace | `PS_DISK_CONTROLLER_STARTUP_GRACE_SECONDS` (60) |
@@ -672,8 +676,12 @@ session tree:
   `Seed-WorkerReposDisk.ps1 -Refresh` and then `-Verify` there as Managed Run
   Commands. Only when every check passes (refs, `git fsck --connectivity-only`,
   no Git hooks, current clean-detach records, owners and folder permissions)
-  does it take an incremental snapshot, record it as the golden snapshot and
-  keep the previous one for rollback. Then it deletes the drive and the VM. A
+  does it take an incremental snapshot and record it as the golden snapshot.
+  It keeps the snapshot it replaced, which `GET /v1/admin/status` shows as
+  `previousSnapshot`, until the next refresh, which deletes it if the
+  controller made it. No step rolls back to it: the recorded snapshot wins
+  over `WIN_DEV_DRIVE_GOLDEN_SNAPSHOT_ID`, and no route changes it. Then the
+  refresh deletes the drive and the VM. A
   failed step keeps the current snapshot and raises the refresh alert. A copy,
   the drive's or the snapshot's, fails its step as soon as Azure reports it
   `Failed`, or when it is still copying after 6 hours. The controller keeps
@@ -804,11 +812,11 @@ back or the dispatcher returns it.
 - **Bound workers.** The launcher of a bound VM starts the worker with
   `PILOTSWARM_WORKER_OWNER_TAG=owner.<ownerOid>`, so the worker also runs that
   owner's tagged activities, and only a worker with that tag runs them.
-- **Owner-only workers.** With `WIN_WORKER_COORDINATION_HOST=true`, the deploy
-  writes `PILOTSWARM_WORKER_OWNER_ONLY=1` into the VMs' `userData`. Such a
-  worker claims only its owner's tagged activities: no untagged work (system
-  sessions' turns, titles, the manager activities around every turn), no
-  capability-tagged activity and no capacity request. The coordination host
+- **Owner-only workers.** The deploy writes `PILOTSWARM_WORKER_OWNER_ONLY=1`
+  into the VMs' `userData`, since a pool always has the coordination host.
+  Such a worker claims only its owner's tagged activities: no untagged work
+  (system sessions' turns, titles, the manager activities around every turn),
+  no capability-tagged activity and no capacity request. The coordination host
   runs all of that. An owner-only worker still runs orchestration turns, but
   `ctx.utcNow()` and `ctx.newGuid()` are untagged Duroxide activities, so a
   deployment with owner-only workers always needs a worker without the option.
@@ -829,15 +837,18 @@ owner's tag:
 | A session under a root with a live lease | Admit | `WORKSPACE_BUSY` (`VM_UNBOUND`): the controller binds a VM | `WORKSPACE_BUSY` (`OWNER_MISMATCH`) |
 | Any session under a root whose lease is parked, returning or quarantined | `WORKSPACE_BUSY`, retry after 15 minutes | the same | the same |
 | A user session under a root without a lease | Deny (`NO_DRIVE_LEASE`) | Deny | Deny |
-| A system session | Admit; `WORKSPACE_BUSY` on a pool with the coordination host | the same | the same |
+| A system session | `WORKSPACE_BUSY` (`SYSTEM_SESSION`) | the same | the same |
 
-- **Every user session belongs to a leased root.** Any other user session is
-  denied, and a denied turn fails with the controller's message and isn't
-  retried.
-- **System sessions stay off the VMs.** With the coordination host, no Windows
-  VM claims a system session's activity. A system session that still reaches a
-  VM waits for the coordination host instead of running next to a token. The
-  coordination host's own admission hook admits only system sessions.
+- **On a VM, every user session belongs to a leased root.** Any other user
+  session that reaches a VM is denied, and a denied turn fails with the
+  controller's message and isn't retried.
+- **System sessions stay off the VMs.** No Windows VM claims a system
+  session's activity. A system session that still reaches a VM waits for the
+  coordination host instead of running next to a token.
+- **The coordination host has no admission hook.** It runs every turn that
+  carries no owner tag, the Portal's sessions included. PilotSwarm itself
+  refuses there, without a retry, a turn of a session whose stored owner tag
+  the turn's input lacks.
 - **A controller that doesn't answer** fails the turn, which is retried.
 
 The hook is generic: see
@@ -873,17 +884,13 @@ sequenceDiagram
 | `deny` (`NO_DRIVE_LEASE`) | The root holds no lease of this owner | The turn ends as a refusal that isn't retried |
 | no answer in 15 seconds | `CAPACITY_UNAVAILABLE` | Waits a minute and asks again, however many busy answers came before; releases no worker |
 
-- **Who asks.** With the coordination host, its module sends every request to
-  `POST /v1/coordination/demand`, and the controller refuses `/v1/vms/demand`
-  with `403 COORDINATION_HOST`. Without it, each Windows worker's extension
-  registers a requester and sends `POST /v1/vms/demand`. But a worker never
-  declares both its owner tag and the capacity tag, which would make six tags:
-  a bound worker without owner-only refuses to start with a requester, so a
-  pool needs the coordination host.
-- **Entra object IDs only.** The controller binds VMs to Entra object IDs. Both
-  requesters answer `deny` with `OWNER_NOT_SUPPORTED` for an owner whose subject
-  isn't one, without asking the controller, rather than retrying a request it
-  can never serve. Use Entra sign-in for the Portal.
+- **Who asks.** The coordination host's module sends every request to
+  `POST /v1/coordination/demand`. The Windows workers are owner-only and send
+  none, and the controller's worker port has no capacity route.
+- **Entra object IDs only.** The controller binds VMs to Entra object IDs. The
+  coordination host's requester answers `deny` with `OWNER_NOT_SUPPORTED` for
+  an owner whose subject isn't one, without asking the controller, rather than
+  retrying a request it can never serve. Use Entra sign-in for the Portal.
 - **The fast busy policy.** With `PILOTSWARM_WORKSPACE_BUSY_FAST_RELEASE=1` on
   the Portal, an owner-routed session and the sub-agents it creates use the
   fast policy: a `WORKSPACE_BUSY` refusal releases the session from its worker
@@ -972,11 +979,12 @@ controller answers `403`.
   (`"event":"pilotswarm.dispatcher_delegation"`). The controller audits every
   dispatcher call.
 
-Enforce ownership on a pool that several people share
-(`AUTHZ_ENFORCE_OWNERSHIP=true`). Without it the Portal refuses
-`onBehalfOfOwner` (`403 OWNERSHIP_NOT_ENFORCED`): ownership is then only
-audited, so nothing would keep a delegated session private or read-only, and
-revoking delegation would change nothing. See
+A pool, and any deployment with a dispatcher, needs enforced session
+ownership (`AUTHZ_ENFORCE_OWNERSHIP=true`), and the deploy refuses either
+without it. Without it the Portal also refuses `onBehalfOfOwner`
+(`403 OWNERSHIP_NOT_ENFORCED`): ownership is then only audited, so nothing
+would keep a delegated session private or read-only, and revoking delegation
+would change nothing. See
 [Dispatcher delegation](../reference/configuration.md#dispatcher-delegation).
 
 ## Session message scope
@@ -1017,6 +1025,13 @@ See [Session Message Scope](../reference/configuration.md#session-message-scope)
   coordination host call the controller with that app's v2 tokens. See
   [Roles for application identities](./entra-app-roles.md#roles-for-application-identities).
 - **At least one alert receiver** in `WIN_WORKER_ALERT_EMAILS`.
+- **The coordination host** (`WIN_WORKER_COORDINATION_HOST=true`) with owner
+  routing (`PILOTSWARM_OWNER_ROUTING=1`): the Windows workers run only their
+  owners' work, and the host runs everything else. See
+  [The coordination host](#the-coordination-host).
+- **Enforced session ownership** (`AUTHZ_ENFORCE_OWNERSHIP=true`): otherwise
+  the Portal only audits who may open a session, and anyone could prompt an
+  owner's session, which runs on that owner's VM with the owner's token.
 - **Azure capacity:** quota for `WIN_WORKER_VM_SIZE` (a size with nested
   virtualization, which Hyper-V containers need), Premium SSD v2 in the region,
   and a subscription whose Azure Policy allows `securityType: Standard` VMs.
@@ -1032,11 +1047,15 @@ See [Session Message Scope](../reference/configuration.md#session-message-scope)
   the switch, where every worker's database identity can read it, and workers
   in external mode no longer use it. The deploy can't check this.
 
-`deploy.mjs` refuses a missing requirement before any step, and also refuses
-`WIN_WORKER_MIN_RUNNING=0` without the coordination host, the coordination host
-without `WIN_WORKERS_ENABLED=true` and `PILOTSWARM_OWNER_ROUTING=1` or with
-`WORKSPACES_ENABLED=true`, and `PILOTSWARM_OWNER_ROUTING=1` without the pool:
-only a bound Windows worker serves an owner tag.
+Before any step, `deploy.mjs` refuses a missing or wrong setting among these:
+the edge mode, the stamp's database and its identity,
+`PORTAL_AUTH_ENTRA_CLIENT_ID`, the alert receivers, the coordination host,
+owner routing and `AUTHZ_ENFORCE_OWNERSHIP`. It also refuses
+`DISPATCHER_SP_OBJECT_ID` without `AUTHZ_ENFORCE_OWNERSHIP=true`, the
+coordination host without the pool, and `PILOTSWARM_OWNER_ROUTING=1` without
+the pool: only a bound Windows worker serves an owner tag. It can't check the
+Entra app's roles, Azure capacity, the tools or the dispatcher, so check those
+yourself.
 
 **The reference GitHub workflow can't deploy a pool.** **Deploy Azure stamp**
 (`deploy-azure.yml`) requires `EDGE_MODE=public`, an external HorizonDB
@@ -1066,31 +1085,35 @@ the `stamp` profile, and the security logs go to the perimeter's workspace. See
    `worker`, `deployer` and `coordinator`.
 3. **The env file.** Scaffold one with
    `npm run deploy:new-env -- <env> ... --win-workers-enabled y --win-worker-alert-emails <addresses>`,
-   or set `WIN_WORKERS_ENABLED=true` and `WIN_WORKER_ALERT_EMAILS` in an
-   existing one. Leave `WIN_WORKER_IMAGE_VERSION` unset for now, and choose the
-   other [settings](#settings).
+   which also sets `WIN_WORKER_COORDINATION_HOST=true`,
+   `PILOTSWARM_OWNER_ROUTING=1` and `AUTHZ_ENFORCE_OWNERSHIP=true`, or set all
+   five in an existing one. Leave `WIN_WORKER_IMAGE_VERSION` unset for now,
+   and choose the other [settings](#settings).
 4. **The first deploy** (`npm run deploy -- all <env>`). Base-infra creates the
    identities, the gallery and its image definition `pilotswarm-win-worker`,
    the worker subnet and its NAT gateway, the private endpoints, the personal,
    deploy-only and state stores, the release container, the Entra-only
-   PostgreSQL server and the alerts, but no VM. The `worker` service publishes
-   the Linux worker with 0 replicas. The `portal` service's rollout step runs
-   the [database role Job](#the-database-role-job), which applies the
-   migrations and makes the workers' identity a member of
-   `pilotswarm_worker_group`. The `disk-controller` service makes the
-   controller's CA and certificate and deploys the controller, which answers
-   worker routes with `503 NOT_READY` until it has a scale set.
+   PostgreSQL server and the alerts, but no VM. The `portal` service's rollout
+   step runs the [database role Job](#the-database-role-job), which applies the
+   migrations and makes the workers' identity and the coordination host's
+   members of `pilotswarm_worker_group`. Just after it, the `worker` service
+   deploys the [coordination host](#the-coordination-host). The
+   `disk-controller` service makes the controller's CA and certificate and
+   deploys the controller, which answers worker routes with `503 NOT_READY`
+   until it has a scale set.
 5. **Role assignments.** With `Set-PortalAuthAssignments.ps1`, give the
    `worker` role to the workers' identity (`<prefix>-win-worker-mid`), the
-   `deployer` role to the deploy pipeline's identity, and the `user` role to the
-   dispatcher's service principal. Assigning an app role to a service principal
-   needs an Entra administrator, and a managed identity's tokens can take hours
-   to show a new role. Ask the subscription owner to send the subscription's
-   Activity Log to the stamp's main Log Analytics workspace: the Activity Log
-   alerts read it there, and the deploy doesn't configure it.
+   `coordinator` role to the coordination host's identity
+   (`<prefix>-linux-worker-mid`), the `deployer` role to the deploy pipeline's
+   identity, and the `user` role to the dispatcher's service principal.
+   Assigning an app role to a service principal needs an Entra administrator,
+   and a managed identity's tokens can take hours to show a new role. Ask the
+   subscription owner to send the subscription's Activity Log to the stamp's
+   main Log Analytics workspace: the Activity Log alerts read it there, and the
+   deploy doesn't configure it.
 6. **The first release.** Pack a release with `Pack-WinWorkerRelease.ps1` and
    run `Bootstrap-WinWorkerStamp.ps1`, as for an [upgrade](#upgrading), with
-   `-NoCoordinationHost` until the coordination host exists. Its Publish step
+   the coordination host's script (`-CoordinationHostScript`). Its Publish step
    uploads the release, without which a VM starts no worker. Its Migrate step
    runs the database role Job again from
    `deploy/.tmp/portal-<env>/db-role-job.yaml`; since the first deploy already
@@ -1115,14 +1138,10 @@ the `stamp` profile, and the security logs go to the perimeter's workspace. See
    local administrator password once, keeps it only in the deploy-only vault and
    passes it as a secure parameter. Nobody signs in with it: operators use Run
    Command.
-10. **The coordination host** (recommended): set
-    `WIN_WORKER_COORDINATION_HOST=true`, `PILOTSWARM_OWNER_ROUTING=1` and
-    `WORKSPACES_ENABLED=false`, and deploy with `all`, which then deploys the
-    `worker` service after the `portal`, so the database role Job has made the
-    host's identity a member of the workers' group before its pods start. Have
-    an Entra administrator give that identity the `coordinator` role, and then,
-    if you like, set `WIN_WORKER_MIN_RUNNING=0`. See
-    [Turning the coordination host on](#turning-the-coordination-host-on).
+10. **No idle VM** (optional): set `WIN_WORKER_MIN_RUNNING=0`, so the pool
+    pays for no Windows VM while nothing runs; the coordination host runs
+    everything but the owners' work. See
+    [Deploying the coordination host](#deploying-the-coordination-host).
 11. **Check it.** Claim a drive with the dispatcher's identity, send a prompt,
     and watch the controller's status ([Operating the pool](#operating-the-pool)).
     Confirm that every log stream arrives in its workspace.
@@ -1140,7 +1159,7 @@ Base-infra, only with `WIN_WORKERS_ENABLED=true`:
 |---|---|---|
 | Workers' identity | `<prefix>-win-worker-mid` | The only identity of every VM: a database sign-in can't choose between two |
 | Controller's identity | `<prefix>-disk-pool-mid` | Federated with the controller's service account |
-| Coordination host's identity | `<prefix>-linux-worker-mid` | With `WIN_WORKER_COORDINATION_HOST=true` too: federated with the Linux worker's service account ([The coordination host](#the-coordination-host)) |
+| Coordination host's identity | `<prefix>-linux-worker-mid` | Federated with the Linux worker's service account ([The coordination host](#the-coordination-host)) |
 | Compute gallery and image definition | `<alphaprefix>gallery`, `pilotswarm-win-worker` | Windows, generalized, Gen2 |
 | Scale set and standby pool | `<prefix>-win-workers`, `<prefix>-win-worker-standby` | Once `WIN_WORKER_IMAGE_VERSION` is set: one zone, Standard security, a 256 GiB managed OS disk, manual upgrades, no automatic repairs, the Azure Monitor Agent |
 | Worker subnet, NAT gateway and NSG | `win-workers-subnet`, `<prefix>-win-worker-nat` | [The network](#the-network) |
@@ -1157,9 +1176,38 @@ underscores.
 
 In the cluster, with the pool: the `disk-controller` service; the database role
 Job, which the Portal's rollout step applies from outside the Flux tree; and the
-Linux worker, at 0 replicas or, with `WIN_WORKER_COORDINATION_HOST=true`, as the
-coordination host, with the worker overlay's `coordination-host` component, its
-PodDisruptionBudget and its egress NetworkPolicy.
+Linux worker as the coordination host, with the worker overlay's
+`coordination-host` component, its PodDisruptionBudget and its egress
+NetworkPolicy, and with `WORKSPACES_ENABLED=true` the
+`coordination-host-workspaces` component too.
+
+### What the pool changes on an existing stamp
+
+Turning the pool on for a running stamp changes more than it adds. Each change
+comes only with `WIN_WORKERS_ENABLED=true`:
+
+- **The cluster's egress IP.** The cluster's outbound address becomes the
+  pinned IP `<prefix>-hdb-egress`, in every edge mode. Update any allowlist
+  outside the stamp that names the old address.
+- **PostgreSQL.** The server takes Entra sign-in only, so the Portal's
+  `DATABASE_URL` has no password, and its firewall admits only the cluster's
+  egress IP and the workers' NAT gateway. The deploy step deletes an
+  `AllowAllAzureServices` rule.
+- **The Linux worker** becomes the coordination host: it signs in with its own
+  identity, mounts no secret store, and gets a PodDisruptionBudget and an
+  egress NetworkPolicy. The Portal's sessions keep running there, with their
+  workspaces.
+- **The Portal identity's federated credential for the worker's service
+  account** (`worker-fedcred`) is no longer created, and the worker's manifests
+  step deletes an existing one and fails while one remains.
+- **The Portal identity's Blob grant** narrows to the `copilot-sessions`
+  container. The deploy step deletes the account-wide grant once the container
+  grant exists.
+- **The database role Job** runs at every rollout of the Portal, and
+  `deploy all` deploys the `worker` service just after the `portal`.
+- **First, by hand:** the subscription owner creates three custom role
+  definitions (step 1). A deploy-only vault then holds the controller's CA key
+  and the VMs' administrator password.
 
 ## The database role Job
 
@@ -1185,8 +1233,8 @@ run as, and gives the workers' identity what it needs, and only that.
   manifest an earlier deploy left there.
 - **Run by the Portal's rollout step,** once the Portal has rolled out, at
   every deploy of the `portal` service that includes that step: before the
-  `disk-controller` service starts any VM and, with the coordination host,
-  before `all` deploys the `worker` service. The step deletes the last run's
+  `disk-controller` service starts any VM and before `all` deploys the
+  `worker` service, the coordination host. The step deletes the last run's
   Job and ConfigMap, applies the manifest, waits for the Job and prints its
   last log lines. The names are fixed and every run deletes before it applies:
   a Job can't be changed once created, and the grants want one run at a time.
@@ -1196,8 +1244,11 @@ run as, and gives the workers' identity what it needs, and only that.
   completes and logs that every step is done.
 
 Its pod runs as the image's unprivileged `node` user, with every capability
-dropped, and gets the Portal's model credentials (`pilotswarm-portal-secrets`),
-which the default model's provider may need; its other settings are under
+dropped, and gets the Portal's model credentials (`pilotswarm-portal-secrets`):
+its clients start with the Portal's staged model catalog, as the Portal's do,
+and on a new database the first client to start seeds the catalog's providers
+and its cluster default model, once. The Job never sets a default model, so an
+administrator's choice in the Portal stays. Its other settings are under
 [Values the deploy fills in](#values-the-deploy-fills-in). Nothing it prints
 holds a credential.
 
@@ -1217,19 +1268,13 @@ or the upgrade:
    granted outside this list is removed, and the same grants become the
    migrating role's default privileges there, so a later migration's objects
    get them too.
-3. **The members.** It adds the workers' identity and, with the coordination
-   host, the host's. A missing member is created as a Microsoft Entra service
-   principal with `pgaadauth_create_principal_with_oid`, on the server's
-   `postgres` database; an existing role of that name must be the Entra
-   principal of that object ID. Members are only added, never removed.
+3. **The members.** It adds the workers' identity and the coordination host's;
+   it refuses to run without both. A missing member is created as a Microsoft
+   Entra service principal with `pgaadauth_create_principal_with_oid`, on the
+   server's `postgres` database; an existing role of that name must be the
+   Entra principal of that object ID. Members are only added, never removed.
 4. **The check.** It reads the group's privileges back through PostgreSQL's
    privilege functions and fails on any difference.
-5. **The default model.** It sets the cluster and the system default model to
-   the `defaultModel` of the Portal's staged model catalog (the file
-   `MODEL_PROVIDERS_FILE` names, when set) when either differs, so a default
-   changed in the Portal returns to the catalog's at the next run. A
-   `defaultModel` whose provider the deployment has no shared provider for,
-   because it holds no credential for it, changes nothing.
 
 What the group holds in each of the three schemas:
 
@@ -1251,33 +1296,46 @@ name that can loses `LOGIN`, and one with `SUPERUSER`, `CREATEROLE`,
 members keep what PostgreSQL gives `PUBLIC`: `CONNECT` to the database and
 temporary tables.
 
+**The group can write authorization records.** Its table grants cover the
+session catalog's authorization tables too: `session_owners`,
+`session_shares`, `users` (with each user's `allow_dispatcher_delegation`) and
+the provider tables. Whoever holds a member's database token can change who
+owns or shares a session, give itself a write share on another owner's
+delegated session, or opt a user into delegation. On a Windows VM an agent can
+reach that token through the instance metadata service
+([Residual risks](#residual-risks)). Narrower grants are future hardening.
+
 A worker of a release whose migrations the Job hasn't applied yet fails to
 start, which is why an upgrade runs the Job before the workers start again.
 
 ## The coordination host
 
-With `WIN_WORKER_COORDINATION_HOST=true`, PilotSwarm's Linux worker,
-`copilot-runtime-worker`, runs as the coordination host, at
+A pool requires the coordination host (`WIN_WORKER_COORDINATION_HOST=true`),
+and the deploy refuses the pool without it. PilotSwarm's Linux worker,
+`copilot-runtime-worker`, then runs as the coordination host, at
 `WIN_WORKER_COORDINATION_HOST_REPLICAS` replicas (2 by default), and the
-Windows workers become owner-only (`PILOTSWARM_WORKER_OWNER_ONLY=1` in their
-`userData`). With `false`, a stamp with the pool keeps the Linux worker at 0
-replicas, and the Windows workers run that work themselves; without the pool,
-the Linux worker keeps its 3 replicas. The host needs `WIN_WORKERS_ENABLED=true`,
-`PILOTSWARM_OWNER_ROUTING=1` and `WORKSPACES_ENABLED=false`: it runs no user
-turn, so it mounts no session workspace and loads no workspace provider.
+Windows workers are owner-only (`PILOTSWARM_WORKER_OWNER_ONLY=1` in their
+`userData`), so no Windows worker runs another user's work next to its
+owner's token. Without the pool, the Linux worker keeps its 3 replicas. The
+host needs `WIN_WORKERS_ENABLED=true` and `PILOTSWARM_OWNER_ROUTING=1`.
 
 - **What it runs.** Every orchestration while no Windows VM is up, the durable
   timers, the system agents, titles, model listing, the manager activities
-  before and after every turn, and every capacity request. It claims no
-  owner-tagged activity, so it never mounts a drive, runs an owner's turn or
-  gets a token: the broker releases tokens only to the pool's VMs.
-- **The module.** `PILOTSWARM_EXTENSION_MODULES` loads
+  before and after every turn, the sessions that people start in the Portal,
+  with their workspaces, every Workflow activity, and every capacity request.
+  It claims no owner-tagged activity, so it never mounts a Dev Drive, runs an
+  owner's tagged turn or gets a personal token: the broker releases tokens
+  only to the pool's VMs.
+- **The modules.** `PILOTSWARM_EXTENSION_MODULES` loads
   `/app/deploy/providers/azure/linux-worker/capacity-requester.mjs`
   ([README](../../../deploy/providers/azure/linux-worker/README.md)), which
   sends capacity requests to `POST /v1/coordination/demand` with a token of the
-  pod's own identity, and admits only system sessions' turns. The deploy sets
-  `PS_COORDINATION_URL` to the controller's coordination Service in the
-  namespace, `PS_COORDINATION_TOKEN_SCOPE` to the Portal app's `/.default`
+  pod's own identity. It registers no admission hook. With
+  `WORKSPACES_ENABLED=true`, the host also loads the workspace provider and
+  clone tools (`packages/sdk/examples/repo-workspaces/index.mjs`) and the
+  repo-coder agent's plugin, as the Linux worker does without the pool. The
+  deploy sets `PS_COORDINATION_URL` to the controller's coordination Service in
+  the namespace, `PS_COORDINATION_TOKEN_SCOPE` to the Portal app's `/.default`
   scope, and `NODE_EXTRA_CA_CERTS` to the CA file from the ConfigMap
   `pilotswarm-disk-controller-ca`, which holds two CAs during a CA rotation.
   The host reads that file only when it starts, so it restarts when the bundle
@@ -1287,22 +1345,22 @@ turn, so it mounts no session workspace and loads no workspace provider.
   Linux worker's service account with the Portal's identity, PostgreSQL's
   administrator (`worker-fedcred` on `<prefix>-csi-mid`), and loads the worker
   secrets from the stamp vault. With the pool, base-infra creates no
-  `worker-fedcred`: the Linux worker runs either as the coordination host or
-  no pod at all. With the host, base-infra creates
-  `<prefix>-linux-worker-mid` and federates that service account with it
-  (`coordination-host-fedcred`). The identity has Storage Blob
-  Data Contributor on `copilot-sessions` only and Cognitive Services OpenAI
-  User on the stamp's Foundry account; the database role Job makes it a member
-  of `pilotswarm_worker_group`; and the Portal app's `coordinator` role, which
-  an Entra administrator assigns, reaches only the controller's coordination
-  route. The deploy stages the worker with it as the workload identity and the
-  database user, for the worker only: the Portal keeps its own.
+  `worker-fedcred`. It creates `<prefix>-linux-worker-mid` and federates that
+  service account with it (`coordination-host-fedcred`). The identity has
+  Storage Blob Data Contributor on `copilot-sessions` only and Cognitive
+  Services OpenAI User on the stamp's Foundry account; the database role Job
+  makes it a member of `pilotswarm_worker_group`; and the Portal app's
+  `coordinator` role, which an Entra administrator assigns, reaches only the
+  controller's coordination route. The deploy stages the worker with it as the
+  workload identity and the database user, for the worker only: the Portal
+  keeps its own.
 - **No secrets.** The host loads nothing from the stamp vault: no
   `copilot-worker-secrets` SecretProviderClass, CSI volume or `secretRef`. Its
   database URL is passwordless, Blob and Foundry take its token, and the model
   catalog's Foundry providers use its workload identity in either
   `FOUNDRY_AUTH_MODE`. With no GitHub token and no Key Vault key, its models
-  come from Foundry or from shared providers in the database.
+  come from Foundry or from shared providers in the database, so the Portal's
+  sessions there use a shared provider.
 - **Its settings.** Every Windows worker setting that governs an activity it
   runs: the tool limits (`PILOTSWARM_LIMIT_TITLE_SESSION_TOOLS=1`,
   `PILOTSWARM_LIMIT_SYSTEM_SESSION_TOOLS=1`), `PILOTSWARM_SCRUB_CLI_ENV=1`,
@@ -1312,12 +1370,16 @@ turn, so it mounts no session workspace and loads no workspace provider.
   `PILOTSWARM_CLI_SECRET_ENV_VARS=COPILOT_SDK_AUTH_TOKEN` and the image's
   unpacked Copilot CLI program in `COPILOT_PKG_CACHE_HOME=/app/copilot-pkg`,
   `PILOTSWARM_REQUIRE_FINE_GRAINED_GH_PAT=1`, `PILOTSWARM_SKIP_DB_MIGRATIONS=1`,
-  `PILOTSWARM_EVENT_RETENTION_MINUTES=43200`, `PILOTSWARM_DISABLE_K8S_SCALING=1`
-  and `PILOTSWARM_DISABLE_CHILD_WORKSPACE_INHERITANCE=1`. A worker and
+  `PILOTSWARM_EVENT_RETENTION_MINUTES=43200` and
+  `PILOTSWARM_DISABLE_K8S_SCALING=1`. A Portal session's sub-agents keep its
+  workspace, as on the Linux worker without the pool. A worker and
   orchestration concurrency of 8 and 4 share its activity slots between the
-  system agents' turns, every turn's bookkeeping and the capacity requests,
-  within a 4 GiB memory limit. `WIN_WORKER_COORDINATION_HOST_REDACT_SECRET_PREFIXES`
-  sets its `PILOTSWARM_REDACT_SECRET_PREFIXES`.
+  system agents' and the Portal's sessions, every turn's bookkeeping and the
+  capacity requests, within a 4 GiB memory limit. With workspaces,
+  `PILOTSWARM_CLI_ENV_ALLOWLIST` passes the repo service's URL and Git's
+  author settings to agents' tools, which `PILOTSWARM_SCRUB_CLI_ENV=1` would
+  otherwise drop. `WIN_WORKER_COORDINATION_HOST_REDACT_SECRET_PREFIXES` sets
+  its `PILOTSWARM_REDACT_SECRET_PREFIXES`.
 - **Its CLI home.** An init container leaves `COPILOT_HOME` owned by root, with
   the same read-only placeholders and contents as the Windows image and the
   fixed `settings.json` and `config.json` that `PILOTSWARM_CLI_DISABLE_HOOKS=1`
@@ -1330,7 +1392,8 @@ turn, so it mounts no session workspace and loads no workspace provider.
   declares as `<skill>.SKILL.md` (and `<skill>.tools.json`). An init container
   copies only those into a read-only folder in the plugin's layout, which
   `PLUGIN_DIRS` names, so no tool module or MCP server comes from it. Unset,
-  the host loads the image's own plugins.
+  the host loads the image's own plugins. With workspaces, `PLUGIN_DIRS` names
+  that folder first, then the repo-coder agent's.
 - **Network.** The host replaces the rules of the worker's egress
   NetworkPolicy (`copilot-runtime-worker-egress`, which otherwise allows all
   egress but the instance metadata address and the Azure host endpoint). It
@@ -1339,8 +1402,10 @@ turn, so it mounts no session workspace and loads no workspace provider.
   addresses outside the stamp VNet `10.20.0.0/16`, for Entra ID, Foundry and
   PostgreSQL's public endpoint, but never the instance metadata endpoint or
   the Azure host endpoint `168.63.129.16`. A NetworkPolicy can't name hosts,
-  so those two ports reach every internet host. Nothing else in the VNet is
-  reachable.
+  so those two ports reach every internet host. With workspaces, a second
+  policy, `copilot-runtime-worker-repo-cache-egress`, opens TCP 8080 to the
+  repo pod, for the workspace provider, the clone tools and Git's credential
+  helper. Nothing else in the VNet is reachable.
 - **Availability.** A PodDisruptionBudget keeps one replica up through a node
   drain, and the replicas prefer different nodes. Every turn waits for the
   manager activities around it, so while the coordination host is down, every
@@ -1352,12 +1417,13 @@ turn, so it mounts no session workspace and loads no workspace provider.
   later, every time. The `capacity-request-unanswered` alert fires
   once requests have gone unanswered for 5 minutes since the last answered one.
 
-### Turning the coordination host on
+### Deploying the coordination host
 
-1. Set `WIN_WORKER_COORDINATION_HOST=true`, `PILOTSWARM_OWNER_ROUTING=1` and
-   `WORKSPACES_ENABLED=false`, and optionally the host's other
-   [settings](#deployment-settings).
-2. Deploy every service: `npm run deploy -- all <env>`. With the host, `all`
+1. With the pool, the env file sets `WIN_WORKER_COORDINATION_HOST=true`,
+   `PILOTSWARM_OWNER_ROUTING=1` and `AUTHZ_ENFORCE_OWNERSHIP=true`, which
+   `npm run deploy:new-env` writes with the pool, and optionally the host's
+   other [settings](#deployment-settings).
+2. Deploy every service: `npm run deploy -- all <env>`. With the pool, `all`
    deploys the `worker` service just after the `portal` instead of before it:
    - base-infra creates the host's identity, its federated credential, its
      grants and the `capacity-request-unanswered` alert, and outputs the
@@ -1378,9 +1444,6 @@ turn, so it mounts no session workspace and loads no workspace provider.
      controller's trusted CAs in the cluster, making the controller's
      certificate first on a stamp's first deploy, and publishes the host,
      whose pods sign in as its identity with `PILOTSWARM_SKIP_DB_MIGRATIONS=1`.
-
-   The Windows workers' `userData` now has `PILOTSWARM_WORKER_OWNER_ONLY=1`,
-   so its configuration version changes and the controller replaces their VMs.
 3. Have an Entra administrator give the host's identity the Portal app's
    `coordinator` role. Until then, the controller refuses its capacity
    requests:
@@ -1393,63 +1456,8 @@ turn, so it mounts no session workspace and loads no workspace provider.
 4. Then, if you like, set `WIN_WORKER_MIN_RUNNING=0` and deploy again.
 
 When you deploy the services one at a time, deploy `portal` before `worker`
-the first time you turn the host on: until the Job has run, the host's pods
+the first time you deploy the pool: until the Job has run, the host's pods
 can't use the database, and the worker's rollout fails.
-
-### Turning the coordination host off
-
-Turn it off one service at a time, in the order below, never with a single
-`deploy all`. The Windows workers' new `userData`
-(`PILOTSWARM_WORKER_OWNER_ONLY=0`) reaches only VMs created from the scale set
-model after base-infra's deploy, the controller learns the new configuration
-version only when the `disk-controller` service is deployed, and it replaces an
-outdated VM only once that VM is idle and holds no drive. Until then the old
-VMs stay owner-only, and every turn's bookkeeping is untagged work, which only
-the coordination host or a VM that isn't owner-only runs. `all` stages the
-Linux worker with 0 replicas before it deploys the `disk-controller` service,
-so sessions stop at their next turn boundary, and can stay stuck until a VM
-with the new configuration runs a worker: the VMs that hold their drives never
-become idle.
-
-The controller keeps serving a running coordination host with the setting off:
-its coordination route on port 3005 always listens. So:
-
-1. **Settings.** Set `WIN_WORKER_COORDINATION_HOST=false` in the env file, and
-   raise `WIN_WORKER_MIN_RUNNING` to 1 or more if it is 0: the deploy refuses
-   `0` without the host.
-2. **Base-infra, then the controller.** Run
-   `npm run deploy -- base-infra <env>`, then at once
-   `npm run deploy -- disk-controller <env>`. Don't deploy `worker`, or `all`,
-   yet: the coordination host keeps running from its current manifest.
-   - Base-infra patches the scale set model with the new `userData` and
-     configuration version. The Portal's identity gets no `worker-fedcred`
-     back while the pool is on, and the host's identity, its federated
-     credential and its grants stay, since an incremental deployment deletes
-     nothing.
-   - The controller restarts with the setting off, the new configuration
-     version and the new `WIN_WORKER_MIN_RUNNING`. It now accepts the VMs' own
-     capacity requests (`/v1/vms/demand`) and admits system sessions on VMs,
-     while the host's requests still reach it. It deletes the standby VMs, so
-     the standby pool refills from the new model, and treats the VMs on the old
-     configuration as outdated. Deploy it right after base-infra: until then
-     it still holds the old configuration version, and counts the VMs created
-     from the new model as outdated instead.
-3. **Wait for the rollout.** New VMs start without owner-only, and the
-   controller replaces each outdated VM in a scale-in step once it is idle and
-   holds no drive; until then the old VMs keep serving their owners, with the
-   coordination host running their bookkeeping. Wait until
-   `GET /v1/admin/status` ([Watching the pool](#watching-the-pool)), which
-   takes an operator's `admin` token, lists no VM whose `outdated` is `true` or
-   `null`. A drive stays on its VM until its session tree releases it, once the
-   tree has been idle for the idle hold (`PILOTSWARM_DEFAULT_IDLE_TIMEOUT_SEC`),
-   or until the dispatcher parks or returns it. A tree that keeps working keeps
-   its VM, so this can take as long as the longest-running tree.
-4. **The worker.** Run `npm run deploy -- worker <env>`. It stages the Linux
-   worker with 0 replicas, so the coordination host's pods stop. From then on,
-   `all` works as usual. Delete `<prefix>-linux-worker-mid` and its role
-   assignments by hand if you like: an incremental deployment keeps them, and
-   the database role Job never removes a member, so its database role stays in
-   `pilotswarm_worker_group` until you drop it.
 
 ## Upgrading
 
@@ -1514,7 +1522,7 @@ sequenceDiagram
   gone or ready. The `worker` service's manifests step publishes such a
   manifest when the shell sets the count, which wins over the env file:
   `WIN_WORKER_COORDINATION_HOST_REPLICAS=0 npm run deploy -- worker <env> --steps manifests`.
-  `-NoCoordinationHost` skips it on a stamp without one.
+  The script is required: a pool always has the coordination host.
 - **The migration Job.** `-MigrationJobManifest` takes the database role Job's
   manifest that the Portal's manifests step staged,
   `deploy/.tmp/portal-<env>/db-role-job.yaml`. The step deletes its objects,
@@ -1644,7 +1652,7 @@ in the controller's README has the full procedure and each check.
 | An owner's token | The personal vault, which the Portal can write but not read; the broker's release rules; `--secret-env-vars`; redaction; no shell or file tools for title and system sessions |
 | A VM's own agents | An unprivileged service account and locked-down folders. Docker makes agents administrators of their VM, so this boundary is only partial |
 | The Portal | Front Door and the App Gateway WAF, Entra sign-in, no personal secret reads, and Blob writes only in `copilot-sessions`. It still makes every access decision and its identity administers PostgreSQL, so trust it like the deployment |
-| The coordination host | Its own identity, with no personal token, no shell or file tools for its sessions, a system-only admission hook, a role that reaches only the capacity route, and an egress NetworkPolicy |
+| The coordination host | Its own identity, with no personal token, no shell or file tools for system and title sessions, PilotSwarm's refusal of a turn whose stored owner tag the input lacks, a role that reaches only the capacity route, and an egress NetworkPolicy. The Portal's sessions and Workflow scripts run there with their tools, as on a stamp without the pool |
 | The dispatcher | Each owner's opt-in, a write share only on the sessions it creates, no Azure role in the deployment, controller routes that accept only its identity, and at most `N` drives per owner |
 | The deployment itself | A protected deploying identity, alerts on misuse, and no standing Owner |
 
@@ -1663,13 +1671,12 @@ in the controller's README has the full procedure and each check.
 - **The controller tells VMs apart by their private source address,** never by
   identity, because every VM has the same one.
 - **The Linux worker's federation.** With the pool, base-infra creates no
-  `worker-fedcred` on the Portal's identity, with or without the coordination
-  host: the Linux worker runs either as the host, with its own identity, or no
-  pod at all. The credential returns only when the pool is turned off. An
-  incremental deployment keeps one an earlier deploy created: on a stamp with
-  the pool, the `worker` service's manifests step deletes it, with or without
-  the coordination host, and fails while one remains, so no pod of that
-  service account can sign in as PostgreSQL's administrator.
+  `worker-fedcred` on the Portal's identity: the Linux worker runs as the
+  coordination host, with its own identity. The credential returns only when
+  the pool is turned off. An incremental deployment keeps one an earlier
+  deploy created: on a stamp with the pool, the `worker` service's manifests
+  step deletes it and fails while one remains, so no pod of that service
+  account can sign in as PostgreSQL's administrator.
 - **The custom role definitions** are created once by the subscription owner,
   and the deploy assigns them. The deploy step finds the Standby Pool resource
   provider's principal by name, which needs directory read access, or takes
@@ -1759,7 +1766,7 @@ last run, so a late row still counts once, all of them emailing
 | `forced-session-delete` | The Portal's forced delete of a delegated session |
 | `drive-quarantined`, `vm-crash-loop`, `vm-mass-silence`, `snapshot-refresh-failed`, `pool-full`, `drive-full` | The controller's `alert` records |
 | `attach-without-turn` | A drive attached to a VM without an admission of its root session on that VM: none in the 30 minutes before a turn's attach, or from 23 hours before to 15 minutes after a workspace check's |
-| `capacity-request-unanswered` | With the coordination host only: the controller has answered none of its capacity requests for 5 minutes, so sessions whose owner has no Windows worker running wait |
+| `capacity-request-unanswered` | The controller has answered none of the coordination host's capacity requests for 5 minutes, so sessions whose owner has no Windows worker running wait |
 
 - **The deployment's own grants.** The two role-assignment rules exempt only
   the grants the deployment makes itself, each by principal, role and scope
@@ -1794,10 +1801,12 @@ These remain with the pool as built. Each says what bounds it.
 
 - **The shared worker identity is reachable from any process on a VM** through
   the instance metadata service. An agent can use its tokens to read and change
-  every user's session data in PostgreSQL and Blob, call the controller as its
-  own VM, use the identity's other grants, and copy the tokens off the VM. It
-  can't read Key Vault or the controller's state. Users of one deployment trust
-  each other with session data.
+  every user's session data in PostgreSQL and Blob, and the authorization
+  records there: who owns or shares a session, and who allowed the dispatcher
+  ([What each run does](#what-each-run-does)). It can also call the controller
+  as its own VM, use the identity's other grants, and copy the tokens off the
+  VM. It can't read Key Vault or the controller's state. Users of one
+  deployment trust each other with session data.
 - **An agent can reach its owner's token.** It runs as the CLI's account and,
   through Docker, as an administrator of its VM, so it can read the token from
   memory and send it out. With the shared identity's write access to every
@@ -1831,7 +1840,11 @@ These remain with the pool as built. Each says what bounds it.
 - **The coordination host serves every user.** Its system agents read every
   user's content and keep their cross-user PilotSwarm tools, its identity reads
   and writes every session's data, and its egress reaches any internet host on
-  ports 443 and 5432. It holds no token and runs no shell or file tool.
+  ports 443 and 5432. The sessions people start in the Portal, and Workflow
+  scripts, run there with shell and file tools, next to that identity, as the
+  Linux worker's sessions run on a stamp without the pool. It holds no
+  personal token, so such a session uses a shared provider: a turn on a
+  personal provider gets no credential there.
 - **Redaction has limits.** A token an agent prints stays in the CLI's own
   session files and their Blob archive, and one it stores in a fact, an
   artifact or a canvas stays there. What a person types is kept as typed
@@ -1847,7 +1860,10 @@ These remain with the pool as built. Each says what bounds it.
 - **No take-back push.** Taking a drive from an idle session needs no WIP push.
   The design targets are under 50 ms to reattach the drive a session already
   holds, under 25 seconds to attach a drive, and under 40 seconds for a
-  take-back.
+  take-back. Nothing measures or enforces them: a take-back gives each
+  session that holds the drive up to 60 seconds to release it, and the
+  attacher allows 5 minutes for a call. Only a real VM can check them
+  ([What only a real VM can verify](../../../deploy/providers/azure/windows/README.md#what-only-a-real-vm-can-verify)).
 - **Fast file access.** The attacher trusts the drive as a Dev Drive
   (`fsutil devdrv trust`), and the toolchain manifest's `defenderExclusions` keep
   antivirus off the build's hot paths.
@@ -1867,7 +1883,7 @@ These remain with the pool as built. Each says what bounds it.
 | Setting | Default | Guidance |
 |---|---|---|
 | `WIN_WORKER_COUNT` (`X`) | `5` | The drives busy at the same time, not the number of owners: a VM mounts one drive, and an owner's idle trees share VMs through take-backs. It is also the standby pool's ready capacity |
-| `WIN_WORKER_MIN_RUNNING` (`Y`) | `1` | `0` with the coordination host, to pay for no Windows VM while nothing runs |
+| `WIN_WORKER_MIN_RUNNING` (`Y`) | `1` | `0`, to pay for no Windows VM while nothing runs: the coordination host runs everything but the owners' work |
 | `WIN_WORKER_STANDBY_MIN` | `1` | Deallocated VMs kept ready even at `X` |
 | `WIN_WORKER_IDLE_RECYCLE_MINUTES` | `30` | Three times the measured p90 time from demand to a first turn on a standby VM, rounded up and between 10 and 30. An owner who pauses for less never waits |
 | `WIN_WORKER_SCALE_IN_BATCH`, `WIN_WORKER_SCALE_IN_INTERVAL_MINUTES` | `1`, `5` | Steps keep capacity through short lulls |
@@ -1925,14 +1941,14 @@ each.
 | `WIN_WORKERS_ENABLED` | `false` | `true` |
 | `WIN_WORKER_ALERT_EMAILS` | unset | Required: comma-separated receivers |
 | `WIN_WORKER_COUNT` (`X`) | `5` | [Sizing the pool](#sizing-the-pool) |
-| `WIN_WORKER_MIN_RUNNING` (`Y`) | `1` | `0`, with the coordination host |
+| `WIN_WORKER_MIN_RUNNING` (`Y`) | `1` | `0` |
 | `WIN_WORKER_STANDBY_MIN` | `1` | `1` |
 | `WIN_WORKER_VM_SIZE` | `Standard_D16ds_v5` | A size with nested virtualization that builds your code |
 | `WIN_WORKER_IMAGE_VERSION` | unset (no scale set) | The gallery image version, `Major.Minor.Patch` |
 | `WIN_WORKER_IDLE_RECYCLE_MINUTES` | `30` | Three times the measured p90 standby start, 10 to 30 |
 | `WIN_WORKER_SCALE_IN_BATCH` | `1` | `1` |
 | `WIN_WORKER_SCALE_IN_INTERVAL_MINUTES` | `5` | `5` |
-| `WIN_WORKER_COORDINATION_HOST` | `false` | `true`, with `PILOTSWARM_OWNER_ROUTING=1` and `WORKSPACES_ENABLED=false` |
+| `WIN_WORKER_COORDINATION_HOST` | `false` | Required with the pool: `true`, with `PILOTSWARM_OWNER_ROUTING=1` |
 | `WIN_WORKER_COORDINATION_HOST_REPLICAS` | `2` | `2`; `0` only while an upgrade is frozen |
 | `WIN_WORKER_COORDINATION_HOST_PLUGIN_CONFIGMAP` | unset (the image's plugins) | A ConfigMap with the definitions of the plugin your Windows workers load |
 | `WIN_WORKER_COORDINATION_HOST_REDACT_SECRET_PREFIXES` | unset | The workers' `PILOTSWARM_REDACT_SECRET_PREFIXES` |
@@ -1955,7 +1971,7 @@ each.
 | `PS_DISK_CONTROLLER_SNAPSHOT_REFRESH_DAYS` | `7` | `7` |
 | `PS_DISK_CONTROLLER_VM_SCRIPTS_DIR` | unset (`C:\pilotswarm\scripts`) | Unset |
 | `APPGW_TRUSTED_ROOT_CERTS` | `pilotswarm-disk-controller-ca` | The default: the prefix of the App Gateway trusted roots the deploy uploads for the controller's CAs, one name and not a list |
-| `DISPATCHER_SP_OBJECT_ID` | unset (delegation off) | The dispatcher's object ID, on the Portal and the controller |
+| `DISPATCHER_SP_OBJECT_ID` | unset (delegation off) | The dispatcher's object ID, on the Portal and the controller; needs `AUTHZ_ENFORCE_OWNERSHIP=true` |
 
 `WIN_WORKER_EXTRA_ENV` refuses, at deploy time and again on the VM, a malformed
 or repeated pair, a value over 4,096 characters, a name that `worker.env` or
@@ -1980,7 +1996,7 @@ none of them renders as before.
 | `PILOTSWARM_WORKSPACE_BUSY_FAST_RELEASE` | unset | `1` |
 | `PILOTSWARM_DEFAULT_IDLE_TIMEOUT_SEC` | unset (1,800 seconds) | For example `600` |
 | `PILOTSWARM_SESSION_MESSAGE_SCOPE` | unset (`fleet`) | `owner`, on every worker too |
-| `AUTHZ_ENFORCE_OWNERSHIP` | `false` (audit only) | `true` |
+| `AUTHZ_ENFORCE_OWNERSHIP` | `false` (audit only) | Required with the pool or a dispatcher: `true` |
 
 ### The worker settings file
 
@@ -2055,7 +2071,7 @@ fails the build instead of every worker.
   own parser before it publishes the controller. The
   [controller's README](../../../deploy/providers/azure/disk-controller/README.md#settings)
   lists every controller setting.
-- **The coordination host's overlay,** with `WIN_WORKER_COORDINATION_HOST=true`:
+- **The coordination host's overlay,** which comes with the pool:
   base-infra's outputs `COORDINATION_IDENTITY_CLIENT_ID` and
   `COORDINATION_IDENTITY_NAME` as the worker's `WORKLOAD_IDENTITY_CLIENT_ID` and
   `PILOTSWARM_DB_AAD_USER`, in the worker's staging only, and the ConfigMap
@@ -2068,10 +2084,9 @@ fails the build instead of every worker.
 - **The database role Job's environment,** from the Portal's: `DATABASE_URL`
   and `PILOTSWARM_CMS_FACTS_DATABASE_URL`, which it refuses with a password,
   `PILOTSWARM_DB_AAD_USER` and `PILOTSWARM_USE_MANAGED_IDENTITY=1`; the
-  members, `WIN_WORKER_IDENTITY_NAME` with `EXPECTED_WIN_WORKER_OID` and,
-  with the coordination host, `COORDINATION_IDENTITY_NAME` with
-  `COORDINATION_IDENTITY_PRINCIPAL_ID`; and `PS_MODEL_PROVIDERS_PATH`, the
-  catalog in its ConfigMap.
+  members, `WIN_WORKER_IDENTITY_NAME` with `EXPECTED_WIN_WORKER_OID` and
+  `COORDINATION_IDENTITY_NAME` with `COORDINATION_IDENTITY_PRINCIPAL_ID`; and
+  `PS_MODEL_PROVIDERS_PATH`, the catalog in its ConfigMap.
 
 ## Operating the pool
 
@@ -2111,7 +2126,6 @@ fails the build instead of every worker.
 | `WORKSPACE_BUSY` | Admission, capacity, attach, credentials | Parked, returning or quarantined (15 minutes); `UPGRADE_FROZEN`; `VM_UNBOUND` or `OWNER_MISMATCH` (10 seconds); `POOL_FULL` (a minute) |
 | `CAPACITY_UNAVAILABLE` | Capacity | The controller didn't answer within 15 seconds, or refused the request |
 | `OWNER_NOT_SUPPORTED` | Capacity | The owner's subject isn't an Entra object ID |
-| `COORDINATION_HOST` | `/v1/vms/demand` | The coordination host sends every capacity request on this pool |
 | `CONTROLLER_STARTING` | Credentials | The controller's start-up grace |
 
 ### Reaching a VM
@@ -2144,7 +2158,8 @@ script's exit code doesn't become the command's.
 - **The Windows scripts.** `node --test deploy/providers/azure/windows/test/*.test.mjs`
   parses every script with PowerShell 7 when it is installed; on Windows, it
   also runs the disk script's process search, the drain and the seed's
-  `-Verify` for real, the way the controller's Run Commands call them.
+  `-Verify` for real, the way the controller's Run Commands call them. The
+  Windows job of PR checks runs it.
 - **The extension.** `packages/sdk/test/unit/devdrive-workspace-provider.test.mjs`
   runs take-backs, checks, shutdown releases and the Git paths against a fake
   controller, attacher and volume, on any platform.

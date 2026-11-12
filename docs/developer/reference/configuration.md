@@ -267,6 +267,10 @@ How each rule behaves under `AUTHZ_ENFORCE_OWNERSHIP`:
 | Delegated complete / cancel / delete | Allowed with the write share and the opt-in, audited first | Same |
 | `force` on `deleteSession` | Owner, admin or delegated dispatcher, also on a deleted tree (above) | Same — always enforced, except on a session that is already deleted, which passes unchecked like every call on a session the portal can't find |
 
+The Azure deploy refuses `DISPATCHER_SP_OBJECT_ID` without
+`AUTHZ_ENFORCE_OWNERSHIP=true`, read as the portal reads it, so a dispatcher
+it deploys always works under the `true` column.
+
 To try it locally with the dev auth provider, add a persona for the dispatcher
 (`PORTAL_AUTH_DEV_USERS=ada:admin,alice:user,dispatcher:user`) and set
 `DISPATCHER_SP_OBJECT_ID=dispatcher`.
@@ -698,12 +702,14 @@ and its [owner-only workers](../../architecture/orchestration/design.md#owner-on
 
 ### Coordination Host on Azure
 
-On Azure, with a pool of owner-only Windows workers, the Linux worker runs the
-work they do not and takes every capacity request. It loads the
+On Azure, a pool of owner-only Windows workers requires the coordination host:
+the Linux worker runs the work they do not and takes every capacity request.
+It loads the
 [coordination host module](../../../deploy/providers/azure/linux-worker/README.md)
 with `PILOTSWARM_EXTENSION_MODULES=/app/deploy/providers/azure/linux-worker/capacity-requester.mjs`,
-which sends each capacity request to the disk controller and admits only
-system sessions' turns. The module reads:
+which sends each capacity request to the disk controller. It registers no
+admission hook: the host runs the sessions that people start in the Portal, as
+the Linux worker does without the pool. The module reads:
 
 | Setting | What it does |
 |---|---|
@@ -712,8 +718,10 @@ system sessions' turns. The module reads:
 
 Without either, or on a worker with `PILOTSWARM_WORKER_OWNER_TAG` or
 `PILOTSWARM_WORKER_OWNER_ONLY=1`, the module stops the worker at start. On
-Azure, `WIN_WORKER_COORDINATION_HOST=true` loads the module on
-`copilot-runtime-worker` and sets both settings and `NODE_EXTRA_CA_CERTS`. The
+Azure, `WIN_WORKER_COORDINATION_HOST=true`, which the pool requires, loads the
+module on `copilot-runtime-worker` and sets both settings and
+`NODE_EXTRA_CA_CERTS`. With `WORKSPACES_ENABLED=true` the host also loads the
+workspace provider, so the Portal's sessions keep their workspaces. The
 [Windows workers](../deploy/windows-workers.md#the-coordination-host) guide
 covers the coordination host's deployment.
 
@@ -745,17 +753,17 @@ what it did before.
 
 | Setting | Default | What it does |
 |---|---|---|
-| `WIN_WORKERS_ENABLED` | `false` | Deploys the pool and the `disk-controller` service, and runs the database role Job after the Portal's rollout. Needs `EDGE_MODE=afd` or `private`, `DEPLOY_POSTGRES=true` with `PILOTSWARM_USE_MANAGED_IDENTITY=1`, `PORTAL_AUTH_ENTRA_CLIENT_ID` and `WIN_WORKER_ALERT_EMAILS` |
+| `WIN_WORKERS_ENABLED` | `false` | Deploys the pool and the `disk-controller` service, and runs the database role Job after the Portal's rollout. Needs `EDGE_MODE=afd` or `private`, `DEPLOY_POSTGRES=true` with `PILOTSWARM_USE_MANAGED_IDENTITY=1`, `PORTAL_AUTH_ENTRA_CLIENT_ID`, `WIN_WORKER_ALERT_EMAILS`, `WIN_WORKER_COORDINATION_HOST=true`, `PILOTSWARM_OWNER_ROUTING=1` and `AUTHZ_ENFORCE_OWNERSHIP=true`. It pins the cluster's outbound address to the static IP `<prefix>-hdb-egress` in every edge mode, which changes an existing stamp's outbound address |
 | `WIN_WORKER_ALERT_EMAILS` | unset | Comma-separated receivers of the pool's alerts; at least one is required with the pool |
 | `WIN_WORKER_COUNT` | `5` | `X`: the most active VMs (1 to 100), the scale set's ceiling and the standby pool's ready capacity |
-| `WIN_WORKER_MIN_RUNNING` | `1` | `Y`: the fewest active VMs, and the scale set's capacity when it is created. `0` needs `WIN_WORKER_COORDINATION_HOST=true` |
+| `WIN_WORKER_MIN_RUNNING` | `1` | `Y`: the fewest active VMs, and the scale set's capacity when it is created. `0` pays for no VM while nothing runs |
 | `WIN_WORKER_STANDBY_MIN` | `1` | Deallocated VMs the standby pool keeps ready |
 | `WIN_WORKER_VM_SIZE` | `Standard_D16ds_v5` | The VMs' size, which needs nested virtualization; a change reaches new VMs, and the controller replaces the others |
 | `WIN_WORKER_IMAGE_VERSION` | unset | The gallery image version, `Major.Minor.Patch`. Unset, base-infra creates the gallery and its image definition but no scale set. The controller replaces VMs on another version |
 | `WIN_WORKER_IDLE_RECYCLE_MINUTES` | `30` | Idle minutes before a bound VM is drained and deleted, and how long recent demand keeps one unbound VM ready |
 | `WIN_WORKER_SCALE_IN_BATCH` | `1` | The most idle VMs deleted in one scale-in step |
 | `WIN_WORKER_SCALE_IN_INTERVAL_MINUTES` | `5` | The fewest minutes between scale-in steps |
-| `WIN_WORKER_COORDINATION_HOST` | `false` | `true` runs the Linux worker as the coordination host, with its own identity, and makes the Windows workers owner-only (`PILOTSWARM_WORKER_OWNER_ONLY=1`); `deploy all` then deploys the `worker` service just after the `portal`. Needs `PILOTSWARM_OWNER_ROUTING=1` and `WORKSPACES_ENABLED=false`. Without it, a stamp with the pool runs the Linux worker at 0 replicas. Turn it off service by service, never with one `deploy all`: see [Turning the coordination host off](../deploy/windows-workers.md#turning-the-coordination-host-off) |
+| `WIN_WORKER_COORDINATION_HOST` | `false` | Required with the pool. `true` runs the Linux worker as the coordination host, with its own identity, and makes the Windows workers owner-only (`PILOTSWARM_WORKER_OWNER_ONLY=1`); `deploy all` then deploys the `worker` service just after the `portal`. Needs `WIN_WORKERS_ENABLED=true` and `PILOTSWARM_OWNER_ROUTING=1`. With `WORKSPACES_ENABLED=true` the host runs the Portal's sessions with their workspaces |
 | `WIN_WORKER_COORDINATION_HOST_REPLICAS` | `2` | The coordination host's replicas, 0 to 20. An upgrade freeze publishes 0 |
 | `WIN_WORKER_COORDINATION_HOST_PLUGIN_CONFIGMAP` | unset | A ConfigMap in the worker's namespace with the plugin definitions the Windows workers load: `plugin.json`, `session-policy.json`, the agents' `*.agent.md` files, and each skill an agent declares as `<skill>.SKILL.md` (and `<skill>.tools.json`). The coordination host loads a read-only copy of only those (`PLUGIN_DIRS`). Unset, it loads the image's own plugins |
 | `WIN_WORKER_COORDINATION_HOST_REDACT_SECRET_PREFIXES` | unset | Comma-separated token prefixes that the coordination host redacts from what it persists (its `PILOTSWARM_REDACT_SECRET_PREFIXES`), each at least three letters, digits, `_` or `-`, starting with a letter or digit |
@@ -782,11 +790,13 @@ what it did before.
 | `PERIMETER_OPERATOR_IP_PREFIXES` | unset | With `AZURE_POLICY_RESTRICTED=true`, comma-separated IPv4 addresses or CIDR prefixes that the network security perimeter also admits |
 
 The deploy also refuses `PILOTSWARM_OWNER_ROUTING=1` without
-`WIN_WORKERS_ENABLED=true`: only a bound Windows worker serves an owner tag.
-The Portal settings that a pool sets (`DISPATCHER_SP_OBJECT_ID`, the personal
-secret, owner routing, busy policy, idle and message scope settings) reach the
-Portal's manifests from the same env file, and stay out of them at their
-defaults.
+`WIN_WORKERS_ENABLED=true`: only a bound Windows worker serves an owner tag. It
+refuses `DISPATCHER_SP_OBJECT_ID`, with the pool or without it, unless
+`AUTHZ_ENFORCE_OWNERSHIP` is true as the Portal reads it (`1`, `true`, `yes` or
+`on`). The Portal settings that a pool sets (`DISPATCHER_SP_OBJECT_ID`, the
+personal secret, owner routing, busy policy, idle and message scope settings)
+reach the Portal's manifests from the same env file, and stay out of them at
+their defaults.
 
 ### Dev Drive workspace extension
 
@@ -803,7 +813,7 @@ or without the controller's URL and token module.
 | `PS_DISK_CONTROLLER_CA_CERT` | unset: Node's default roots | A PEM file of the only CAs the controller client trusts: one, or two while the controller's CA rotates. Read again for every TLS agent, so the CA can rotate without a worker restart |
 | `PS_DISK_ATTACHER_URL` | `http://127.0.0.1:3099` | The local attacher service; `http://` on a loopback address only |
 | `PS_DISK_ATTACHER_TOKEN_FILE` | `C:\pilotswarm\run\attacher.token` | The attacher's token, read again after a `401` |
-| `PS_WORKSPACE_ROOTS` | `repos=Q:\Repos` | The workspace roots, `name=path` comma-separated, all on the drive |
+| `PS_WORKSPACE_ROOTS` | required | The workspace roots, `name=path` comma-separated, all on the drive. The Windows image's worker settings set `repos=Q:\Repos` |
 | `PS_WORKSPACE_ADOPT` | `instructions,agents,skills` | What may be adopted from a working folder; `none` adopts nothing |
 | `PS_EMPTY_HOOKS_DIR` | unset: the null device | `core.hooksPath` of the extension's own Git calls |
 | `PS_WIP_BRANCH_PREFIX` | `pilotswarm/wip/` | The WIP branch, `<prefix><rootSessionId>` on each repository's `origin` |
@@ -811,10 +821,12 @@ or without the controller's URL and token module.
 | `WIN_WORKER_CONFIG_VERSION` | unset | The VM's configuration version, from `userData`, reported in every heartbeat. The controller has the current one in the same setting and replaces VMs that report another |
 
 It also reads `PILOTSWARM_WORKER_OWNER_TAG` (the worker started bound) and
-`PILOTSWARM_WORKER_OWNER_ONLY` (`1`: no capacity requester), described under
-[Owner Routing](#owner-routing-optional), and
+`PILOTSWARM_WORKER_OWNER_ONLY` (`1`, as the deploy always sets it: the
+launcher starts the worker only once the VM is bound, so the extension never
+restarts it), described under [Owner Routing](#owner-routing-optional), and
 `PILOTSWARM_WORKSPACE_ATTACH_TIMEOUT_MS` as its own attach budget, 10 minutes
-when unset: an attach that waited for LUN 0 past it starts nothing.
+when unset: an attach that waited for LUN 0 past it starts nothing. It sets no
+capacity requester: the coordination host sends every capacity request.
 
 ### Windows worker services
 
@@ -832,9 +844,11 @@ and identity values every worker reads, they read:
 | `PS_WORKER_RELEASES_CONTAINER` | `win-worker-releases` | In `worker.env`: the release container of `AZURE_STORAGE_ACCOUNT_URL` that `/sync-release` reads |
 
 `userData` also carries `WIN_WORKER_CONFIG_VERSION` and
-`PILOTSWARM_WORKER_OWNER_ONLY`, `1` with `WIN_WORKER_COORDINATION_HOST=true`
-and `0` otherwise. A missing, unknown or invalid `userData` value stops the
-launcher instead of falling back to a default.
+`PILOTSWARM_WORKER_OWNER_ONLY`, which the deploy always sets to `1`. A
+missing, unknown or invalid `userData` value stops the launcher instead of
+falling back to a default, and so does `PILOTSWARM_PERSONAL_SECRETS=external`
+with a `PILOTSWARM_WORKER_OWNER_ONLY` other than `1`: a worker that isn't
+owner-only must not hold an owner's token.
 
 The image's `worker.env` also pins the tools' own settings, which a worker
 settings file can't change: Git's `GIT_CONFIG_GLOBAL`, a read-only global

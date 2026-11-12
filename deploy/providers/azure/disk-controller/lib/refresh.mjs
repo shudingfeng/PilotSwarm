@@ -5,7 +5,8 @@
 //      Seed-WorkerReposDisk.ps1 -Refresh there as a Managed Run Command;
 //   3. verify the drive (-Verify answers { verified, manifestSha256, checks });
 //   4. take an incremental snapshot, wait for CompletionPercent 100, record it
-//      as the golden snapshot, keep the previous one for rollback and delete
+//      as the golden snapshot, keep the one it replaces as previousGolden
+//      (GET /v1/admin/status shows it; nothing rolls back to it) and delete
 //      older ones that the controller made; then delete the drive and the VM.
 //
 // A failed step keeps the current snapshot, deletes the drive and the VM and
@@ -242,7 +243,7 @@ export async function progressRefresh(ctl) {
   }
 }
 
-/** The new snapshot becomes golden; the previous one stays for rollback; older ones the controller made are deleted. */
+/** The new snapshot becomes golden; the previous one stays as previousGolden; older ones the controller made are deleted. */
 async function recordGolden(ctl, run) {
   const now = ctl.now();
   let older = null;

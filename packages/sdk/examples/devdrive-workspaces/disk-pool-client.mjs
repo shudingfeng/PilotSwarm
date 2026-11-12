@@ -183,7 +183,6 @@ export function createDiskPoolClient({ url, getToken, caCertPath = null, timeout
         detach: (body) => call("/v1/leases/detach", body, { timeoutMs: 5 * 60_000 }),
         busy: (body) => call("/v1/vms/busy", body, { timeoutMs: 10_000 }),
         admit: (body) => call("/v1/vms/admit", body, { timeoutMs: 10_000 }),
-        demand: (body, opts = {}) => post("/v1/vms/demand", body, { timeoutMs: 10_000, ...opts }),
         async modelCredential(body) {
             try {
                 return credentialAnswer(await post("/v1/credentials/model", body, { timeoutMs: 15_000 }), "token");

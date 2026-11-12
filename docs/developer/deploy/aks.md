@@ -455,23 +455,29 @@ Unset or `false`, nothing changes: the rendered parameters and staged
 manifests are those of a stamp without it, and `disk-controller` is skipped.
 
 The pool needs `EDGE_MODE=afd` or `private`, the stamp's own PostgreSQL server
-with `PILOTSWARM_USE_MANAGED_IDENTITY=1`, the portal's Entra app set up with
-`Setup-PortalAuth.ps1 -WorkerRoles`, and at least one receiver in
-`WIN_WORKER_ALERT_EMAILS`; the deploy refuses anything else before any step.
-So the **Deploy Azure stamp** workflow, whose stamp is `EDGE_MODE=public` with
-an external database, can't deploy a pool. The first deploy creates the
-gallery, the network, the stores and the identities but no VM; a second, with
+with `PILOTSWARM_USE_MANAGED_IDENTITY=1`, `PORTAL_AUTH_ENTRA_CLIENT_ID`, at
+least one receiver in `WIN_WORKER_ALERT_EMAILS`, the coordination host
+(`WIN_WORKER_COORDINATION_HOST=true`) with `PILOTSWARM_OWNER_ROUTING=1`, and
+enforced session ownership (`AUTHZ_ENFORCE_OWNERSHIP=true`); the deploy
+refuses a missing one before any step, and refuses `DISPATCHER_SP_OBJECT_ID`
+without enforced ownership too. `npm run deploy:new-env` writes the host,
+owner routing and enforced ownership with the pool. The deploy can't check
+that the portal's Entra app was set up with `Setup-PortalAuth.ps1
+-WorkerRoles`, which the pool also needs. The pool pins the cluster's
+outbound address to the static IP `<prefix>-hdb-egress` in every edge mode,
+so turning it on changes an existing stamp's outbound address. The **Deploy
+Azure stamp** workflow, whose stamp is `EDGE_MODE=public` with an external
+database, can't deploy a pool. The first deploy creates the gallery, the
+network, the stores and the identities but no VM; a second, with
 `WIN_WORKER_IMAGE_VERSION` set, creates the scale set.
 
 With the pool, the portal's rollout step also runs the database role Job,
-which applies the migrations and grants the workers' database group. With the
-coordination host (`WIN_WORKER_COORDINATION_HOST=true`), `deploy all` deploys
-`worker` just after `portal` instead of before it, so the Job has run before
-the host's pods sign in; deploying the services one at a time, deploy `portal`
-before `worker` the first time you turn the coordination host on. Turning it
-off takes several single-service deploys in a fixed order, never one
-`deploy all`: see
-[Turning the coordination host off](./windows-workers.md#turning-the-coordination-host-off).
+which applies the migrations and grants the workers' database group, and the
+Linux worker runs as the coordination host, which runs everything but the
+owners' work, the portal's sessions with their workspaces included. `deploy
+all` deploys `worker` just after `portal` instead of before it, so the Job has
+run before the host's pods sign in; deploying the services one at a time,
+deploy `portal` before `worker` the first time you deploy the pool.
 
 [Windows workers](./windows-workers.md) is the manual: the pieces and how they
 fit together, the step-by-step deployment, upgrades, the security model and

@@ -202,13 +202,20 @@ export function winWorkerCoordinationHost(env) {
   return trueOrFalse(env, "WIN_WORKER_COORDINATION_HOST");
 }
 
-// The portal records owner tags only for exactly "1" (packages/sdk/src/client.ts),
-// so any other value would quietly mean "off".
+// The portal records the owner's tag on a dispatcher's sessions only for
+// exactly "1" (the SDK's clients compare with "1"), so any other value would
+// quietly mean "off".
 export function ownerRoutingEnabled(env) {
   const value = settingValue(env, "PILOTSWARM_OWNER_ROUTING");
   if (value === "1") return true;
   if (value === "0" || value === "") return false;
   throw new Error(`PILOTSWARM_OWNER_ROUTING must be 1 or 0, not '${env?.PILOTSWARM_OWNER_ROUTING}'.`);
+}
+
+// AUTHZ_ENFORCE_OWNERSHIP as the portal reads it (packages/app/web/authz.js):
+// 1, true, yes or on, in any case, enforce; anything else only audits.
+export function ownershipEnforced(env) {
+  return ["1", "true", "yes", "on"].includes(settingValue(env, "AUTHZ_ENFORCE_OWNERSHIP").toLowerCase());
 }
 
 function wholeNumber(env, key, min, max) {

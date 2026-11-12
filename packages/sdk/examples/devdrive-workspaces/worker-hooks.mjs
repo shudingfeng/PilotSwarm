@@ -6,21 +6,14 @@
  *   admission            POST /v1/vms/admit before every turn
  *   credential resolver  POST /v1/credentials/model for a provider whose key is
  *                        in the deployment's secret store
- *   capacity requester   POST /v1/vms/demand, only without owner-only workers
  *   binding              an unbound worker restarts once the controller binds
  *                        its VM to an owner
+ *
+ * It registers no capacity requester: a bound worker declares its owner's tag,
+ * and with the capacity tag too it would refuse to start. The coordination
+ * host sends every capacity request.
  */
 const OWNER_TAG_PREFIX = "owner.";
-const CODE = /^[A-Z][A-Z0-9_]{0,63}$/;
-const OBJECT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-export const OWNER_NOT_SUPPORTED = "OWNER_NOT_SUPPORTED";
-export const OWNER_NOT_SUPPORTED_MESSAGE = "This session's owner has no Microsoft Entra object ID, so the disk controller can give it no Windows worker. "
-    + "Sign in with Microsoft Entra ID to use this deployment's Windows workers.";
-
-const defaultTimers = {
-    setTimeout: (fn, ms) => setTimeout(fn, ms),
-    clearTimeout: (id) => clearTimeout(id),
-};
 
 const textOf = (value) => (typeof value === "string" && value.trim() ? value.trim() : undefined);
 const positive = (value) => {
@@ -85,68 +78,6 @@ export function createCredentialResolver({ controller }) {
         secretName: secret?.name,
         secretVersion: secret?.version,
     });
-}
-
-function sleep(ms, signal, timers) {
-    return new Promise((resolve, reject) => {
-        if (signal?.aborted) return reject(signal.reason ?? new Error("aborted"));
-        const onAbort = () => {
-            timers.clearTimeout(id);
-            reject(signal.reason ?? new Error("aborted"));
-        };
-        const id = timers.setTimeout(() => {
-            signal?.removeEventListener?.("abort", onAbort);
-            resolve();
-        }, ms);
-        signal?.addEventListener?.("abort", onAbort, { once: true });
-    });
-}
-
-/**
- * The capacity requester: asks the controller for a VM of the session's
- * owner, again and again until it answers or PilotSwarm's 15-second signal
- * fires, and passes its answer on: `deny` for a root without a drive lease,
- * which ends the turn, or `busy` with retryAfterMs for a parked or returning
- * one, which holds the session on its timer. An owner without an object ID
- * gets `deny` at once: the controller binds VMs to object IDs only, so no
- * retry could ever serve that session.
- */
-export function createCapacityRequester({ controller, timers = defaultTimers, backoffMs = [250, 500, 1_000, 2_000, 4_000] }) {
-    return async ({ rootSessionId, ownerTag }, signal) => {
-        const tag = String(ownerTag ?? "");
-        if (!tag.startsWith(OWNER_TAG_PREFIX) || tag.length === OWNER_TAG_PREFIX.length) throw new Error("the session has no owner routing tag");
-        const ownerOid = tag.slice(OWNER_TAG_PREFIX.length);
-        if (!OBJECT_ID.test(ownerOid)) return { decision: "deny", code: OWNER_NOT_SUPPORTED, message: OWNER_NOT_SUPPORTED_MESSAGE };
-        for (let attempt = 0; ; attempt += 1) {
-            if (signal?.aborted) throw signal.reason ?? new Error("aborted");
-            let answer = null;
-            try {
-                answer = await controller.demand({ ownerOid, rootSessionId }, signal ? { signal } : {});
-            } catch {
-                answer = null;
-            }
-            if (answer && answer.status >= 200 && answer.status < 300 && answer.body && typeof answer.body === "object") {
-                const body = answer.body;
-                const message = textOf(body.message);
-                const code = typeof body.code === "string" && CODE.test(body.code) ? body.code : undefined;
-                if (body.decision === "ok") return { decision: "ok" };
-                if (body.decision === "deny") return { decision: "deny", ...(message ? { message } : {}), ...(code ? { code } : {}) };
-                if (body.decision === "busy") {
-                    return {
-                        decision: "busy",
-                        ...(message ? { message } : {}),
-                        ...(code ? { code } : {}),
-                        ...(positive(body.retryAfterMs) ? { retryAfterMs: positive(body.retryAfterMs) } : {}),
-                    };
-                }
-            }
-            // A refusal of the route itself (for example on a pool with owner-only workers) does not pass by retrying.
-            if (answer && answer.status >= 400 && answer.status < 500 && answer.status !== 408 && answer.status !== 429) {
-                throw new Error(`the disk controller refused the capacity request: HTTP ${answer.status}`);
-            }
-            await sleep(backoffMs[Math.min(attempt, backoffMs.length - 1)], signal, timers);
-        }
-    };
 }
 
 /**

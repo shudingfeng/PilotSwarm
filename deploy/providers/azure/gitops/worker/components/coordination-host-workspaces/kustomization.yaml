@@ -1,0 +1,23 @@
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+# The coordination host with session workspaces (WIN_WORKER_COORDINATION_HOST=true
+# and WORKSPACES_ENABLED=true): the host runs the sessions that people start in
+# the Portal with their workspaces, as the Linux worker does without the pool.
+# The deploy tool adds this component after `workspaces` and the host's other
+# components, so its settings win over theirs
+# (deploy/scripts/lib/coordination-host.mjs).
+#
+#   deployment-patch.yaml   loads the workspace provider beside the capacity
+#                           requester, names both components' plugin folders
+#                           (the deploy tool writes PLUGIN_DIRS), and passes
+#                           the repo service and Git identity to agents' tools
+#   network-policy.yaml     a second egress policy that opens only the repo
+#                           service's port, which the host's own policy leaves
+#                           out
+
+resources:
+  - network-policy.yaml
+
+patches:
+  - path: deployment-patch.yaml

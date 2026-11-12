@@ -441,13 +441,14 @@ export function stageManifests({ service, envName, env, stagingDir }) {
   });
   log("ok", `Substituted ${substituted.length} overlay .env keys → ${overlayDst}`);
   if (runtimeService) stageDatabaseSecrets({ service, env, stagedServiceRoot, overlayName });
-  // WIN_WORKERS_ENABLED=true: the worker becomes the coordination host with
-  // WIN_WORKER_COORDINATION_HOST=true, and has 0 replicas without it (see
-  // coordination-host.mjs).
+  // WIN_WORKERS_ENABLED=true: the worker becomes the coordination host, which
+  // the pool requires (see coordination-host.mjs). It stages before the
+  // workspaces component, which goes first in the components list, so the
+  // host's coordination-host-workspaces settings follow and win.
   const coordinationHost = stageCoordinationHost({ service, env, stagedServiceRoot, overlayName });
   if (coordinationHost) {
     log("info", `[stage-manifests] Windows worker pool: ${service}/${overlayName} has ${coordinationHost.replicas} replica(s)` +
-      (coordinationHost.components.length > 0 ? ` and the ${coordinationHost.components.join(" and ")} component(s).` : "."));
+      ` and the ${coordinationHost.components.join(" and ")} component(s).`);
   }
   // WORKSPACES_ENABLED=true: the worker and portal overlays get the
   // workspaces component (see workspaces.mjs).

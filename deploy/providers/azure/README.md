@@ -15,8 +15,9 @@ This directory holds the reusable Azure deployment templates for PilotSwarm:
 - `linux-worker/` is the coordination host's extension module, which the
   worker image carries and loads only when `PILOTSWARM_EXTENSION_MODULES`
   names it: the Linux worker beside a pool of owner-only Windows workers sends
-  their owners' capacity requests to the disk controller and runs only system
-  sessions' turns; see its [README](linux-worker/README.md).
+  their owners' capacity requests to the disk controller, and runs everything
+  but the owners' work, the portal's sessions included; see its
+  [README](linux-worker/README.md).
 - `windows/` builds the Windows worker image and holds the services, scripts
   and upgrade steps of a Windows worker pool; nothing uses it unless a
   deployment builds that image. See its [README](windows/README.md).

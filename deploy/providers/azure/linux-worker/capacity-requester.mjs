@@ -1,21 +1,21 @@
 /**
- * The coordination host's hooks: an extension module for the Linux worker
- * that, beside a Windows worker pool of owner-only workers, runs the work no
- * owner's worker runs (README). Load it with the worker's extension-module
- * hook:
+ * The coordination host's capacity requester: an extension module for the
+ * Linux worker that, beside a Windows worker pool of owner-only workers, runs
+ * the work no owner's worker runs (README). Load it with the worker's
+ * extension-module hook:
  *
  *   PILOTSWARM_EXTENSION_MODULES=/app/deploy/providers/azure/linux-worker/capacity-requester.mjs
  *   PS_COORDINATION_URL=https://pilotswarm-disk-controller-coordination.<namespace>.svc:3005
  *   PS_COORDINATION_TOKEN_SCOPE=<app client ID>/.default
  *   NODE_EXTRA_CA_CERTS=<the disk controller's CA certificate>
  *
- * register(worker) sets two hooks:
- *
- *   capacity requester  sends each capacity request to the disk controller's
- *                       coordination route, POST /v1/coordination/demand,
- *                       with a token of the pod's own workload identity, and
- *                       passes the controller's answer on
- *   admission           admits only system sessions' turns
+ * register(worker) sets the capacity requester, which sends each capacity
+ * request to the disk controller's coordination route,
+ * POST /v1/coordination/demand, with a token of the pod's own workload
+ * identity, and passes the controller's answer on. On a worker with a
+ * requester, PilotSwarm refuses, without a retry, a turn of a session whose
+ * stored config carries an owner tag that the turn's input lacks, so an
+ * owner-routed session never runs a turn here.
  *
  * It refuses a worker that runs an owner's sessions. Only Node's built-ins
  * load with it; @azure/identity loads when the first token is needed.
@@ -32,9 +32,6 @@ const TOKEN_SCOPE = /^(?:api:\/\/)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 const CODE = /^[A-Z][A-Z0-9_]{0,63}$/;
 const MAX_ANSWER_BYTES = 64 * 1024;
 const WORKLOAD_IDENTITY_SETTINGS = ["AZURE_CLIENT_ID", "AZURE_TENANT_ID", "AZURE_FEDERATED_TOKEN_FILE"];
-
-export const SYSTEM_ONLY_MESSAGE = "This worker runs only system sessions. A user session's turns run on its owner's workers, "
-  + "which its owner routing tag leads to, and this session has no such tag.";
 
 /** The answer for an owner whose subject is not a Microsoft Entra object ID, which the controller cannot serve. */
 export const OWNER_NOT_SUPPORTED = "OWNER_NOT_SUPPORTED";
@@ -386,21 +383,12 @@ export function createCoordinationRequester({
   };
 }
 
-/**
- * The admission hook (`worker.setSessionAdmission`): only system sessions'
- * turns run here. Any other turn is denied, without a retry, so a user
- * session that reaches this worker without an owner tag runs no turn here.
- */
-export function createSystemOnlyAdmission({ message = SYSTEM_ONLY_MESSAGE } = {}) {
-  return (request) => (request?.isSystem === true ? { decision: "admit" } : { decision: "deny", message });
-}
-
-/** The worker hooks this module sets (PilotSwarm's owner routing and session admission hooks). */
-const REQUIRED_WORKER_METHODS = ["setOwnerCapacityRequester", "setSessionAdmission"];
+/** The worker hook this module sets (PilotSwarm's owner routing hook). */
+const REQUIRED_WORKER_METHODS = ["setOwnerCapacityRequester"];
 
 /**
  * Extension entry point (PILOTSWARM_EXTENSION_MODULES). It checks every
- * setting before it sets a hook. `deps` replaces parts in tests:
+ * setting before it sets the hook. `deps` replaces parts in tests:
  * { getToken, importIdentity, request, timers }.
  */
 export async function register(worker, context = {}, deps = {}) {
@@ -420,9 +408,7 @@ export async function register(worker, context = {}, deps = {}) {
     ...(deps.request ? { request: deps.request } : {}),
     ...(deps.timers ? { timers: deps.timers } : {}),
   });
-  const admission = createSystemOnlyAdmission();
-  worker.setSessionAdmission(admission);
   worker.setOwnerCapacityRequester(requester);
-  log(`coordination host: capacity requests go to ${settings.url}${DEMAND_ROUTE}; only system sessions' turns run here`);
-  return { settings, requester, admission };
+  log(`coordination host: capacity requests go to ${settings.url}${DEMAND_ROUTE}`);
+  return { settings, requester };
 }

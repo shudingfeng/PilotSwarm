@@ -9,7 +9,8 @@
  *   1. refuses any Node.js but the image's (EXPECTED_NODE_VERSION);
  *   2. loads C:\pilotswarm\worker.env and overlays the deployment's values from
  *      the scale set's userData (IMDS), failing closed when one is missing or
- *      invalid (README, "userData");
+ *      invalid (README, "userData"), and refuses external personal secrets
+ *      on a worker that isn't owner-only;
  *   3. checks that IMDS issues tokens to the expected identity
  *      (EXPECTED_WIN_WORKER_OID);
  *   4. creates this start's launch ID (PS_LAUNCH_ID) and starts the VM's
@@ -311,6 +312,23 @@ export function buildWorkerEnv({ workerEnv, userData }) {
         set(name, value);
     }
     return Object.fromEntries([...values.values()].map(({ name, value }) => [name, value]));
+}
+
+/**
+ * External personal secrets (PILOTSWARM_PERSONAL_SECRETS=external, from
+ * worker.env or else the service's own environment) bring the owner's model
+ * token to the VM, so the worker must run only that owner's work: userData's
+ * PILOTSWARM_WORKER_OWNER_ONLY must be "1", as the deployment renders it.
+ * Without it the worker would also run other users' untagged work, Workflow
+ * scripts included, next to the token.
+ */
+export function checkPersonalSecretsOwnerOnly(values, serviceEnv = {}) {
+    const setting = (source) => Object.entries(source ?? {}).find(([name]) => lower(name) === "pilotswarm_personal_secrets")?.[1];
+    const mode = String(setting(values) ?? setting(serviceEnv) ?? "").trim().toLowerCase();
+    if (mode === "external" && values.PILOTSWARM_WORKER_OWNER_ONLY !== "1") {
+        throw new LaunchError("PILOTSWARM_PERSONAL_SECRETS=external needs PILOTSWARM_WORKER_OWNER_ONLY=1 in userData: a worker that gets "
+            + "its owner's token must run only that owner's work");
+    }
 }
 
 /** Sets `values` in `target`, replacing a name that differs only in case; removes `remove`. */
@@ -943,6 +961,7 @@ export async function runLauncher(deps = {}) {
     const workerEnv = parseEnvFile(workerEnvText);
     const userData = await decodeUserData(await retryImds(() => imds.userData(), { wait: sleep }));
     const values = buildWorkerEnv({ workerEnv, userData });
+    checkPersonalSecretsOwnerOnly(values, env);
 
     const tokens = (deps.createTokenSource ?? createTokenSource)({ imds, scope: values.PS_DISK_CONTROLLER_TOKEN_SCOPE, clientId: values.AZURE_CLIENT_ID });
     const oid = tokenObjectId(await tokens.getToken());

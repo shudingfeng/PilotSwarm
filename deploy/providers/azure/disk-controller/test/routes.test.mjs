@@ -14,7 +14,6 @@ const WORKER_ROUTES = [
   ["/v1/vms/register", {}],
   ["/v1/vms/heartbeat", { phase: "running" }],
   ["/v1/vms/admit", { sessionId: "s-1", rootSessionId: "root-1", isSystem: false }],
-  ["/v1/vms/demand", { ownerOid: OWNER_A, rootSessionId: "root-1" }],
   ["/v1/vms/busy", { rootSessionId: "root-1" }],
   ["/v1/leases/attach", { rootSessionId: "root-1", requestId: "r-1", purpose: "turn" }],
   ["/v1/leases/detach", { diskName: "psdrive-000000000000", rootSessionId: "root-1", requestId: "r-1" }],
@@ -154,6 +153,16 @@ test("the coordination route takes the coordinator role only", async () => {
     ["the coordinator's token", TOKENS.coordinator, 200],
   ]) {
     assert.equal((await h.coordination(body, token)).status, status, label);
+  }
+});
+
+test("the worker port has no capacity route: owner-only workers send no capacity request, whatever WIN_WORKER_COORDINATION_HOST says", async () => {
+  for (const env of [{}, { WIN_WORKER_COORDINATION_HOST: "true" }]) {
+    const h = await createHarness({ env });
+    const vm = await h.activeVm({ owner: OWNER_A });
+    const answer = await h.worker(vm, "/v1/vms/demand", { ownerOid: OWNER_A, rootSessionId: "root-1" });
+    assert.equal(answer.status, 404, JSON.stringify(env));
+    assert.equal(h.state.get("controller", "controller")?.lastDemandAt ?? 0, 0, "counted as no demand");
   }
 });
 

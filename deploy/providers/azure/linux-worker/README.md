@@ -4,23 +4,25 @@ An extension module for PilotSwarm's Linux worker on Azure, for a deployment
 whose Windows workers are owner-only (`PILOTSWARM_WORKER_OWNER_ONLY=1`). Those
 workers run only their owner's sessions, so another worker must run
 everything else: system sessions, titles, the activities around every turn,
-and capacity requests. This Linux worker is that coordination host. The
-module sets two hooks on it:
+the sessions that people start in the Portal with their workspaces, every
+Workflow activity, and capacity requests. This Linux worker is that
+coordination host. The module sets one hook on it, the capacity requester
+(`worker.setOwnerCapacityRequester`). Before each turn of an owner-tagged
+session, PilotSwarm asks a worker with a capacity requester for capacity for
+the session's owner. The module sends `{ ownerOid, rootSessionId }` to the
+disk controller's coordination route, `POST /v1/coordination/demand`, with a
+token of the pod's own identity, and passes the answer on: `ok`; `deny`
+(`NO_DRIVE_LEASE`) for a root without a drive lease, which ends the turn
+without a retry; or `busy` with `retryAfterMs` for a parked or returning
+drive, which holds the session on its timer. The controller then starts a
+worker for that owner when none is up.
 
-- **The capacity requester** (`worker.setOwnerCapacityRequester`). Before each
-  turn of an owner-tagged session, PilotSwarm asks a worker with a capacity
-  requester for capacity for the session's owner. The module sends
-  `{ ownerOid, rootSessionId }` to the disk controller's coordination route,
-  `POST /v1/coordination/demand`, with a token of the pod's own identity, and
-  passes the answer on: `ok`; `deny` (`NO_DRIVE_LEASE`) for a root without a
-  drive lease, which ends the turn without a retry; or `busy` with
-  `retryAfterMs` for a parked or returning drive, which holds the session on
-  its timer. The controller then starts a worker for that owner when none is
-  up.
-- **The admission hook** (`worker.setSessionAdmission`). Only system
-  sessions' turns run here. Any other turn is denied, without a retry, so a
-  user session that reaches this worker without an owner tag runs no turn on
-  it.
+The module sets no admission hook. The host never claims an owner-tagged
+activity: its filter carries the capacity tag, not an owner tag. And on a
+worker with a capacity requester, PilotSwarm itself refuses, without a retry,
+a turn of a session whose stored creation config carries an owner tag that
+the turn's input lacks, so a session a dispatcher created for its owner never
+runs a turn here, even when a client started it without the tag.
 
 It is a module of the Azure provider, not of PilotSwarm's packages: they never
 import it, and nothing loads it unless a deployment names it. The worker
@@ -29,14 +31,16 @@ image (`deploy/Dockerfile.worker`) carries it at
 
 ## Loading it
 
-On this repository's Azure deployment, `WIN_WORKER_COORDINATION_HOST=true`
-sets all of the following on `copilot-runtime-worker` (the `coordination-host`
-component of `deploy/providers/azure/gitops/worker`; see "The coordination
-host" in `deploy/scripts/README.md`). Elsewhere, set on the worker:
+On this repository's Azure deployment, the Windows worker pool requires
+`WIN_WORKER_COORDINATION_HOST=true`, which sets all of the following on
+`copilot-runtime-worker` (the `coordination-host` component of
+`deploy/providers/azure/gitops/worker`, and with session workspaces the
+`coordination-host-workspaces` component too; see "The coordination host" in
+`deploy/scripts/README.md`). Elsewhere, set on the worker:
 
 | Setting | Value |
 |---|---|
-| `PILOTSWARM_EXTENSION_MODULES` | `/app/deploy/providers/azure/linux-worker/capacity-requester.mjs` |
+| `PILOTSWARM_EXTENSION_MODULES` | `/app/deploy/providers/azure/linux-worker/capacity-requester.mjs`; with session workspaces (`WORKSPACES_ENABLED=true`), after the workspace provider's module: `/app/packages/sdk/examples/repo-workspaces/index.mjs,/app/deploy/providers/azure/linux-worker/capacity-requester.mjs` |
 | `PS_COORDINATION_URL` | The coordination route's https origin: `https://pilotswarm-disk-controller-coordination.<namespace>.svc:3005`, the controller's namespace. Nothing else: no path, query or credentials |
 | `PS_COORDINATION_TOKEN_SCOPE` | The scope of the controller's app, as in its `PS_DISK_CONTROLLER_TOKEN_SCOPE`: `<app client ID>/.default` or `api://<app client ID>/.default`. The pod's identity needs the app's `coordinator` role |
 | `NODE_EXTRA_CA_CERTS` | The disk controller's trusted CA certificates, from the ConfigMap `pilotswarm-disk-controller-ca` (key `ca.crt`) that the controller's TLS step writes in the controller's namespace, mounted as a file: its CA, or two CAs during a CA rotation. Node reads the file only when the process starts, so a new bundle needs a restart; the repository's deployment restarts the pods itself (see "The coordination host") |
@@ -79,7 +83,7 @@ when:
   or `PILOTSWARM_WORKER_OWNER_ONLY` is anything but unset or `0`. The
   coordination host runs no owner-tagged work;
 - a workload identity setting is missing;
-- the worker has no `setOwnerCapacityRequester` or `setSessionAdmission`.
+- the worker has no `setOwnerCapacityRequester`.
 
 Register it before the worker starts, as `PILOTSWARM_EXTENSION_MODULES` does:
 only then does the worker take capacity requests.
@@ -138,7 +142,8 @@ skill. It needs no tool module and no MCP servers for those answers;
 `packages/sdk/test/unit/coordination-host-parity.test.mjs` checks that they
 match. On the Azure deployment, `WIN_WORKER_COORDINATION_HOST_PLUGIN_CONFIGMAP`
 names a ConfigMap with those definitions, and the host loads a read-only copy
-of only them.
+of only them. With session workspaces it also loads the workspaces sample's
+plugin, for the Portal's sessions.
 
 ## Tests
 

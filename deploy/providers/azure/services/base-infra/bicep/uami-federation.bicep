@@ -6,10 +6,10 @@
 // accounts can exchange their projected SA tokens for Azure AD tokens.
 // With the Windows worker pool, the disk controller's own identity gets one
 // for the controller's service account too, and the CSI identity gets no
-// `worker-fedcred`: the Linux worker then either runs as the coordination
-// host, federated with the host's own identity, or runs no pod at all. So no
-// pod of the worker's service account can sign in as the portal's identity,
-// the database's administrator, also while the host is being turned off.
+// `worker-fedcred`: the Linux worker then runs as the coordination host,
+// federated with the host's own identity. So no pod of the worker's service
+// account can sign in as the portal's identity, the database's
+// administrator.
 // An incremental deployment leaves a `worker-fedcred` an earlier deploy
 // created; the Windows worker deploy step deletes it before the coordination
 // host's manifests (deploy/providers/azure/deploy-steps/win-workers.mjs).

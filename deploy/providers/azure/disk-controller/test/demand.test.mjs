@@ -1,8 +1,8 @@
-// Capacity demand (/v1/vms/demand, /v1/coordination/demand, /v1/vms/busy):
-// counted only for a root with a live lease of the owner, `deny` without one,
-// `busy` (uncounted) for a parked or returning one, in the answer shape the
-// orchestration's capacity requester expects. And admission before every
-// turn, by the table in the design.
+// Capacity demand (/v1/coordination/demand, /v1/vms/busy): counted only for a
+// root with a live lease of the owner, `deny` without one, `busy` (uncounted)
+// for a parked or returning one, in the answer shape the orchestration's
+// capacity requester expects. And admission before every turn, by the table
+// in the design.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
@@ -110,21 +110,6 @@ test("frozen and not-ready pools answer busy", async () => {
   const empty = await createHarness({ env: { WIN_WORKER_SCALE_SET_ID: "" } });
   const answer = (await empty.coordination({ ownerOid: OWNER_A, rootSessionId: "root-1" })).body;
   assert.equal(answer.decision, "deny", "no lease can exist before the pool is ready");
-});
-
-test("/v1/vms/demand answers like the coordination route, and 403 when the coordination host sends capacity requests", async () => {
-  const h = await createHarness();
-  await leased(h);
-  const vm = await h.activeVm({ owner: OWNER_A });
-  assert.deepEqual((await h.worker(vm, "/v1/vms/demand", { ownerOid: OWNER_A, rootSessionId: "root-1" })).body, { decision: "ok" });
-  assert.equal((await h.worker(vm, "/v1/vms/demand", { ownerOid: OWNER_A, rootSessionId: "none" })).body.decision, "deny");
-
-  const ownerOnly = await createHarness({ env: { WIN_WORKER_COORDINATION_HOST: "true" } });
-  await leased(ownerOnly);
-  const other = await ownerOnly.activeVm({ owner: OWNER_A });
-  const refused = await ownerOnly.worker(other, "/v1/vms/demand", { ownerOid: OWNER_A, rootSessionId: "root-1" });
-  assert.equal(refused.status, 403);
-  assert.equal(refused.body.error, "COORDINATION_HOST");
 });
 
 test("/v1/vms/busy counts only a leased root of the VM's own owner, and asks for a VM other than the caller", async () => {

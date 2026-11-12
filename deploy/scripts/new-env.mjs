@@ -557,8 +557,10 @@ export const INPUTS = [
     metavar: "<y|n>",
     help: [
       "Deploy a Windows worker pool beside the cluster (WIN_WORKERS_ENABLED).",
-      "Requires --edge-mode afd or private and --win-worker-alert-emails. The",
-      "pool's other settings are in the env file; see template.env. Default no.",
+      "Requires --edge-mode afd or private and --win-worker-alert-emails. Also",
+      "sets WIN_WORKER_COORDINATION_HOST=true, PILOTSWARM_OWNER_ROUTING=1 and",
+      "AUTHZ_ENFORCE_OWNERSHIP=true, which the pool requires. The pool's other",
+      "settings are in the env file; see template.env. Default no.",
     ],
     cliChoices: ["y", "n", "yes", "no", "true", "false"],
     nonInteractiveDefault: () => "n",
@@ -568,7 +570,7 @@ export const INPUTS = [
     choices: ["n", "y"],
     choiceDescriptions: {
       n: "No Windows worker pool (default)",
-      y: "Windows worker pool (requires EDGE_MODE=afd or private and an alert receiver)",
+      y: "Windows worker pool with its coordination host (requires EDGE_MODE=afd or private and an alert receiver)",
     },
     transform: (v) => normaliseYesNo(v),
   },
@@ -705,7 +707,9 @@ export function deriveTargets({ name, subscription, tenantId, location, regionSh
   const vpnOn = normaliseYesNo(vpnEnabled) === "y";
   // Windows worker pool. Only the switch and its required alert receivers
   // are prompted; the pool's other settings keep their defaults
-  // (deploy/scripts/lib/aks-env.mjs) until the operator edits the .env.
+  // (deploy/scripts/lib/aks-env.mjs) until the operator edits the .env. The
+  // pool requires the coordination host, which requires owner routing, and
+  // enforced session ownership (overlay-contracts.mjs), so those come with it.
   const winWorkersOn = normaliseYesNo(winWorkersEnabled) === "y";
   return {
     DEPLOY_PROVIDER: "azure",
@@ -760,6 +764,11 @@ export function deriveTargets({ name, subscription, tenantId, location, regionSh
     ...(sslCertDomainSuffix ? { SSL_CERT_DOMAIN_SUFFIX: sslCertDomainSuffix } : {}),
     WIN_WORKERS_ENABLED: winWorkersOn ? "true" : "false",
     ...(winWorkersOn && alertEmails ? { WIN_WORKER_ALERT_EMAILS: alertEmails } : {}),
+    ...(winWorkersOn ? {
+      WIN_WORKER_COORDINATION_HOST: "true",
+      PILOTSWARM_OWNER_ROUTING: "1",
+      AUTHZ_ENFORCE_OWNERSHIP: "true",
+    } : {}),
   };
 }
 
@@ -881,8 +890,14 @@ export function renderLocalEnv({ name, targets, secrets, portalConfig, templateT
     PORTAL_AUTH_ENTRA_TENANT_ID: targets.AZURE_TENANT_ID,
     PORTAL_AUTH_ALLOW_UNAUTHENTICATED: "false",
   } : {};
+  // This block comes last, so its value is the one the deploy reads. The
+  // pool and a dispatcher need enforced ownership: the deploy refuses either
+  // without it (overlay-contracts.mjs).
+  const ownershipDefaults = targets.WIN_WORKERS_ENABLED === "true" || String(portalConfig?.DISPATCHER_SP_OBJECT_ID ?? "").trim()
+    ? { AUTHZ_ENFORCE_OWNERSHIP: "true" }
+    : {};
   for (const { env: key } of PORTAL_CONFIG_KEYS) {
-    const value = portalConfig?.[key] ?? publicPortalDefaults[key] ?? "";
+    const value = portalConfig?.[key] ?? publicPortalDefaults[key] ?? ownershipDefaults[key] ?? "";
     portalConfigBlock.push(`${key}=${value || SEED_SECRETS_UNSET_SENTINEL}`);
   }
 
