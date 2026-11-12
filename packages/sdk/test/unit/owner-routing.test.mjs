@@ -775,6 +775,38 @@ test("a deny ends the turn without a retry and takes no turn index; the next pro
     assert.ok(run.statuses.some((s) => s.status === "error" && s.nonRetryable === true && s.error === "This owner has no capacity."));
 });
 
+test("a deny: the status names the refusal's response before the catalog shows the error; other non-retryable failures keep 1.0.83's order", () => {
+    // The last status and the latest response when the catalog's error write
+    // is scheduled: a client that sees the error and then syncs its response
+    // cursor from the status reads at least this status.
+    const atCatalogError = (run) => {
+        const at = run.log.findIndex((line) => line.startsWith("updateCmsState@") && line.includes('"state":"error"'));
+        assert.ok(at > 0, "the catalog's error write");
+        const before = run.log.slice(0, at);
+        return {
+            status: JSON.parse(before.filter((line) => line.startsWith("status ")).at(-1).slice("status ".length)),
+            latest: JSON.parse(before.filter((line) => line.startsWith("kv response.latest=")).at(-1).slice("kv response.latest=".length)),
+        };
+    };
+    const denied = drive(durableSessionOrchestration_1_0_84, baseInput({ ownerTag: OWNER }), {
+        queue: [prompt("first")],
+        capacity: [{ decision: "deny", message: "This owner has no capacity." }],
+    });
+    const { status, latest } = atCatalogError(denied);
+    assert.deepEqual([latest.type, latest.content], ["error", "This owner has no capacity."]);
+    assert.equal(status.responseVersion, latest.version, "the status names the refusal's response");
+    assert.deepEqual([status.status, status.error, status.retriesExhausted, status.nonRetryable], ["error", "This owner has no capacity.", true, true]);
+
+    // An untagged session's non-retryable failure, such as an admission
+    // hook's deny, yields exactly what frozen 1.0.83 yields.
+    const refusal = sessionAdmissionTurnResult({ decision: "deny", message: "no drive is leased here" }, { workerNodeId: "w1", orchestrationVersion: "1.0.84" });
+    assert.equal(refusal.retryable, false);
+    const script = () => ({ queue: [prompt("first")], turns: [refusal] });
+    const untagged = drive(durableSessionOrchestration_1_0_84, noWorkspace(), script());
+    assert.deepEqual(untagged.log, drive(durableSessionOrchestration_1_0_83, noWorkspace(), script()).log);
+    assert.equal(atCatalogError(untagged).latest.content, "Session admission denied this turn: no drive is leased here");
+});
+
 test("a busy answer holds the prompt on the busy timer without a turn, and a done command completes within the release cap", () => {
     const run = drive(durableSessionOrchestration_1_0_84, baseInput({ ownerTag: OWNER }), {
         queue: [prompt("hello", { clientMessageIds: ["m-1"] }), { msg: command("done"), when: (h) => h.count("requestOwnerCapacity") >= 1 }],
@@ -823,34 +855,44 @@ test("a requester that does not answer: busy CAPACITY_UNAVAILABLE keeps the work
     assert.equal(destroy.sessionId, "s-1");
 });
 
-test("unanswered capacity requests don't move the busy schedule on: each waits a minute, and none releases the worker", () => {
+test("an unanswered capacity request always waits its retryAfterMs, a minute, before or after busy answers, and leaves the step and the failure count", () => {
     const silent = { decision: "busy", code: CAPACITY_UNAVAILABLE, retryAfterMs: 60_000, message: "no answer" };
-    const released = (run) => run.log.filter((line) => line.includes('"eventType":"session.affinity_released"')).length;
-    for (const extra of [{}, { workspaceBusyFastRelease: true }]) {
-        const run = drive(durableSessionOrchestration_1_0_84, baseInput({ ownerTag: OWNER, ...extra }), {
-            queue: [prompt("hello")],
-            capacity: [silent, silent, silent, silent, silent],
-            turns: [ran({ type: "completed", content: "ok" })],
-            fireTimers: 5,
-        });
-        assert.deepEqual(run.timersFired, [60_000, 60_000, 60_000, 60_000, 60_000], JSON.stringify(extra));
-        assert.equal(run.count("requestOwnerCapacity"), 6);
-        assert.equal(released(run), 0);
-        const turn = run.activities.find((a) => a.name === "runTurnV5");
-        assert.equal(turn.sessionId, "s-1", "the turn runs under the session's first affinity key");
-        assert.deepEqual(turn.input.stashedPrompts, ["hello"]);
-    }
-    // Around a counted busy answer: the silent ones before it leave it at the
-    // first step, and the silent ones after it keep its step's wait.
     const counted = { decision: "busy", retryAfterMs: 1_000, message: "The owner's VM is starting." };
-    const mixed = drive(durableSessionOrchestration_1_0_84, baseInput({ ownerTag: OWNER }), {
+    const released = (run) => run.log.filter((line) => line.includes('"eventType":"session.affinity_released"')).length;
+    const held = (extra, capacity) => drive(durableSessionOrchestration_1_0_84, baseInput({ ownerTag: OWNER, ...extra }), {
         queue: [prompt("hello")],
-        capacity: [silent, silent, counted, silent, silent],
+        capacity,
         turns: [ran({ type: "completed", content: "ok" })],
-        fireTimers: 5,
+        fireTimers: capacity.length,
     });
-    assert.deepEqual(mixed.timersFired, [60_000, 60_000, 30_000, 120_000, 120_000]);
-    assert.equal(mixed.count("runTurnV5"), 1);
+    // Each policy's first three WORKSPACE_BUSY steps, and whether each busy answer releases the worker.
+    for (const [extra, steps, releasesEach] of [[{}, [30_000, 120_000, 300_000], false], [{ workspaceBusyFastRelease: true }, [10_000, 20_000, 60_000], true]]) {
+        const what = JSON.stringify(extra);
+        // Before any busy answer.
+        const before = held(extra, [silent, silent, silent]);
+        assert.deepEqual(before.timersFired, [60_000, 60_000, 60_000], what);
+        assert.equal(released(before), 0, what);
+        const turn = before.activities.find((a) => a.name === "runTurnV5");
+        assert.equal(turn.sessionId, "s-1", `${what}: the turn runs under the session's first affinity key`);
+        assert.deepEqual(turn.input.stashedPrompts, ["hello"]);
+        // After two busy answers: a minute each, and the next busy answer
+        // takes the step the second one left.
+        const after = held(extra, [counted, counted, silent, silent, counted]);
+        assert.deepEqual(after.timersFired, [steps[0], steps[1], 60_000, 60_000, steps[2]], what);
+        assert.equal(released(after), releasesEach ? 3 : 0, `${what}: only the busy answers release`);
+        assert.equal(after.count("requestOwnerCapacity"), 6);
+        assert.equal(after.count("runTurnV5"), 1);
+    }
+    // The failure count rides through too: a refusal of the turn on w1, an
+    // unanswered request, then another refusal there, two in a row, release w1.
+    const refusedTwice = drive(durableSessionOrchestration_1_0_84, baseInput({ ownerTag: OWNER }), {
+        queue: [prompt("hello")],
+        capacity: [{ decision: "ok" }, silent, { decision: "ok" }],
+        turns: [busy("w1"), busy("w1"), ran({ type: "completed", content: "ok" })],
+        fireTimers: 3,
+    });
+    assert.deepEqual(refusedTwice.timersFired, [30_000, 60_000, 120_000]);
+    assert.equal(released(refusedTwice), 1);
 });
 
 test("the fast busy policy: the first WORKSPACE_BUSY refusal releases the worker and retries follow 10 s, 20 s, 1 min, 3 min", () => {

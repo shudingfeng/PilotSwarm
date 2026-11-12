@@ -860,7 +860,7 @@ sequenceDiagram
 | `ok` | The owner has, or will soon have, a VM | The turn goes ahead |
 | `busy` | The lease is parked, returning or quarantined (15 minutes), the pool is frozen (`UPGRADE_FROZEN`), not ready (`NOT_READY`) or full (`POOL_FULL`) | Holds the prompt on its timer; complete, cancel and delete still reach it |
 | `deny` (`NO_DRIVE_LEASE`) | The root holds no lease of this owner | The turn ends as a refusal that isn't retried |
-| no answer in 15 seconds | `CAPACITY_UNAVAILABLE` | Waits a minute and asks again; the wait doesn't grow, and no worker is released |
+| no answer in 15 seconds | `CAPACITY_UNAVAILABLE` | Waits a minute and asks again, however many busy answers came before; releases no worker |
 
 - **Who asks.** With the coordination host, its module sends every request to
   `POST /v1/coordination/demand`, and the controller refuses `/v1/vms/demand`
@@ -1319,7 +1319,7 @@ turn, so it mounts no session workspace and loads no workspace provider.
 - **Detection.** The worker logs each answer of its capacity requests. A
   request the controller doesn't answer within 15 seconds, or refuses, ends
   `busy` with `CAPACITY_UNAVAILABLE`, and the session asks again a minute
-  later; that wait doesn't grow. The `capacity-request-unanswered` alert fires
+  later, every time. The `capacity-request-unanswered` alert fires
   once requests have gone unanswered for 5 minutes since the last answered one.
 
 ### Turning the coordination host on

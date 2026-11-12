@@ -297,6 +297,7 @@ async function withOwnerCluster(env, { respond, capacity, worker = {}, client: c
         await fn({
             startWorker,
             stopWorker,
+            workerOf: (id) => workers.get(id),
             startClients: async () => { await client.start(); await mgmt.start(); },
             client,
             mgmt,
@@ -340,6 +341,32 @@ async function spawnedChild(catalog, parentSessionId) {
         const events = await catalog.getSessionEvents(parentSessionId, undefined, 1000, ["session.agent_spawned"]);
         return events[0]?.data?.childSessionId;
     }, "the spawned child");
+}
+
+/**
+ * Hold the first catalog write of `state` for one session on these workers,
+ * after it is written, until `release()`: the catalog then shows the state
+ * while the orchestration, which waits for that activity, can't move on. The
+ * hold gives up after a minute so a failing test can't hang the cluster.
+ */
+function holdCatalogStateWrite(workers, sessionId, state) {
+    let release = () => {};
+    const released = new Promise((resolve) => { release = resolve; });
+    let held = 0;
+    const restores = workers.map((worker) => {
+        const catalog = worker._catalog;
+        const write = catalog.updateSession;
+        catalog.updateSession = async function (id, updates, ...rest) {
+            const result = await write.call(this, id, updates, ...rest);
+            if (id === sessionId && updates?.state === state && held === 0) {
+                held += 1;
+                await Promise.race([released, sleep(60_000)]);
+            }
+            return result;
+        };
+        return () => { catalog.updateSession = write; };
+    });
+    return { held: () => held, release: () => release(), restore: () => restores.forEach((restore) => restore()) };
 }
 
 describe("owner routing with PilotSwarm workers", () => {
@@ -408,17 +435,34 @@ describe("owner routing with PilotSwarm workers", () => {
             return { decision: "ok" };
         };
         const respond = (_body, position) => ({ content: position.lastUserText.includes("second try") ? "second try ran" : "ok" });
-        await withOwnerCluster(env, { respond, capacity }, async ({ startWorker, startClients, client, mgmt, catalog, asked, qualifiedModel }) => {
+        await withOwnerCluster(env, { respond, capacity }, async ({ startWorker, workerOf, startClients, client, mgmt, catalog, asked, qualifiedModel }) => {
             await startWorker("coordinator", undefined, true);
             await startWorker("owner-a", TAG.a);
             await startClients();
 
             const denied = await client.createSession({ sessionId: randomUUID(), model: qualifiedModel, owner: OWNER("a") });
-            await denied.send("first try");
-            const refused = await waitForSessionState(catalog, denied.sessionId, ["error"], 60_000);
-            expect(refused.lastError).toBe("This owner has no capacity.");
-            expect(await turnWorkers(catalog, denied.sessionId)).toEqual([]);
-            expect(await denied.sendAndWait("second try", TIMEOUT)).toBe("second try ran");
+            // The refusal's catalog write is held until this client has synced
+            // its response cursor for the next prompt: the sync always reads
+            // the status the orchestration published by the time the catalog
+            // shows the error, and the second try must not get the refusal back.
+            const errorWrite = holdCatalogStateWrite([workerOf("coordinator"), workerOf("owner-a")], denied.sessionId, "error");
+            const syncTurnCursors = client._syncTurnCursors;
+            client._syncTurnCursors = async function (orchestrationId) {
+                await syncTurnCursors.call(this, orchestrationId);
+                if (orchestrationId === `session-${denied.sessionId}` && errorWrite.held() === 1) errorWrite.release();
+            };
+            try {
+                await denied.send("first try");
+                const refused = await waitForSessionState(catalog, denied.sessionId, ["error"], 60_000);
+                expect(refused.lastError).toBe("This owner has no capacity.");
+                expect(errorWrite.held()).toBe(1);
+                expect(await turnWorkers(catalog, denied.sessionId)).toEqual([]);
+                expect(await denied.sendAndWait("second try", TIMEOUT)).toBe("second try ran");
+            } finally {
+                errorWrite.release();
+                errorWrite.restore();
+                client._syncTurnCursors = syncTurnCursors;
+            }
             expect(asked(denied.sessionId)).toHaveLength(2);
             await mgmt.completeSession(denied.sessionId, "done after a refusal");
             expect((await catalog.getSession(denied.sessionId)).state).toBe("completed");

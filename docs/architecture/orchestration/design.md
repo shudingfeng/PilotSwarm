@@ -852,9 +852,9 @@ answers:
 | Answer | Effect |
 |---|---|
 | `ok` (or anything else) | the turn runs |
-| `deny` | the turn ends as a refusal that is not retried: the session shows the requester's message, the prompt is dropped, a child reports the failure to its parent, and the next prompt asks again; no turn index is taken |
+| `deny` | the turn ends as a refusal that is not retried: the session shows the requester's message, the prompt is dropped, a child reports the failure to its parent, and the next prompt asks again; no turn index is taken. The status names the refusal's response before the catalog shows the error, so a client that then syncs its response cursor never reads the refusal back as its next turn's answer; other non-retryable failures keep 1.0.83's order, status first |
 | `busy` | the prompt is held on the workspace timer, as for a `WORKSPACE_BUSY` refusal, at least `retryAfterMs`, with the message as the session's wait reason, and the session asks again when the timer fires; `done`, `cancel` and `delete` reach it meanwhile |
-| no answer within 15 s, a failed request, or no row for the session | `busy` with code `CAPACITY_UNAVAILABLE` and a one-minute wait; it is not counted as a failure, so the schedule stays at its step and the wait doesn't grow (a minute, or the step's own wait when a counted refusal came first), and it releases no affinity, even under the fast policy |
+| no answer within 15 s, a failed request, or no row for the session | `busy` with code `CAPACITY_UNAVAILABLE` and `retryAfterMs` of a minute. It is not counted as a failure: the session waits the answer's `retryAfterMs`, a minute, whatever the schedule's step, also after busy answers and under the fast policy; the step and the failure count stay as they were, and no affinity is released |
 
 A set-workspace command of a tagged session answers a `deny` or `busy` with
 that refusal and keeps the workspace. Otherwise it races `checkWorkspace`
