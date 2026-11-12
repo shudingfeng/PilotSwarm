@@ -21,7 +21,7 @@
  *   D10 crash recovery (Git)
  *   D11 the WIP push (Git)
  *   D12 back from local work: the branch sync (Git)
- *   D13 admission, the credential broker and capacity requests
+ *   D13 admission and the credential broker; no capacity requester
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
@@ -33,7 +33,6 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { PilotSwarmWorker } from "../../dist/worker.js";
 import { checkWorkspaceForSpawn } from "../../dist/workspace.js";
-import { askOwnerCapacityRequester } from "../../dist/owner-routing.js";
 import { PersonalCredentialError } from "../../dist/personal-secret-store.js";
 import { parseWipPrefix, register, settingsFromEnv } from "../../examples/devdrive-workspaces/index.mjs";
 import { createDiskPoolClient, fetchWorkCredential, loadTokenModule, useDiskPoolClient } from "../../examples/devdrive-workspaces/disk-pool-client.mjs";
@@ -76,7 +75,6 @@ function fakeController({ leases = {} } = {}) {
         releaseRequested: null,
         extendRequested: null,
         admit: () => ({ decision: "admit" }),
-        demand: () => ({ decision: "ok" }),
         model: () => ({ status: "ok", token: "model-token-from-broker" }),
         work: () => ({ status: "ok", credential: "work-credential-from-broker" }),
     };
@@ -118,7 +116,6 @@ function fakeController({ leases = {} } = {}) {
         },
         "/v1/vms/busy": () => ok({ decision: "ok" }),
         "/v1/vms/admit": (body) => raw(state.admit(body)),
-        "/v1/vms/demand": (body) => raw(state.demand(body)),
         "/v1/credentials/model": (body) => raw(state.model(body)),
         "/v1/credentials/work": (body) => raw(state.work(body)),
     };
@@ -328,22 +325,33 @@ describe("D1 startup", () => {
             register({ setWorkspaceProvider() {} }, { env: { ...env, PILOTSWARM_DISABLE_CHILD_WORKSPACE_INHERITANCE: "1" }, log: () => {} }, deps),
             /needs a PilotSwarm worker with setSessionAdmission, .*tryReleaseIdleWorkspace/,
         );
+        // The image sets the roots; a worker without them has no drive to mount.
+        for (const roots of [undefined, "", "  "]) {
+            const worker = newWorker(home);
+            const unset = { ...env, PILOTSWARM_DISABLE_CHILD_WORKSPACE_INHERITANCE: "1", PS_WORKSPACE_ROOTS: roots };
+            if (roots === undefined) delete unset.PS_WORKSPACE_ROOTS;
+            await assert.rejects(register(worker, { env: unset, log: () => {} }, deps), /PS_WORKSPACE_ROOTS is required/, JSON.stringify(roots));
+            assert.equal(worker.sessionManager.getWorkspaceProvider(), null, "no provider is set");
+        }
+        assert.equal(controller.calls.length, 0, "nothing reached the controller");
     });
 
-    it("the settings: defaults, one volume, adopt and a WIP prefix that makes a valid branch", () => {
-        const settings = settingsFromEnv({});
+    it("the settings: the roots are required; defaults, one volume, adopt and a WIP prefix that makes a valid branch", () => {
+        assert.throws(() => settingsFromEnv({}), /PS_WORKSPACE_ROOTS is required/);
+        const roots = { PS_WORKSPACE_ROOTS: "repos=Q:\\Repos" };
+        const settings = settingsFromEnv(roots);
         assert.deepEqual(settings.roots, [{ name: "repos", path: "Q:\\Repos" }]);
         assert.deepEqual(settings.adopt, { agents: true, skills: true, instructions: true });
         assert.equal(settings.wipPrefix, "pilotswarm/wip/");
         assert.equal(settings.attacherUrl, "http://127.0.0.1:3099");
         assert.equal(settings.ownerOnly, false);
         assert.match(settings.launchId, /^[0-9a-f-]{36}$/, "a new launch ID when PS_LAUNCH_ID is unset");
-        assert.equal(settingsFromEnv({ PS_WORKSPACE_ADOPT: "none" }).adopt, null);
-        assert.equal(settingsFromEnv({ PS_WIP_BRANCH_PREFIX: "team/wip/" }).wipPrefix, "team/wip/");
+        assert.equal(settingsFromEnv({ ...roots, PS_WORKSPACE_ADOPT: "none" }).adopt, null);
+        assert.equal(settingsFromEnv({ ...roots, PS_WIP_BRANCH_PREFIX: "team/wip/" }).wipPrefix, "team/wip/");
         assert.equal(settings.attachBudgetMs, null, "the provider's own 10 minutes");
-        assert.equal(settingsFromEnv({ PILOTSWARM_WORKSPACE_ATTACH_TIMEOUT_MS: "600000" }).attachBudgetMs, 600_000, "the worker's attach deadline");
+        assert.equal(settingsFromEnv({ ...roots, PILOTSWARM_WORKSPACE_ATTACH_TIMEOUT_MS: "600000" }).attachBudgetMs, 600_000, "the worker's attach deadline");
         for (const bad of ["../x/", "-x/", "a//b/", "a b/", "a..b/"]) assert.throws(() => parseWipPrefix(bad), /not a valid branch name prefix/, bad);
-        assert.throws(() => settingsFromEnv({ PS_WORKSPACE_ADOPT: "hooks" }), /PS_WORKSPACE_ADOPT/);
+        assert.throws(() => settingsFromEnv({ ...roots, PS_WORKSPACE_ADOPT: "hooks" }), /PS_WORKSPACE_ADOPT/);
         if (process.platform === "win32") {
             assert.throws(() => settingsFromEnv({ PS_WORKSPACE_ROOTS: "a=Q:\\A,b=C:\\B" }), /Dev Drive's volume/);
         }
@@ -1300,7 +1308,7 @@ describe("D12 back from local work: the branch sync", () => {
     });
 });
 
-describe("D13 admission, the credential broker and capacity requests", () => {
+describe("D13 admission, the credential broker, and no capacity requester", () => {
     const SECRET = `ghcp-${OWNER}-0123456789abcdef0123456789abcdef`;
     const secret = (version) => ({ kind: "externalSecret", store: "vault", name: SECRET, version, expiresOn: null });
 
@@ -1388,55 +1396,18 @@ describe("D13 admission, the credential broker and capacity requests", () => {
         }
     });
 
-    it("the capacity requester asks /v1/vms/demand with the owner and the root, until the controller answers, and passes on deny and busy", async (t) => {
-        const h = await harness(t);
-        const requester = h.worker.sessionManager.getOwnerCapacityRequester();
-        assert.equal(typeof requester, "function", "registered without owner-only workers");
-        const request = { sessionId: "S1", rootSessionId: "R1", ownerTag: `owner.${OWNER}` };
-        h.controller.once("/v1/vms/demand", () => ({ status: 503, body: { error: "STARTING" } }));
-        h.controller.once("/v1/vms/demand", () => { throw new Error("connection refused"); });
-        assert.deepEqual(await askOwnerCapacityRequester(requester, request), { decision: "ok" });
-        assert.equal(h.controller.of("/v1/vms/demand").length, 3, "retried until the controller answered");
-        assert.deepEqual(h.controller.of("/v1/vms/demand")[0].body, { ownerOid: OWNER, rootSessionId: "R1" });
-        h.controller.state.demand = () => ({ decision: "deny", code: "NO_DRIVE_LEASE", message: "This session's root holds no Dev Drive of this owner." });
-        assert.deepEqual(await askOwnerCapacityRequester(requester, request),
-            { decision: "deny", code: "NO_DRIVE_LEASE", message: "This session's root holds no Dev Drive of this owner." });
-        h.controller.state.demand = () => ({ decision: "busy", code: "WORKSPACE_BUSY", reason: "PARKED", retryAfterMs: 900_000, message: "Dev Drive is parked for local work" });
-        assert.deepEqual(await askOwnerCapacityRequester(requester, request),
-            { decision: "busy", code: "WORKSPACE_BUSY", message: "Dev Drive is parked for local work", retryAfterMs: 900_000 });
-    });
-
-    it("the capacity requester stops at the activity's signal, and gives up on a refused route", async (t) => {
-        const h = await harness(t);
-        const requester = h.worker.sessionManager.getOwnerCapacityRequester();
-        const request = { sessionId: "S1", rootSessionId: "R1", ownerTag: `owner.${OWNER}` };
-        h.controller.state.demand = () => ({ status: 503, body: { error: "STARTING" } });
-        const unavailable = await askOwnerCapacityRequester(requester, request, 300);
-        assert.equal(unavailable.code, "CAPACITY_UNAVAILABLE");
-        const asked = h.controller.of("/v1/vms/demand").length;
-        assert.ok(asked >= 2, "it retried");
-        await sleep(1_200);
-        assert.equal(h.controller.of("/v1/vms/demand").length, asked, "nothing after the signal");
-        h.controller.state.demand = () => ({ status: 403, body: { error: "COORDINATION_HOST" } });
-        const refused = await askOwnerCapacityRequester(requester, request, 5_000);
-        assert.equal(refused.code, "CAPACITY_UNAVAILABLE");
-        assert.match(refused.message, /HTTP 403/);
-        assert.equal(h.controller.of("/v1/vms/demand").length, asked + 1, "a refused route is not retried");
-    });
-
-    it("the capacity requester denies an owner without an object ID at once, without asking the controller", async (t) => {
-        const h = await harness(t);
-        const requester = h.worker.sessionManager.getOwnerCapacityRequester();
-        const answer = await askOwnerCapacityRequester(requester, { sessionId: "S1", rootSessionId: "R1", ownerTag: "owner.someone@example.com" });
-        assert.equal(answer.decision, "deny");
-        assert.equal(answer.code, "OWNER_NOT_SUPPORTED");
-        assert.match(answer.message, /no Microsoft Entra object ID/);
-        assert.equal(h.controller.of("/v1/vms/demand").length, 0);
-    });
-
-    it("with owner-only workers no capacity requester is registered", async (t) => {
-        const h = await harness(t, { env: { PILOTSWARM_WORKER_OWNER_ONLY: "1", PILOTSWARM_WORKER_OWNER_TAG: `owner.${OWNER}` } });
-        assert.equal(h.worker.sessionManager.getOwnerCapacityRequester(), null);
+    it("no capacity requester is registered, bound or not, owner-only or not: the coordination host sends every capacity request", async (t) => {
+        for (const env of [{}, { PILOTSWARM_WORKER_OWNER_TAG: `owner.${OWNER}` }, { PILOTSWARM_WORKER_OWNER_ONLY: "1", PILOTSWARM_WORKER_OWNER_TAG: `owner.${OWNER}` }]) {
+            const h = await harness(t, { env });
+            assert.equal(h.worker.sessionManager.getOwnerCapacityRequester(), null, JSON.stringify(env));
+            assert.equal(typeof h.worker.sessionManager.getSessionAdmission(), "function");
+        }
+        // Nor does it need the hook.
+        const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "ps-devdrive-")));
+        const worker = newWorker(home);
+        Object.defineProperty(worker, "setOwnerCapacityRequester", { value: undefined });
+        const h = await harness(t, { home, worker });
         assert.equal(typeof h.worker.sessionManager.getSessionAdmission(), "function");
+        assert.ok(!h.controller.calls.some((call) => call.route === "/v1/vms/demand"));
     });
 });

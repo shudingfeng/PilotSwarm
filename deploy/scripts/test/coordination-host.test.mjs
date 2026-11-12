@@ -74,8 +74,10 @@ const OUTPUTS = Object.freeze({
   PS_DISK_POOL_STATE_URL: "https://placeholder.blob.core.windows.net/disk-pool-state",
 });
 
+// The pool without the host, which deploy refuses (overlay-contracts.mjs),
+// and the pool with what it needs.
 const POOL = Object.freeze({ WIN_WORKERS_ENABLED: "true", WIN_WORKER_ALERT_EMAILS: "ops@example.com" });
-const HOST = Object.freeze({ ...POOL, WIN_WORKER_COORDINATION_HOST: "true", PILOTSWARM_OWNER_ROUTING: "1" });
+const HOST = Object.freeze({ ...POOL, WIN_WORKER_COORDINATION_HOST: "true", PILOTSWARM_OWNER_ROUTING: "1", AUTHZ_ENFORCE_OWNERSHIP: "true" });
 
 // What staging the worker, the portal and the controller reads: a managed
 // identity stamp database whose Entra administrator is the portal's identity.
@@ -256,16 +258,14 @@ test("without the pool, the staged worker is as before: its overlay unchanged, n
   }
 });
 
-test("with the pool and without the host, the worker has 0 replicas and its overlay changes nowhere else", (t) => {
-  const off = stage(t, "worker", stampEnv());
-  const root = stage(t, "worker", stampEnv(POOL));
-  const source = readFileSync(join(WORKER_GITOPS, "overlays/default/kustomization.yaml"), "utf8");
-  const staged = overlayOf(root);
-  assert.ok(staged.startsWith(source.trimEnd()), "the overlay's own lines are unchanged");
-  assert.deepEqual(yamlFile(join(root, "overlays/default/kustomization.yaml")).replicas, [{ name: "copilot-runtime-worker", count: 0 }]);
-  assert.deepEqual(componentsOf(root), ["../../components/worker-replacements"]);
-  assert.equal(readFileSync(join(root, "overlays/default/.env"), "utf8"), readFileSync(join(off, "overlays/default/.env"), "utf8"),
-    "the same .env as without the pool");
+test("with the pool and without the host, staging the worker refuses, as deploy does before any step", (t) => {
+  for (const extra of [POOL, { ...POOL, WIN_WORKER_COORDINATION_HOST: "false" }, { ...HOST, WIN_WORKER_COORDINATION_HOST: "false" }]) {
+    assert.throws(() => stage(t, "worker", stampEnv(extra)),
+      /WIN_WORKERS_ENABLED=true needs WIN_WORKER_COORDINATION_HOST=true: the coordination host makes the Windows workers owner-only/,
+      JSON.stringify(extra));
+  }
+  // The portal and the controller stage as they would: the refusal is the worker's.
+  assert.equal(host.stageCoordinationHost({ service: "portal", env: stampEnv(POOL), stagedServiceRoot: "unused", overlayName: "unused" }), null);
 });
 
 test("with the host, the worker's overlay takes the host's identity in that call only: the portal and the controller keep theirs, and the env map is unchanged", (t) => {
@@ -323,14 +323,18 @@ test("with the host, the staged overlay gets the component and WIN_WORKER_COORDI
     assert.deepEqual(componentsOf(root), ["../../components/coordination-host", "../../components/worker-replacements"]);
     assert.deepEqual(yamlFile(join(root, "overlays/default/kustomization.yaml")).replicas, [{ name: "copilot-runtime-worker", count: expected }]);
   }
-  assert.throws(() => stage(t, "worker", hostEnv({ WORKSPACES_ENABLED: "true" })),
-    /WIN_WORKER_COORDINATION_HOST=true needs WORKSPACES_ENABLED=false/);
+  // With workspaces the host runs the Portal's sessions with them: the
+  // workspaces component goes first, and coordination-host-workspaces after
+  // the host's own, so its settings win.
+  const hosted = stage(t, "worker", hostEnv({ WORKSPACES_ENABLED: "true" }));
+  assert.deepEqual(componentsOf(hosted), ["../../components/workspaces", "../../components/coordination-host",
+    "../../components/coordination-host-workspaces", "../../components/worker-replacements"]);
   // The portal and the controller get nothing of it.
   assert.equal(host.stageCoordinationHost({ service: "portal", env: hostEnv(), stagedServiceRoot: "unused", overlayName: "unused" }), null);
 });
 
-test("rendered: 3 replicas without the pool, 0 with the pool alone, 2 with the host; without the host the pods keep the secret store", (t) => {
-  for (const [extra, replicas, coordinationHost] of [[{}, 3, false], [POOL, 0, false], [HOST, 2, true]]) {
+test("rendered: 3 replicas without the pool, 2 with the host; without the host the pods keep the secret store", (t) => {
+  for (const [extra, replicas, coordinationHost] of [[{}, 3, false], [HOST, 2, true]]) {
     const objects = render(t, join(stage(t, "worker", stampEnv(extra)), "overlays/default"));
     if (!objects) return;
     const deployment = workerDeployment(objects);
@@ -348,15 +352,17 @@ test("rendered: 3 replicas without the pool, 0 with the pool alone, 2 with the h
   }
 });
 
-test("without the host, the coordination-host folders in the staged tree change nothing in the render", (t) => {
-  for (const extra of [{}, POOL]) {
+test("without the pool, the coordination-host folders in the staged tree change nothing in the render, with workspaces or without", (t) => {
+  for (const extra of [{}, { WORKSPACES_ENABLED: "true" }]) {
     const root = stage(t, "worker", stampEnv(extra));
     const withFolders = render(t, join(root, "overlays/default"));
     if (!withFolders) return;
     const copy = mkdtempSync(join(tmpdir(), "ps-coordination-host-copy-"));
     t.after(() => rmSync(copy, { recursive: true, force: true }));
     cpSync(root, copy, { recursive: true });
-    for (const name of ["coordination-host", "coordination-host-plugin", "coordination-host-ca"]) rmSync(join(copy, "components", name), { recursive: true, force: true });
+    for (const name of ["coordination-host", "coordination-host-plugin", "coordination-host-ca", "coordination-host-workspaces"]) {
+      rmSync(join(copy, "components", name), { recursive: true, force: true });
+    }
     assert.deepEqual(withFolders, render(t, join(copy, "overlays/default")), JSON.stringify(extra));
   }
 });
@@ -373,9 +379,9 @@ test("while the controller trusts two CAs, the host's pod template carries the b
   assert.ok(readFileSync(join(one, "components/coordination-host-ca/kustomization.yaml"), "utf8").includes(host.CA_HASH_PLACEHOLDER),
     "the unused component keeps its placeholder");
   assert.throws(() => stage(t, "worker", hostEnv({ [host.COORDINATION_HOST_CA_HASH_KEY]: "not-a-hash" })), /must be the SHA-256 of the disk controller's CA bundle/);
-  // Without the host the worker runs no coordination, whatever the hash.
-  const poolOnly = stage(t, "worker", stampEnv({ ...POOL, [host.COORDINATION_HOST_CA_HASH_KEY]: hash }));
-  assert.deepEqual(componentsOf(poolOnly), ["../../components/worker-replacements"]);
+  // Without the pool the worker runs no coordination, whatever the hash.
+  const noPool = stage(t, "worker", stampEnv({ [host.COORDINATION_HOST_CA_HASH_KEY]: hash }));
+  assert.deepEqual(componentsOf(noPool), ["../../components/worker-replacements"]);
   assert.equal(host.caBundleHash("bundle\n"), createHash("sha256").update("bundle\n").digest("hex"));
 
   const rotating = render(t, join(two, "overlays/default"));
@@ -485,12 +491,13 @@ test("the pod: the settings the host runs with, 4 GiB, the controller's CA, one 
     SESSION_STATE_DIR: "/home/node/.copilot/session-state",
     PILOTSWARM_EVENT_RETENTION_MINUTES: "43200",
     PILOTSWARM_DISABLE_K8S_SCALING: "1",
-    PILOTSWARM_DISABLE_CHILD_WORKSPACE_INHERITANCE: "1",
     PILOTSWARM_WORKER_CONCURRENCY: "8",
     PILOTSWARM_ORCHESTRATION_CONCURRENCY: "4",
   };
   assert.deepEqual(envOf(container), expected);
   assert.ok(!("PILOTSWARM_REGEN_LLM_DISTILLER" in envOf(container)), "no distiller");
+  // A Portal session's sub-agents keep its workspace.
+  assert.ok(!("PILOTSWARM_DISABLE_CHILD_WORKSPACE_INHERITANCE" in envOf(container)));
   // The module the setting names is the one the image copies to that path.
   assert.ok(existsSync(join(REPO_ROOT, expected.PILOTSWARM_EXTENSION_MODULES.replace(/^\/app\//, ""))));
   assert.match(readFileSync(join(REPO_ROOT, "deploy/Dockerfile.worker"), "utf8"),
@@ -524,6 +531,61 @@ test("the pod: the settings the host runs with, 4 GiB, the controller's CA, one 
   assert.ok(objects[`ConfigMap/${worker.envFrom[1].configMapRef.name}`], "the host's ConfigMap is in the render, by its hashed name");
   assert.ok(matches(objects["PodDisruptionBudget/copilot-runtime-worker"].spec.selector.matchLabels, deployment.spec.template.metadata.labels));
   for (const item of Object.values(objects)) assert.equal(item.metadata.namespace ?? "pilotswarm", "pilotswarm", `${item.kind}/${item.metadata.name}`);
+});
+
+test("with workspaces, the host runs the Portal's sessions with them: both modules, both plugin folders, Git's settings for agents' tools, and the repo service's port", (t) => {
+  const WORKSPACES_COMPONENT = join(WORKER_GITOPS, "components/coordination-host-workspaces");
+  const patch = yamlFile(join(WORKSPACES_COMPONENT, "deployment-patch.yaml"));
+  const modules = envOf(patch.spec.template.spec.containers[0]).PILOTSWARM_EXTENSION_MODULES;
+  assert.equal(modules, "/app/packages/sdk/examples/repo-workspaces/index.mjs,/app/deploy/providers/azure/linux-worker/capacity-requester.mjs");
+  // The modules the setting names are the ones the image copies to those paths.
+  for (const module of modules.split(",")) assert.ok(existsSync(join(REPO_ROOT, module.replace(/^\/app\//, ""))), module);
+  assert.match(readFileSync(join(WORKSPACES_COMPONENT, "deployment-patch.yaml"), "utf8"), new RegExp(host.PLUGIN_DIRS_PLACEHOLDER));
+  // The workspaces component's plugin folder, which the host names after the Windows workers' plugin.
+  assert.equal(envOf(yamlFile(join(WORKER_GITOPS, "components/workspaces/worker-patch.yaml")).spec.template.spec.containers[0]).PLUGIN_DIRS,
+    host.WORKSPACES_PLUGIN_DIR);
+
+  const hostOnly = render(t, join(stage(t, "worker", hostEnv()), "overlays/default"));
+  if (!hostOnly) return;
+  const repoPolicy = yamlFile(join(AZURE, "gitops/repo-cache/base/network-policy.yaml"));
+  const repoPods = yamlFile(join(AZURE, "gitops/repo-cache/base/deployment.yaml")).spec.template.metadata.labels;
+  for (const [extra, pluginDirs] of [
+    [{}, host.WORKSPACES_PLUGIN_DIR],
+    [{ WIN_WORKER_COORDINATION_HOST_PLUGIN_CONFIGMAP: "host-plugin" }, `${host.COORDINATION_HOST_PLUGIN_DIR},${host.WORKSPACES_PLUGIN_DIR}`],
+  ]) {
+    const objects = render(t, join(stage(t, "worker", hostEnv({ WORKSPACES_ENABLED: "true", ...extra })), "overlays/default"));
+    const deployment = workerDeployment(objects);
+    const worker = workerContainer(deployment);
+    const env = envOf(worker);
+    assert.equal(env.PILOTSWARM_EXTENSION_MODULES, modules);
+    assert.equal(env.PLUGIN_DIRS, pluginDirs);
+    assert.equal(env.PILOTSWARM_CLI_ENV_ALLOWLIST, "REPO_SERVICE_URL,GIT_AUTHOR_NAME,GIT_AUTHOR_EMAIL,GIT_COMMITTER_NAME,GIT_COMMITTER_EMAIL");
+    // The workspaces component's settings and mounts, and the host's own settings, all stay.
+    for (const key of ["PS_WORKSPACE_ROOTS", "PS_PLAIN_ROOTS", "PS_HOME_ROOT", "REPO_SERVICE_URL", "ATTACHER_SOCKET", "GIT_AUTHOR_NAME", "GIT_COMMITTER_EMAIL"]) {
+      assert.ok(env[key], key);
+    }
+    for (const [key, value] of Object.entries(envOf(workerContainer(workerDeployment(hostOnly))))) {
+      if (!["PILOTSWARM_EXTENSION_MODULES", "PLUGIN_DIRS"].includes(key)) assert.equal(env[key], value, key);
+    }
+    assert.ok(!("PILOTSWARM_DISABLE_CHILD_WORKSPACE_INHERITANCE" in env), "a session's sub-agents keep its workspace");
+    assert.deepEqual(worker.volumeMounts.filter((m) => ["/ws", "/run/pilotswarm-attacher"].includes(m.mountPath)).map((m) => m.name), ["workspaces", "attacher-socket"]);
+    assert.ok(objects["DaemonSet/pilotswarm-attacher"], "the attacher mounts the repo pod's exports on the host's nodes");
+    assert.equal(podSpec(deployment).terminationGracePeriodSeconds, 90, "a draining host releases its workspaces");
+
+    // Egress: the host's own policy as it is, and a second that opens only the
+    // repo service's port, to the repo pod, whose own policy admits the host.
+    const policies = Object.values(objects).filter((o) => o.kind === "NetworkPolicy" && matches(o.spec.podSelector.matchLabels, WORKER_LABELS));
+    assert.deepEqual(policies.map((o) => o.metadata.name).sort(), ["copilot-runtime-worker-egress", "copilot-runtime-worker-repo-cache-egress"]);
+    assert.deepEqual(objects["NetworkPolicy/copilot-runtime-worker-egress"], hostOnly["NetworkPolicy/copilot-runtime-worker-egress"]);
+    const repo = objects["NetworkPolicy/copilot-runtime-worker-repo-cache-egress"];
+    assert.deepEqual(repo.spec.policyTypes, ["Egress"]);
+    assert.deepEqual(repo.spec.egress, [{ to: [{ podSelector: { matchLabels: { "app.kubernetes.io/name": "pilotswarm", "app.kubernetes.io/component": "repo-cache" } } }],
+      ports: [{ protocol: "TCP", port: 8080 }] }]);
+    assert.ok(matches(repo.spec.egress[0].to[0].podSelector.matchLabels, repoPods));
+    assert.equal(new URL(env.REPO_SERVICE_URL).port, "8080");
+    const admits = repoPolicy.spec.ingress.find((rule) => rule.ports.some((p) => p.port === 8080));
+    assert.ok(matches(admits.from[0].podSelector.matchLabels, deployment.spec.template.metadata.labels));
+  }
 });
 
 test("the host's ConfigMap: the controller's coordination URL and token scope, which the module accepts, and redaction prefixes only when set", (t) => {
@@ -705,7 +767,7 @@ test("with the host, the staged catalog's Foundry providers take the host's iden
   assert.deepEqual(keyed(worker), []);
   assert.deepEqual(worker.filter((p) => p.type === "foundry-wif").map((p) => p.id), keyed(source));
   assert.deepEqual(keyed(catalog(stage(t, "portal", hostEnv(foundry)))), keyed(source));
-  assert.deepEqual(keyed(catalog(stage(t, "worker", stampEnv({ ...POOL, ...foundry })))), keyed(source), "without the host, as before");
+  assert.deepEqual(keyed(catalog(stage(t, "worker", stampEnv(foundry)))), keyed(source), "without the pool, as before");
 });
 
 // ─── Bicep ───
@@ -741,9 +803,8 @@ test("the host's identity: only with the pool and the host, federated with the w
   const federation = readBicep("uami-federation.bicep");
   assert.match(federation, /^param coordinationHostIdentityName string = ''\s*$/m);
   assert.match(federation, /^param winWorkersEnabled bool = false\s*$/m);
-  // With the pool, the host on or off, no pod of the worker's service account
-  // may sign in as the portal's identity: the host has its own, and without
-  // it the worker runs no pod.
+  // With the pool, no pod of the worker's service account may sign in as the
+  // portal's identity: the coordination host has its own.
   assert.equal(conditionOf(federation, "workerFederation"), "!winWorkersEnabled");
   assert.equal(conditionOf(federation, "coordinationHostFederation"), "!empty(coordinationHostIdentityName)");
   const hostCredential = blockOf(federation, "coordinationHostFederation");
@@ -795,16 +856,13 @@ const PARAMS_ENV = Object.freeze({
   WIN_WORKER_VAULT_WRITER_ROLE_ID: "aaaaaaaa-0000-0000-0000-000000000003",
 });
 
-test("the rendered parameters name the host only when it is on, so a pool without it renders as before", () => {
+test("the rendered parameters name the host with the pool; without the pool they are as before", () => {
   const off = renderBaseInfra({ ...PARAMS_ENV });
-  const pool = renderBaseInfra({ ...PARAMS_ENV, ...POOL });
   const on = renderBaseInfra({ ...PARAMS_ENV, ...HOST });
   assert.equal(off.winWorkerCoordinationHost, undefined);
-  assert.equal(pool.winWorkerCoordinationHost, undefined);
+  assert.equal(off.winWorkersEnabled, undefined);
   assert.deepEqual(on.winWorkerCoordinationHost, { value: true });
   assert.deepEqual(on.winWorkersEnabled, { value: true });
-  const { winWorkerCoordinationHost: _, ...rest } = on;
-  assert.deepEqual(rest, pool, "nothing else changes");
 });
 
 // `az bicep build` to a file: `--stdout` fails on a console that can't print
@@ -838,7 +896,7 @@ const resourcesOf = (deployment) => {
   return Array.isArray(resources) ? resources : Object.values(resources);
 };
 
-test("compiled, the Bicep creates no worker-fedcred once the rendered parameters turn the pool on, with the host or without it", { timeout: 600_000 }, (t) => {
+test("compiled, the Bicep creates no worker-fedcred once the rendered parameters turn the pool on", { timeout: 600_000 }, (t) => {
   if (!bicepWorks) {
     t.skip("the Azure CLI with Bicep is not installed");
     return;
@@ -859,10 +917,9 @@ test("compiled, the Bicep creates no worker-fedcred once the rendered parameters
   const byName = (name) => credentials.find((r) => String(r.name).endsWith(`'${name}')]`) || String(r.name).endsWith(`/${name}`));
   assert.equal(byName("worker-fedcred").condition, "[not(parameters('winWorkersEnabled'))]");
   assert.equal(byName("coordination-host-fedcred").condition, "[not(empty(parameters('coordinationHostIdentityName')))]");
-  // The rendered parameters: the pool's switch is on with the host and
-  // without it, so worker-fedcred's condition is false in both, and only
-  // without the pool true.
-  for (const [settings, pool] of [[HOST, true], [POOL, true], [{}, false]]) {
+  // The rendered parameters: the pool turns the pool's switch on, so
+  // worker-fedcred's condition is false, and only without the pool true.
+  for (const [settings, pool] of [[HOST, true], [{}, false]]) {
     const params = renderBaseInfra({ ...PARAMS_ENV, ...settings });
     assert.equal(params.winWorkersEnabled?.value === true, pool, JSON.stringify(settings));
   }
@@ -987,12 +1044,6 @@ test("before the worker's manifests: the portal identity's credentials for the w
   assert.equal(step.deleteWorkerFederatedCredential({ ...STEP_ENV }, { runFn: clean.runFn }), 0);
   assert.deepEqual(clean.verbs(), ["identity federated-credential list", "identity federated-credential list"]);
 
-  // With the pool alone the worker runs no pod: the credential goes, and no CA
-  // is applied.
-  const poolOnly = fakeStepTools({ credentials: [credential("worker-fedcred", WORKER_SUBJECT)] });
-  assert.equal(step.beforeWorkerManifests({ env: { ...STEP_ENV, WIN_WORKER_COORDINATION_HOST: "false" }, stagingDir }, { runFn: poolOnly.runFn }), true);
-  assert.deepEqual(poolOnly.verbs(), ["identity federated-credential list", "identity federated-credential delete", "identity federated-credential list"]);
-
   // Without the pool the worker signs in with that credential: the step touches nothing.
   const off = fakeStepTools({ credentials: [credential("worker-fedcred", WORKER_SUBJECT)] });
   assert.equal(step.beforeWorkerManifests({ env: { ...STEP_ENV, WIN_WORKERS_ENABLED: "false" }, stagingDir }, { runFn: off.runFn }), false);
@@ -1041,7 +1092,7 @@ test("while a credential for the worker's service account remains, the step fail
 
 test("the worker image is built with COPILOT_PKG_CACHE_HOME only with the host, at the path the host's pods name", () => {
   assert.deepEqual(host.workerImageBuildArgs("worker", hostEnv()), { COPILOT_PKG_CACHE_HOME: "/app/copilot-pkg" });
-  for (const [service, env] of [["portal", hostEnv()], ["worker", stampEnv(POOL)], ["worker", stampEnv()]]) {
+  for (const [service, env] of [["portal", hostEnv()], ["worker", stampEnv()]]) {
     assert.deepEqual(host.workerImageBuildArgs(service, env), {}, `${service} ${env.WIN_WORKER_COORDINATION_HOST ?? "off"}`);
   }
   const deploy = readFileSync(join(REPO_ROOT, "deploy/scripts/deploy.mjs"), "utf8");
@@ -1189,24 +1240,19 @@ test("deploy.mjs: with the host, the worker's manifests step deletes the credent
   assert.match(upload.hostEnv, /^PS_COORDINATION_URL=https:\/\/pilotswarm-disk-controller-coordination\.pilotswarm\.svc:3005$/m);
 });
 
-test("deploy.mjs: while the credential remains, the worker's manifests are not published; with the pool alone it goes too, and without the pool none is touched", (t) => {
+test("deploy.mjs: while the credential remains, the worker's manifests are not published; the pool without the host is refused, and without the pool none is touched", (t) => {
   const stuck = deployWorkerManifests(t, { settings: { ...HOST }, credentials: [credential("worker-fedcred", WORKER_SUBJECT)], sticky: true });
   assert.notEqual(stuck.result.status, 0);
   assert.match(output(stuck.result), /still has a federated credential for the worker's service account \(worker-fedcred\)/);
   assert.ok(!toolVerbs(stuck.logged).includes("upload"), "nothing published");
   assert.ok(!toolVerbs(stuck.logged).includes("kubectl apply"), "nothing reached the cluster");
 
-  // With the pool alone the worker runs no pod, so no credential may let one
-  // sign in as the portal's identity; no CA is needed.
+  // The pool without the host: refused before any step, so no Windows worker
+  // runs another user's work and nothing is touched.
   const poolOnly = deployWorkerManifests(t, { settings: { ...POOL }, credentials: [credential("worker-fedcred", WORKER_SUBJECT)] });
-  assert.equal(poolOnly.result.status, 0, output(poolOnly.result));
-  assert.deepEqual(toolVerbs(poolOnly.logged), [
-    "identity federated-credential list", "identity federated-credential delete", "identity federated-credential list", "upload", "storage blob list",
-  ]);
-  const upload = poolOnly.logged.find((call) => call.tool === "upload");
-  assert.match(upload.overlay, /^ {4}count: 0\r?$/m);
-  assert.doesNotMatch(upload.overlay, /components\/coordination-host/);
-  assert.match(upload.env, new RegExp(`^WORKLOAD_IDENTITY_CLIENT_ID=${PORTAL_CLIENT}\\r?$`, "m"));
+  assert.notEqual(poolOnly.result.status, 0);
+  assert.match(output(poolOnly.result), /\[win-workers-requires-coordination-host\]/);
+  assert.deepEqual(toolVerbs(poolOnly.logged), []);
 
   // Without the pool the worker signs in with that credential.
   const noPool = deployWorkerManifests(t, { settings: {}, credentials: [credential("worker-fedcred", WORKER_SUBJECT)] });
@@ -1223,7 +1269,7 @@ test("deploy all: with the host, the worker comes just after the portal, whose r
   assert.equal(hosted.indexOf("worker"), hosted.indexOf("portal") + 1);
   assert.ok(hosted.indexOf("worker") < hosted.indexOf("disk-controller"), "still before the controller, whose CA the worker step makes");
   assert.ok(all.indexOf("worker") < all.indexOf("portal"), "the canonical order has the worker first");
-  for (const env of [stampEnv(POOL), stampEnv(), hostEnv({ WIN_WORKERS_ENABLED: "false" })]) {
+  for (const env of [stampEnv(), hostEnv({ WIN_WORKERS_ENABLED: "false" })]) {
     assert.equal(host.coordinationHostSequence(all, env), all);
   }
   const noPortal = all.filter((service) => service !== "portal");
@@ -1232,7 +1278,7 @@ test("deploy all: with the host, the worker comes just after the portal, whose r
   assert.equal(host.coordinationHostSequence(portalFirst, hostEnv()), portalFirst);
 });
 
-test("deploy.mjs all: the bring-up runs the worker just after the portal with the host, and before it with the pool alone", (t) => {
+test("deploy.mjs all: the bring-up runs the worker just after the portal with the host, and before it without the pool", (t) => {
   const bringUp = (settings) => {
     const { result } = deployWorkerManifests(t, { settings, argv: (name) => ["all", name, "--steps", "manifests", "--image-tag", "fixture"] });
     const line = /=== Bring-up sequence: (.+?) ===/.exec(`${result.stdout}\n${result.stderr}`);
@@ -1241,11 +1287,11 @@ test("deploy.mjs all: the bring-up runs the worker just after the portal with th
   };
   const hosted = bringUp({ ...HOST });
   assert.equal(hosted.indexOf("worker"), hosted.indexOf("portal") + 1, hosted.join(" → "));
-  const pooled = bringUp({ ...POOL });
-  assert.ok(pooled.indexOf("portal") > 0 && pooled.indexOf("worker") < pooled.indexOf("portal"), pooled.join(" → "));
+  const plain = bringUp({});
+  assert.ok(plain.indexOf("portal") > 0 && plain.indexOf("worker") < plain.indexOf("portal"), plain.join(" → "));
 });
 
-test("the portal's database role Job adds the host's identity to the workers' group with the host, and only the workers' identity without it", (t) => {
+test("the portal's database role Job adds the host's identity to the workers' group beside the workers' identity, and refuses to stage without it", (t) => {
   const jobEnv = (env) => {
     const stagingDir = mkdtempSync(join(tmpdir(), "ps-coordination-host-stage-"));
     t.after(() => rmSync(stagingDir, { recursive: true, force: true }));
@@ -1261,8 +1307,7 @@ test("the portal's database role Job adds the host's identity to the workers' gr
   assert.equal(hosted.WIN_WORKER_IDENTITY_NAME, WIN_WORKER_NAME);
   assert.equal(hosted.EXPECTED_WIN_WORKER_OID, WIN_WORKER_OID);
   assert.equal(hosted.PILOTSWARM_DB_AAD_USER, "psstamp-csi-mid", "the Job signs in as the portal's identity, not the host's");
-  // Without the host, base-infra reports the host's identity empty.
-  const pooled = jobEnv(stampEnv({ ...POOL, COORDINATION_IDENTITY_CLIENT_ID: "", COORDINATION_IDENTITY_PRINCIPAL_ID: "", COORDINATION_IDENTITY_NAME: "" }));
-  assert.ok(!("COORDINATION_IDENTITY_NAME" in pooled) && !("COORDINATION_IDENTITY_PRINCIPAL_ID" in pooled), JSON.stringify(pooled));
-  assert.equal(pooled.WIN_WORKER_IDENTITY_NAME, WIN_WORKER_NAME);
+  // base-infra reports the host's identity empty when it was deployed without the host.
+  assert.throws(() => jobEnv(hostEnv({ COORDINATION_IDENTITY_CLIENT_ID: "", COORDINATION_IDENTITY_PRINCIPAL_ID: "", COORDINATION_IDENTITY_NAME: "" })),
+    /The database role Job needs COORDINATION_IDENTITY_NAME from base-infra/);
 });

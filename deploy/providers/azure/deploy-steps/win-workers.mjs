@@ -31,8 +31,7 @@
 //                      delete the portal identity's federated credential for
 //                      the worker's service account (`worker-fedcred`): the
 //                      worker then runs as the coordination host, with its own
-//                      identity, or runs no pod. Fail while one remains. With
-//                      WIN_WORKER_COORDINATION_HOST=true, also put the
+//                      identity. Fail while one remains. Then put the
 //                      controller's CA bundle in the cluster, making it first
 //                      on a stamp's first deploy, where the worker comes before
 //                      the controller; and, while two CAs are trusted, pass the
@@ -54,7 +53,7 @@ import { deploysPostgres } from "../../../scripts/lib/database-env.mjs";
 import { policyRestricted, settingValue, winWorkerSettings, winWorkersEnabled } from "../../../scripts/lib/aks-env.mjs";
 import { renderWinWorkerUserData } from "../../../scripts/lib/render-params.mjs";
 import { diskControllerOverlayEnv } from "../../../scripts/lib/stage-manifests.mjs";
-import { COORDINATION_HOST_CA_HASH_KEY, caBundleHash, coordinationHostEnabled } from "../../../scripts/lib/coordination-host.mjs";
+import { COORDINATION_HOST_CA_HASH_KEY, caBundleHash } from "../../../scripts/lib/coordination-host.mjs";
 import { applyCaToCluster, ensureDiskControllerTls, readTrustedCas } from "../disk-controller/tls.mjs";
 import { loadConfig } from "../disk-controller/lib/config.mjs";
 
@@ -740,17 +739,16 @@ export function deleteWorkerFederatedCredential(env, { runFn = run } = {}) {
   return stale.length;
 }
 
-// Before the worker's manifests with the Windows worker pool: no credential of
-// the portal identity for the worker's service account, since the worker then
-// runs as the coordination host, with its own identity, or runs no pod; and,
-// with the host, the controller's CA in the cluster for the host's
-// NODE_EXTRA_CA_CERTS, whose pods start only once it is there. Without the
-// pool it does nothing: the worker then signs in with that credential. Returns
-// whether it ran.
+// Before the worker's manifests with the Windows worker pool, which the
+// deploy refuses without the coordination host: no credential of the portal
+// identity for the worker's service account, since the worker then runs as
+// the host, with its own identity; and the controller's CA in the cluster for
+// the host's NODE_EXTRA_CA_CERTS, whose pods start only once it is there.
+// Without the pool it does nothing: the worker then signs in with that
+// credential. Returns whether it ran.
 export function beforeWorkerManifests({ env, stagingDir }, { runFn = run, tmpRoot = tmpdir() } = {}) {
   if (!winWorkersEnabled(env)) return false;
   deleteWorkerFederatedCredential(env, { runFn });
-  if (!coordinationHostEnabled(env)) return true;
   const names = winWorkerResourceNames(env);
   const { namespace, caBundle, trustedCas } = ensureControllerTls(env, names, { runFn, tmpRoot });
   applyCaToCluster({ namespace, caPem: caBundle }, { runFn, tmpRoot, kubeEnv: kubeconfigEnv(names, stagingDir, runFn) });

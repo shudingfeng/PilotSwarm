@@ -43,7 +43,8 @@ A script the deployment provides, called as
   & <script> -Replicas <n> -Step Freeze|Publish|Unfreeze
 It publishes the coordination host's manifest with that many replicas (the
 current image at Freeze, the new one from Publish on) and returns only once
-the manifest is applied and its pods are gone (0) or ready.
+the manifest is applied and its pods are gone (0) or ready. Required: a
+Windows worker pool runs with a coordination host.
 
 .PARAMETER MigrationJobManifest
 The Kubernetes Job that migrates the database, with the objects it mounts, as
@@ -71,7 +72,6 @@ param(
     [int]$MigrationTimeoutMinutes = 30,
     [string]$CoordinationHostScript,
     [ValidateRange(1, 20)][int]$CoordinationHostReplicas = 2,
-    [switch]$NoCoordinationHost,
     [string[]]$RollDeployments = @('pilotswarm-portal', 'pilotswarm-disk-controller'),
     [ValidateSet('Freeze', 'Migrate', 'Publish', 'Unfreeze')][string]$From = 'Freeze',
     [ValidateSet('Freeze', 'Migrate', 'Publish', 'Unfreeze')][string]$To = 'Unfreeze',
@@ -194,7 +194,6 @@ function Invoke-ControllerAdmin {
 
 function Invoke-CoordinationHost {
     param([Parameter(Mandatory = $true)][int]$Replicas, [Parameter(Mandatory = $true)][string]$Step)
-    if ($NoCoordinationHost) { return }
     Write-Host ('Coordination host: ' + $Replicas + ' replica(s) (' + $Step + ')')
     & $CoordinationHostScript -Replicas $Replicas -Step $Step
 }
@@ -296,8 +295,8 @@ function Invoke-Unfreeze {
 }
 
 function Invoke-Main {
-    if (-not $NoCoordinationHost -and (-not $CoordinationHostScript -or -not (Test-Path -LiteralPath $CoordinationHostScript -PathType Leaf))) {
-        throw '-CoordinationHostScript must name the deployment''s coordination host script (or pass -NoCoordinationHost)'
+    if (-not $CoordinationHostScript -or -not (Test-Path -LiteralPath $CoordinationHostScript -PathType Leaf)) {
+        throw '-CoordinationHostScript must name the deployment''s coordination host script: a Windows worker pool runs with one'
     }
     if (-not (Test-Path -LiteralPath $ControllerCaFile -PathType Leaf)) { throw ('missing controller CA: ' + $ControllerCaFile) }
     $first = [array]::IndexOf($script:Steps, $From)

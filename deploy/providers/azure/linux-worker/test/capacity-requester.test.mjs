@@ -1,5 +1,5 @@
 // The coordination host's module (capacity-requester.mjs): the capacity
-// requester and the admission hook it sets on the Linux worker, its settings,
+// requester it sets on the Linux worker, and no other hook, its settings,
 // its token source and its TLS, and the requester against the disk controller
 // itself, in this process. Node's standard library only, as
 // test:deploy-scripts requires.
@@ -14,8 +14,9 @@ import { createServer } from "node:https";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import * as moduleExports from "../capacity-requester.mjs";
 import {
-  DEMAND_ROUTE, SYSTEM_ONLY_MESSAGE, createCoordinationRequester, createSystemOnlyAdmission,
+  DEMAND_ROUTE, createCoordinationRequester,
   createWorkloadIdentityTokenSource, ownerSubjectFromTag, parseCoordinationUrl, register, requestJson,
 } from "../capacity-requester.mjs";
 import { createHarness } from "../../disk-controller/test/harness.mjs";
@@ -465,7 +466,7 @@ test("loads only Node's built-ins, and @azure/identity only inside the default t
   assert.doesNotMatch(source, /ManagedIdentityCredential|DefaultAzureCredential|169\.254\.169\.254/);
 });
 
-test("register() sets the capacity requester and the system-only admission hook from the worker's settings", async () => {
+test("register() sets only the capacity requester, from the worker's settings: every turn runs here, Portal sessions' too", async () => {
   const worker = fakeWorker();
   const lines = [];
   const { request, calls } = scripted([ok({ decision: "deny", code: "NO_DRIVE_LEASE", message: "No lease." })]);
@@ -474,15 +475,15 @@ test("register() sets the capacity requester and the system-only admission hook 
     request,
   });
   assert.equal(worker.requester, result.requester);
-  assert.equal(worker.admission, result.admission);
+  assert.equal(worker.admission, null, "no admission hook: the SDK refuses an owner-routed session's untagged turn itself");
+  assert.deepEqual(Object.keys(result).sort(), ["requester", "settings"]);
+  assert.ok(!("createSystemOnlyAdmission" in moduleExports) && !("SYSTEM_ONLY_MESSAGE" in moduleExports));
   assert.deepEqual(result.settings, { url: COORDINATION_URL, scope: SCOPE });
   assert.deepEqual(await worker.requester(REQUEST, signal()), { decision: "deny", message: "No lease.", code: "NO_DRIVE_LEASE" });
   assert.equal(calls[0].url, `${COORDINATION_URL}${DEMAND_ROUTE}`);
-  assert.deepEqual(worker.admission({ sessionId: "sys", rootSessionId: "sys", isSystem: true }), { decision: "admit" });
-  assert.equal(worker.admission({ sessionId: "s", rootSessionId: "s", isSystem: false }).decision, "deny");
   assert.equal(lines.length, 1);
   assert.match(lines[0], /pilotswarm-disk-controller-coordination\.pilotswarm\.svc:3005\/v1\/coordination\/demand/);
-  assert.doesNotMatch(lines[0], /coordinator-token/);
+  assert.doesNotMatch(lines[0], /coordinator-token|only system sessions/);
 });
 
 test("register() signs in with the pod's workload identity by default, at the first capacity request", async () => {
@@ -520,22 +521,6 @@ test("register() refuses before it sets a hook: a missing or bad URL or scope, a
   }
   const older = { setSessionAdmission: () => assert.fail("no hook on a worker it cannot fully set up") };
   await assert.rejects(register(older, { env: ENV, log: () => {} }, { getToken: async () => "token" }), /needs a PilotSwarm worker with setOwnerCapacityRequester/);
-});
-
-test("admission runs system sessions' turns here and denies every other turn", () => {
-  const admission = createSystemOnlyAdmission();
-  assert.deepEqual(admission({ sessionId: "sys", rootSessionId: "sys", isSystem: true }), { decision: "admit" });
-  const others = [
-    { sessionId: "s", rootSessionId: "s", isSystem: false },
-    { sessionId: "child", rootSessionId: "s" },
-    { sessionId: "s", rootSessionId: "s", isSystem: "true" },
-    { sessionId: "s", rootSessionId: "s", isSystem: 1 },
-    undefined,
-  ];
-  for (const request of others) {
-    assert.deepEqual(admission(request), { decision: "deny", message: SYSTEM_ONLY_MESSAGE }, JSON.stringify(request));
-  }
-  assert.match(SYSTEM_ONLY_MESSAGE, /only system sessions/);
 });
 
 // ── against the disk controller ──────────────────────────────────────

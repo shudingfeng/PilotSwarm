@@ -21,19 +21,19 @@
 //      role's default privileges in those schemas, and every run grants them
 //      again, so a later migration's objects get them too.
 //   3. The members. The Windows workers' identity (WIN_WORKER_IDENTITY_NAME,
-//      EXPECTED_WIN_WORKER_OID) and, when both are set, the coordination
-//      host's (COORDINATION_IDENTITY_NAME, COORDINATION_IDENTITY_PRINCIPAL_ID)
-//      join the group. A missing Microsoft Entra principal is created first,
+//      EXPECTED_WIN_WORKER_OID) and the coordination host's
+//      (COORDINATION_IDENTITY_NAME, COORDINATION_IDENTITY_PRINCIPAL_ID) join
+//      the group. A missing Microsoft Entra principal is created first,
 //      with pgaadauth_create_principal_with_oid on the server's postgres
 //      database; an existing role of that name must be the Entra principal of
 //      the same object ID. Members are only added, never removed.
 //   4. The check. Reads the group's privileges back through PostgreSQL's own
 //      privilege functions and fails on any difference from the above.
-//   5. The default model. Sets the cluster and the system default model to the
-//      model catalog's defaultModel (PS_MODEL_PROVIDERS_PATH) through the
-//      management client, when either differs. A defaultModel whose provider
-//      the deployment has no shared provider for changes nothing, as the
-//      catalog's first seeding wouldn't have.
+//
+// The clients start with the portal's model catalog (PS_MODEL_PROVIDERS_PATH),
+// as the portal's do: the first client to start against a new database seeds
+// the providers and the cluster default model from it, once. The Job never
+// sets a default model: an administrator's choice in the Portal stays.
 //
 // Any failure exits non-zero. Nothing it prints holds a credential: the
 // database URLs carry no password (the identity's Entra token is the
@@ -43,7 +43,7 @@
 // deploy/scripts/test/db-role-job.test.mjs. The SDK and pg load only when the
 // Job runs, so importing this file needs no installed package.
 
-import { readFileSync, realpathSync } from "node:fs";
+import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 export const WORKER_GROUP_ROLE = "pilotswarm_worker_group";
@@ -54,9 +54,6 @@ export const AUDIT_ID_COLUMN = "audit_id";
 export const ENTRA_ADMIN_DATABASE = "postgres";
 // The last line of a successful run.
 export const COMPLETE_MARKER = "[db-role-job] complete";
-// The session catalog's system user (SYSTEM_USER_PRINCIPAL in
-// packages/sdk/src/cms.ts): the Job sets the default models in its name.
-export const SYSTEM_PRINCIPAL = Object.freeze({ provider: "system", subject: "system", email: null, displayName: "System" });
 
 const UNSET = "__PS_UNSET__";
 const GUID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
@@ -175,33 +172,23 @@ export function readJobSettings(env, { group = WORKER_GROUP_ROLE } = {}) {
     throw new Error("PILOTSWARM_CMS_FACTS_DATABASE_URL must be a postgres:// or postgresql:// URL.");
   }
   const catalogPath = setting("PS_MODEL_PROVIDERS_PATH");
-  if (!catalogPath) throw new Error("PS_MODEL_PROVIDERS_PATH must name the model catalog whose defaultModel the Job sets.");
+  if (!catalogPath) throw new Error("PS_MODEL_PROVIDERS_PATH must name the portal's model catalog, which the Job's clients start with.");
 
   const members = [{
     label: "the Windows workers' identity",
     name: roleName(setting("WIN_WORKER_IDENTITY_NAME"), "WIN_WORKER_IDENTITY_NAME"),
     oid: objectId(setting("EXPECTED_WIN_WORKER_OID"), "EXPECTED_WIN_WORKER_OID"),
+  }, {
+    label: "the coordination host's identity",
+    name: roleName(setting("COORDINATION_IDENTITY_NAME"), "COORDINATION_IDENTITY_NAME"),
+    oid: objectId(setting("COORDINATION_IDENTITY_PRINCIPAL_ID"), "COORDINATION_IDENTITY_PRINCIPAL_ID"),
   }];
-  const coordinationName = setting("COORDINATION_IDENTITY_NAME");
-  const coordinationOid = setting("COORDINATION_IDENTITY_PRINCIPAL_ID");
-  if (coordinationName || coordinationOid) {
-    if (!coordinationName || !coordinationOid) {
-      throw new Error("COORDINATION_IDENTITY_NAME and COORDINATION_IDENTITY_PRINCIPAL_ID go together: set both, or neither.");
-    }
-    members.push({
-      label: "the coordination host's identity",
-      name: roleName(coordinationName, "COORDINATION_IDENTITY_NAME"),
-      oid: objectId(coordinationOid, "COORDINATION_IDENTITY_PRINCIPAL_ID"),
-    });
-  }
   for (const member of members) {
     if (member.name.toLowerCase() === group.toLowerCase()) throw new Error(`${member.label} can't be named ${group}, the group itself.`);
   }
-  if (members.length === 2) {
-    const [workers, coordination] = members;
-    if (workers.name.toLowerCase() === coordination.name.toLowerCase() || workers.oid === coordination.oid) {
-      throw new Error("The Windows workers' identity and the coordination host's identity must be two identities.");
-    }
+  const [workers, coordination] = members;
+  if (workers.name.toLowerCase() === coordination.name.toLowerCase() || workers.oid === coordination.oid) {
+    throw new Error("The Windows workers' identity and the coordination host's identity must be two identities.");
   }
   return { members, catalogPath };
 }
@@ -404,65 +391,6 @@ export function privilegeProblems({ group = WORKER_GROUP_ROLE, schemas, audit, m
   return problems;
 }
 
-// ─── The default model ───
-
-// The catalog's defaultModel as { provider, model }, the model written
-// "<provider>:<model>" as the management client takes it; null without one.
-export function parseDefaultModel(catalog) {
-  const ref = typeof catalog?.defaultModel === "string" ? catalog.defaultModel.trim() : "";
-  if (!ref) return null;
-  const colon = ref.indexOf(":");
-  if (colon <= 0 || colon === ref.length - 1) throw new Error(`The model catalog's defaultModel '${ref}' is not '<provider>:<model>'.`);
-  return { provider: ref.slice(0, colon), model: ref };
-}
-
-// Which of the two defaults to set, from getModelDefaults(): a default
-// already on the catalog's model keeps its reasoning effort and context tier.
-export function defaultModelChanges(defaults, ref) {
-  const differs = (configured) => configured?.provider !== ref.provider || configured?.model !== ref.model;
-  return { cluster: differs(defaults?.clusterSession?.configured), system: differs(defaults?.system?.configured) };
-}
-
-async function seedDefaultModel(mgmt, { catalogPath, log }) {
-  let catalog;
-  try {
-    catalog = JSON.parse(readFileSync(catalogPath, "utf8"));
-  } catch (error) {
-    throw new Error(`Could not read the model catalog ${catalogPath}: ${error.message}`);
-  }
-  const ref = parseDefaultModel(catalog);
-  if (!ref) {
-    log("The model catalog names no defaultModel; the default models stay as they are.");
-    return { cluster: false, system: false };
-  }
-  const viewer = { principal: SYSTEM_PRINCIPAL, isAdmin: true };
-  const { providers } = await mgmt.listProviders(viewer);
-  if (!providers.some((provider) => provider.name === ref.provider && provider.class === "shared")) {
-    log(
-      `The model catalog's defaultModel ${ref.model} names ${ref.provider}, which this deployment has no shared provider for ` +
-        "(a provider is seeded only with its credential); the default models stay as they are.",
-    );
-    return { cluster: false, system: false };
-  }
-  const changes = defaultModelChanges(await mgmt.getModelDefaults(viewer), ref);
-  if (changes.cluster || changes.system) {
-    // A default records who set it: the system user, whose row the catalog
-    // creates on first use. Its role stays what it was.
-    const { role } = await mgmt.getUserRole(SYSTEM_PRINCIPAL);
-    await mgmt.recordUserRole(SYSTEM_PRINCIPAL, role);
-  }
-  if (changes.cluster) {
-    await mgmt.setModelDefault(viewer, { scope: "cluster", provider: ref.provider, model: ref.model });
-    log(`The cluster default model is now ${ref.model}.`);
-  }
-  if (changes.system) {
-    await mgmt.setSystemModelDefault(viewer, { provider: ref.provider, model: ref.model });
-    log(`The system default model is now ${ref.model}.`);
-  }
-  if (!changes.cluster && !changes.system) log(`The cluster and system default models are already ${ref.model}.`);
-  return changes;
-}
-
 // ─── Database steps ───
 
 async function rows(db, sql, params) {
@@ -621,7 +549,7 @@ export async function runDbRoleJob({ env = process.env, sdk, pg, principals, gro
     } finally {
       await db.end().catch(() => {});
     }
-    return { layout, members: settings.members, defaults: await seedDefaultModel(mgmt, { catalogPath: settings.catalogPath, log }) };
+    return { layout, members: settings.members };
   } finally {
     await Promise.allSettled([client.stop(), mgmt.stop()]);
   }

@@ -39,11 +39,12 @@ import {
   winWorkersEnabled,
   winWorkerCoordinationHost,
   ownerRoutingEnabled,
+  ownershipEnforced,
+  settingValue,
   winWorkerSettings,
   diskControllerTokenScope,
 } from "./aks-env.mjs";
 import { winWorkerExtraEnv, winWorkerFeedEndpoints } from "./render-params.mjs";
-import { workspacesEnabled } from "./workspaces.mjs";
 
 // Edge mode and TLS source value spaces. Mirrors `new-env.mjs` EDGE_MODES /
 // TLS_SOURCES — kept in sync via overlay-contracts.test.mjs.
@@ -352,25 +353,34 @@ export function validateRequiredEnv({ edgeMode, tlsSource, env }) {
 //                                   must be 1.
 //   win-workers-extra-env         — a WIN_WORKER_EXTRA_ENV pair is malformed or
 //                                   names a reserved setting.
-//   win-workers-min-running-requires-coordination-host
-//                                 — WIN_WORKER_MIN_RUNNING=0 leaves no VM to
-//                                   run orchestrations and timers; only the
-//                                   coordination host does that.
+//   win-workers-requires-coordination-host
+//                                 — the coordination host makes the Windows
+//                                   workers owner-only and runs everything
+//                                   else, so no Windows worker runs another
+//                                   user's work next to its owner's token.
+//   win-workers-requires-ownership-enforcement
+//   dispatcher-requires-ownership-enforcement
+//                                 — AUTHZ_ENFORCE_OWNERSHIP must be true (read
+//                                   as packages/app/web/authz.js reads it):
+//                                   otherwise the portal only audits who may
+//                                   open a session, and a session that runs on
+//                                   its owner's Windows worker with the
+//                                   owner's token, or that a dispatcher
+//                                   created for its owner, is open to anyone.
 //   coordination-host-requires-win-workers
+//                                 — the coordination host serves the pool.
 //   coordination-host-requires-owner-routing
-//                                 — owner-only workers claim only owner-tagged
-//                                   work, and the coordination host runs no
-//                                   user turn, so without owner tags no user
-//                                   turn would run.
+//                                 — the Windows workers run only owner-tagged
+//                                   turns, and only owner routing records the
+//                                   owner's tag on each session the dispatcher
+//                                   creates for a user; without it those
+//                                   sessions would run on the coordination
+//                                   host instead. Other sessions run untagged
+//                                   on the host either way.
 //   owner-routing-requires-win-workers
 //                                 — only a bound Windows worker serves an
 //                                   owner tag; elsewhere owner-tagged work
 //                                   would wait for a worker that never comes.
-//   coordination-host-excludes-workspaces
-//                                 — the coordination host runs no user turn,
-//                                   so it takes neither the session
-//                                   workspaces' mounts nor their provider,
-//                                   which would replace its own extension.
 // ===========================================================================
 export function validateWinWorkersCombo({ edgeMode, tlsSource, env }) {
   const hint =
@@ -451,12 +461,31 @@ export function validateWinWorkersCombo({ edgeMode, tlsSource, env }) {
     }
   }
 
-  if (settings && settings.minRunning === 0 && !coordinationHost) {
+  if (enabled && !coordinationHost) {
     refuse(
-      "win-workers-min-running-requires-coordination-host",
-      "WIN_WORKER_MIN_RUNNING=0 needs WIN_WORKER_COORDINATION_HOST=true: with no Windows VM up, only the " +
-        "coordination host runs orchestrations and timers.",
+      "win-workers-requires-coordination-host",
+      "WIN_WORKERS_ENABLED=true needs WIN_WORKER_COORDINATION_HOST=true: the coordination host makes the Windows " +
+        "workers owner-only and runs everything else, so no Windows worker runs another user's work, a Workflow " +
+        "included, next to its owner's token.",
     );
+  }
+  if (!ownershipEnforced(env)) {
+    if (enabled) {
+      refuse(
+        "win-workers-requires-ownership-enforcement",
+        "WIN_WORKERS_ENABLED=true needs AUTHZ_ENFORCE_OWNERSHIP=true: otherwise the portal only audits who may open " +
+          "a session, so anyone could prompt an owner's session, which runs on that owner's Windows worker with the " +
+          "owner's token.",
+      );
+    }
+    if (settingValue(env, "DISPATCHER_SP_OBJECT_ID")) {
+      refuse(
+        "dispatcher-requires-ownership-enforcement",
+        "DISPATCHER_SP_OBJECT_ID needs AUTHZ_ENFORCE_OWNERSHIP=true: otherwise the portal only audits who may open " +
+          "a session, so the sessions the dispatcher creates for their owners stay neither private nor read-only " +
+          "to others, and turning delegation off stops nothing.",
+      );
+    }
   }
   if (coordinationHost && !enabled) {
     refuse(
@@ -468,9 +497,10 @@ export function validateWinWorkersCombo({ edgeMode, tlsSource, env }) {
   if (coordinationHost && !ownerRouting) {
     refuse(
       "coordination-host-requires-owner-routing",
-      "WIN_WORKER_COORDINATION_HOST=true needs PILOTSWARM_OWNER_ROUTING=1: the Windows workers then claim " +
-        "only owner-tagged work and the coordination host runs no user turn, so without owner tags no " +
-        "user turn would run.",
+      "WIN_WORKER_COORDINATION_HOST=true needs PILOTSWARM_OWNER_ROUTING=1: the Windows workers then run only " +
+        "owner-tagged turns, and only owner routing records the owner's tag on each session the dispatcher creates " +
+        "for a user. Without it those sessions would run on the coordination host, without their Dev Drive or their " +
+        "owner's token.",
     );
   }
   if (ownerRouting && !enabled) {
@@ -478,19 +508,6 @@ export function validateWinWorkersCombo({ edgeMode, tlsSource, env }) {
       "owner-routing-requires-win-workers",
       "PILOTSWARM_OWNER_ROUTING=1 needs WIN_WORKERS_ENABLED=true: only a bound Windows worker serves an " +
         "owner tag, so owner-tagged work would wait for a worker that never comes.",
-    );
-  }
-  let workspaces = false;
-  try {
-    workspaces = workspacesEnabled(env);
-  } catch {
-    // The workspaces switch reports a bad value itself.
-  }
-  if (coordinationHost && workspaces) {
-    refuse(
-      "coordination-host-excludes-workspaces",
-      "WIN_WORKER_COORDINATION_HOST=true needs WORKSPACES_ENABLED=false: the coordination host runs no user turn, " +
-        "so it mounts no session workspace and loads no workspace provider.",
     );
   }
   return errors;

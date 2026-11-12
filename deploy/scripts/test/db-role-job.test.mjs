@@ -20,11 +20,8 @@ import { stageManifests } from "../lib/stage-manifests.mjs";
 import {
   COMPLETE_MARKER,
   SQL,
-  SYSTEM_PRINCIPAL,
   WORKER_GROUP_ROLE,
   databaseLayout,
-  defaultModelChanges,
-  parseDefaultModel,
   planGroupRole,
   planMemberGrants,
   planSchemaGrants,
@@ -62,20 +59,20 @@ const jobEnv = (extra = {}) => ({
   PS_MODEL_PROVIDERS_PATH: "/app/db-role-job/model_providers.json",
   WIN_WORKER_IDENTITY_NAME: "psstamp-win-worker-mid",
   EXPECTED_WIN_WORKER_OID: WORKER_OID,
+  COORDINATION_IDENTITY_NAME: "psstamp-linux-worker-mid",
+  COORDINATION_IDENTITY_PRINCIPAL_ID: COORDINATION_OID,
   ...extra,
 });
 
 // ─── Settings ───
 
-test("the Job's settings: the Windows workers' identity always, the coordination host's with both of its settings", () => {
-  const one = readJobSettings(jobEnv({ COORDINATION_IDENTITY_NAME: "__PS_UNSET__", COORDINATION_IDENTITY_PRINCIPAL_ID: "__PS_UNSET__" }));
-  assert.deepEqual(one.members, [{ label: "the Windows workers' identity", name: "psstamp-win-worker-mid", oid: WORKER_OID }]);
-  assert.equal(one.catalogPath, "/app/db-role-job/model_providers.json");
-  const two = readJobSettings(jobEnv({ COORDINATION_IDENTITY_NAME: "psstamp-linux-worker-mid", COORDINATION_IDENTITY_PRINCIPAL_ID: COORDINATION_OID.toUpperCase() }));
-  assert.deepEqual(two.members.map(({ name, oid }) => [name, oid]), [
-    ["psstamp-win-worker-mid", WORKER_OID],
-    ["psstamp-linux-worker-mid", COORDINATION_OID],
+test("the Job's settings: the Windows workers' identity and the coordination host's, both required", () => {
+  const settings = readJobSettings(jobEnv({ COORDINATION_IDENTITY_PRINCIPAL_ID: COORDINATION_OID.toUpperCase() }));
+  assert.deepEqual(settings.members, [
+    { label: "the Windows workers' identity", name: "psstamp-win-worker-mid", oid: WORKER_OID },
+    { label: "the coordination host's identity", name: "psstamp-linux-worker-mid", oid: COORDINATION_OID },
   ]);
+  assert.equal(settings.catalogPath, "/app/db-role-job/model_providers.json");
 });
 
 test("the Job refuses settings it can't act on, before it touches the database", () => {
@@ -84,7 +81,7 @@ test("the Job refuses settings it can't act on, before it touches the database",
     ["no database", { DATABASE_URL: undefined }, /DATABASE_URL must be a postgres/],
     ["not PostgreSQL", { DATABASE_URL: "sqlite::memory:" }, /DATABASE_URL must be a postgres/],
     ["catalog database", { PILOTSWARM_CMS_FACTS_DATABASE_URL: "mysql://h/d" }, /PILOTSWARM_CMS_FACTS_DATABASE_URL must be a postgres/],
-    ["no catalog", { PS_MODEL_PROVIDERS_PATH: "__PS_UNSET__" }, /PS_MODEL_PROVIDERS_PATH must name the model catalog/],
+    ["no catalog", { PS_MODEL_PROVIDERS_PATH: "__PS_UNSET__" }, /PS_MODEL_PROVIDERS_PATH must name the portal's model catalog/],
     ["no identity", { WIN_WORKER_IDENTITY_NAME: "" }, /WIN_WORKER_IDENTITY_NAME is not set/],
     ["no object ID", { EXPECTED_WIN_WORKER_OID: undefined }, /EXPECTED_WIN_WORKER_OID must be the identity's Microsoft Entra object ID/],
     ["bad object ID", { EXPECTED_WIN_WORKER_OID: "not-a-guid" }, /EXPECTED_WIN_WORKER_OID must be/],
@@ -93,10 +90,11 @@ test("the Job refuses settings it can't act on, before it touches the database",
     ["long name", { WIN_WORKER_IDENTITY_NAME: "x".repeat(64) }, /longer than PostgreSQL's 63-byte role names/],
     ["control character", { WIN_WORKER_IDENTITY_NAME: "a\nb" }, /holds a control character/],
     ["the group", { WIN_WORKER_IDENTITY_NAME: WORKER_GROUP_ROLE }, /can't be named pilotswarm_worker_group/],
-    ["half a coordination identity", { COORDINATION_IDENTITY_NAME: "psstamp-linux-worker-mid" }, /go together: set both, or neither/],
-    ["other half", { COORDINATION_IDENTITY_PRINCIPAL_ID: COORDINATION_OID }, /go together/],
-    ["one identity twice", { COORDINATION_IDENTITY_NAME: "PSSTAMP-WIN-WORKER-MID", COORDINATION_IDENTITY_PRINCIPAL_ID: COORDINATION_OID }, /must be two identities/],
-    ["one object twice", { COORDINATION_IDENTITY_NAME: "psstamp-linux-worker-mid", COORDINATION_IDENTITY_PRINCIPAL_ID: WORKER_OID }, /must be two identities/],
+    ["no coordination identity", { COORDINATION_IDENTITY_NAME: "__PS_UNSET__" }, /COORDINATION_IDENTITY_NAME is not set/],
+    ["no coordination object ID", { COORDINATION_IDENTITY_PRINCIPAL_ID: undefined }, /COORDINATION_IDENTITY_PRINCIPAL_ID must be the identity's Microsoft Entra object ID/],
+    ["the group as the host", { COORDINATION_IDENTITY_NAME: WORKER_GROUP_ROLE }, /the coordination host's identity can't be named pilotswarm_worker_group/],
+    ["one identity twice", { COORDINATION_IDENTITY_NAME: "PSSTAMP-WIN-WORKER-MID" }, /must be two identities/],
+    ["one object twice", { COORDINATION_IDENTITY_PRINCIPAL_ID: WORKER_OID }, /must be two identities/],
   ]) {
     const env = jobEnv(extra);
     for (const [key, value] of Object.entries(extra)) if (value === undefined) delete env[key];
@@ -261,22 +259,7 @@ test("the check passes a group with exactly its grants and names every differenc
   }
 });
 
-// ─── The default model ───
-
-test("the catalog's defaultModel is provider:model, and a default already on that model is left alone", () => {
-  assert.deepEqual(parseDefaultModel({ defaultModel: " azure-foundry:gpt-5.4 " }), { provider: "azure-foundry", model: "azure-foundry:gpt-5.4" });
-  assert.equal(parseDefaultModel({ providers: [] }), null);
-  assert.equal(parseDefaultModel({ defaultModel: "" }), null);
-  for (const bad of ["gpt-5.4", ":gpt-5.4", "azure-foundry:"]) assert.throws(() => parseDefaultModel({ defaultModel: bad }), /is not '<provider>:<model>'/, bad);
-
-  const ref = { provider: "azure-foundry", model: "azure-foundry:gpt-5.4" };
-  const configured = (cluster, system) => ({ clusterSession: { configured: cluster }, system: { configured: system } });
-  const on = { provider: "azure-foundry", model: "azure-foundry:gpt-5.4", reasoning: "high", context: null };
-  const none = { provider: null, model: null, reasoning: null, context: null };
-  assert.deepEqual(defaultModelChanges(configured(on, on), ref), { cluster: false, system: false });
-  assert.deepEqual(defaultModelChanges(configured(none, on), ref), { cluster: true, system: false });
-  assert.deepEqual(defaultModelChanges(configured(on, { ...on, model: "azure-foundry:gpt-5.4-mini" }), ref), { cluster: false, system: true });
-});
+// ─── The Job's output ───
 
 test("what the Job prints never holds a credential", () => {
   assert.equal(redact("connect postgresql://admin:s3cret@db.example.com:5432/d failed"), "connect postgresql://admin:***@db.example.com:5432/d failed");
@@ -339,10 +322,8 @@ function fakeDatabase({ roleExists = false, members = [], self = "psstamp-csi-mi
   return { state, pg: { Client } };
 }
 
-function fakeSdk({ providers = [{ name: "azure-foundry", class: "shared" }], configured = null } = {}) {
+function fakeSdk() {
   const events = [];
-  const none = { provider: null, model: null, reasoning: null, context: null };
-  const defaults = configured ?? { clusterSession: { configured: none }, system: { configured: none } };
   const sdk = {
     resolveStorageConfig({ env, options }) {
       return {
@@ -363,20 +344,21 @@ function fakeSdk({ providers = [{ name: "azure-foundry", class: "shared" }], con
       async start() { events.push("client.start"); }
       async stop() { events.push("client.stop"); }
     },
+    // The management client's calls that change a default model, recorded:
+    // the Job makes none of them.
     PilotSwarmManagementClient: class {
       constructor(options) { events.push(["mgmt", options]); }
       async start() { events.push("mgmt.start"); }
       async stop() { events.push("mgmt.stop"); }
-      async listProviders(viewer) { events.push(["listProviders", viewer]); return { providers }; }
-      async getModelDefaults() { return defaults; }
       async setModelDefault(viewer, input) { events.push(["setModelDefault", viewer, input]); }
-      async getUserRole(principal) { events.push(["getUserRole", principal.subject]); return { role: null, seenAt: null }; }
-      async recordUserRole(principal, role) { events.push(["recordUserRole", principal.subject, role]); }
       async setSystemModelDefault(viewer, input) { events.push(["setSystemModelDefault", viewer, input]); }
+      async recordUserRole(principal, role) { events.push(["recordUserRole", principal.subject, role]); }
     },
   };
   return { sdk, events };
 }
+
+const setsDefault = (events) => events.some((event) => Array.isArray(event) && /^set|recordUserRole/.test(event[0]));
 
 async function withCatalog(fn, catalog = { providers: [], defaultModel: "azure-foundry:gpt-5.4" }) {
   const dir = mkdtempSync(join(tmpdir(), "ps-dbrole-unit-"));
@@ -394,7 +376,7 @@ function principalsFake(existing = []) {
   return { calls, ensure: async ({ name, oid }) => { calls.push([name, oid]); return existing.includes(name) ? "exists" : "created"; } };
 }
 
-test("a first run migrates first, creates the group in one locked transaction, adds the member, checks, then sets both defaults", async () => {
+test("a first run migrates first, creates the group in one locked transaction, adds both members and checks; it sets no default model", async () => {
   await withCatalog(async (catalogPath) => {
     const { state, pg } = fakeDatabase();
     const { sdk, events } = fakeSdk();
@@ -407,7 +389,7 @@ test("a first run migrates first, creates the group in one locked transaction, a
       assert.deepEqual(options, {
         store: DATABASE, useManagedIdentity: true, cmsFactsDatabaseUrl: DATABASE, aadDbUser: "psstamp-csi-mid",
         modelProvidersPath: catalogPath, duroxideSchema: DX, cmsSchema: CMS, factsSchema: FACTS,
-      }, "the portal's storage options, with the schemas the grants cover");
+      }, "the portal's storage options and model catalog, with the schemas the grants cover");
     }
     const order = events.filter((event) => typeof event === "string");
     assert.deepEqual(order, ["client.start", "mgmt.start", "client.stop", "mgmt.stop"]);
@@ -420,35 +402,32 @@ test("a first run migrates first, creates the group in one locked transaction, a
     assert.ok(at("GRANT SELECT, INSERT ON TABLE") > at(`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA "${CMS}"`));
     assert.ok(at("COMMIT") > at("GRANT USAGE ON SEQUENCE"), "every grant in the one transaction");
     assert.ok(at(`GRANT "${GROUP}" TO "psstamp-win-worker-mid"`) > at("COMMIT"));
+    assert.ok(at(`GRANT "${GROUP}" TO "psstamp-linux-worker-mid"`) > at("COMMIT"));
     assert.ok(at(SQL.verifyRelations) > at(`GRANT "${GROUP}" TO`), "the check reads the result");
     assert.ok(!s.includes("ROLLBACK"));
-    assert.deepEqual(principals.calls, [["psstamp-win-worker-mid", WORKER_OID]]);
+    assert.deepEqual(principals.calls, [["psstamp-win-worker-mid", WORKER_OID], ["psstamp-linux-worker-mid", COORDINATION_OID]]);
 
-    const sets = events.filter((event) => Array.isArray(event) && /^set|recordUserRole/.test(event[0]));
-    assert.deepEqual(sets.map(([name]) => name), ["recordUserRole", "setModelDefault", "setSystemModelDefault"]);
-    assert.deepEqual(sets[0], ["recordUserRole", "system", null], "the system user, which keeps its role, sets them");
-    assert.deepEqual(sets[1][1], { principal: SYSTEM_PRINCIPAL, isAdmin: true });
-    assert.deepEqual(sets[1][2], { scope: "cluster", provider: "azure-foundry", model: "azure-foundry:gpt-5.4" });
-    assert.deepEqual(sets[2][2], { provider: "azure-foundry", model: "azure-foundry:gpt-5.4" });
-    assert.deepEqual(result.defaults, { cluster: true, system: true });
+    assert.ok(!setsDefault(events), "the catalog's defaultModel is the first start's seed, not the Job's");
+    assert.deepEqual(Object.keys(result).sort(), ["layout", "members"]);
     assert.ok(lines.some((line) => line.includes(`Created ${GROUP}`)), lines.join("\n"));
+    assert.ok(!lines.some((line) => /default model/.test(line)), lines.join("\n"));
   });
 });
 
 test("a later run grants everything again but creates nothing, adds nobody and sets no default", async () => {
   await withCatalog(async (catalogPath) => {
-    const { state, pg } = fakeDatabase({ roleExists: true, members: ["psstamp-win-worker-mid"] });
-    const on = { provider: "azure-foundry", model: "azure-foundry:gpt-5.4", reasoning: "high", context: null };
-    const { sdk, events } = fakeSdk({ configured: { clusterSession: { configured: on }, system: { configured: on } } });
-    const principals = principalsFake(["psstamp-win-worker-mid"]);
-    const result = await runDbRoleJob({ env: jobEnv({ PS_MODEL_PROVIDERS_PATH: catalogPath }), sdk, pg, principals, log: () => {} });
+    const members = ["psstamp-win-worker-mid", "psstamp-linux-worker-mid"];
+    const { state, pg } = fakeDatabase({ roleExists: true, members });
+    const { sdk, events } = fakeSdk();
+    const principals = principalsFake(members);
+    await runDbRoleJob({ env: jobEnv({ PS_MODEL_PROVIDERS_PATH: catalogPath }), sdk, pg, principals, log: () => {} });
     assert.ok(!state.statements.some((statement) => /^(CREATE|ALTER) ROLE/.test(statement)));
     assert.ok(!state.statements.some((statement) => statement.startsWith(`GRANT "${GROUP}" TO`)));
     assert.ok(state.statements.includes(`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA "${FACTS}" TO "${GROUP}"`), "new objects get their grants");
     assert.ok(state.statements.includes(`GRANT SELECT, INSERT ON TABLE "${CMS}"."authz_audit" TO "${GROUP}"`));
-    assert.deepEqual(principals.calls, [["psstamp-win-worker-mid", WORKER_OID]], "the principal is still checked");
-    assert.ok(!events.some((event) => Array.isArray(event) && /^set|recordUserRole/.test(event[0])));
-    assert.deepEqual(result.defaults, { cluster: false, system: false });
+    assert.deepEqual(principals.calls, [["psstamp-win-worker-mid", WORKER_OID], ["psstamp-linux-worker-mid", COORDINATION_OID]],
+      "the principals are still checked");
+    assert.ok(!setsDefault(events));
   });
 });
 
@@ -466,36 +445,19 @@ test("a failed grant rolls back the transaction, a wrong privilege fails the che
     const second = fakeSdk();
     await assert.rejects(runDbRoleJob({ env, sdk: second.sdk, pg: broken.pg, principals: principalsFake(), log: () => {} }),
       /pilotswarm_worker_group's privileges are not what the Job grants: .*copilot_sessions\.authz_audit: pilotswarm_worker_group has UPDATE/);
-    assert.ok(!second.events.some((event) => Array.isArray(event) && /^set/.test(event[0])), "no default is set after a failed check");
     assert.deepEqual(second.events.filter((event) => typeof event === "string").slice(-2), ["client.stop", "mgmt.stop"]);
   });
 });
 
-test("a defaultModel the deployment has no shared provider for leaves both defaults alone", async () => {
-  await withCatalog(async (catalogPath) => {
-    const { pg } = fakeDatabase();
-    const { sdk, events } = fakeSdk({ providers: [{ name: "azure-foundry", class: "personal" }] });
-    const lines = [];
-    const result = await runDbRoleJob({ env: jobEnv({ PS_MODEL_PROVIDERS_PATH: catalogPath }), sdk, pg, principals: principalsFake(), log: (line) => lines.push(line) });
-    assert.deepEqual(result.defaults, { cluster: false, system: false });
-    assert.ok(!events.some((event) => Array.isArray(event) && /^set/.test(event[0])));
-    assert.ok(lines.some((line) => /names azure-foundry, which this deployment has no shared provider for/.test(line)), lines.join("\n"));
-  });
-  await withCatalog(async (catalogPath) => {
-    const { pg } = fakeDatabase();
-    const { sdk } = fakeSdk();
-    const result = await runDbRoleJob({ env: jobEnv({ PS_MODEL_PROVIDERS_PATH: catalogPath }), sdk, pg, principals: principalsFake(), log: () => {} });
-    assert.deepEqual(result.defaults, { cluster: false, system: false }, "a catalog without a defaultModel");
-  }, { providers: [] });
-});
-
 test("the Job refuses to add the role it signs in as, and stops before any grant", async () => {
   await withCatalog(async (catalogPath) => {
-    const { state, pg } = fakeDatabase({ self: "psstamp-win-worker-mid" });
-    const { sdk } = fakeSdk();
-    await assert.rejects(runDbRoleJob({ env: jobEnv({ PS_MODEL_PROVIDERS_PATH: catalogPath }), sdk, pg, principals: principalsFake(), log: () => {} }),
-      /the Windows workers' identity is psstamp-win-worker-mid, the role the Job signs in as/);
-    assert.deepEqual(state.statements, [SQL.self]);
+    for (const [self, label] of [["psstamp-win-worker-mid", "the Windows workers' identity"], ["psstamp-linux-worker-mid", "the coordination host's identity"]]) {
+      const { state, pg } = fakeDatabase({ self });
+      const { sdk } = fakeSdk();
+      await assert.rejects(runDbRoleJob({ env: jobEnv({ PS_MODEL_PROVIDERS_PATH: catalogPath }), sdk, pg, principals: principalsFake(), log: () => {} }),
+        new RegExp(`${label} is ${self}, the role the Job signs in as`));
+      assert.deepEqual(state.statements, [SQL.self]);
+    }
   });
 });
 
@@ -510,7 +472,7 @@ function runScript(path, env) {
 test("started by node, the Job fails closed on its settings and prints no credential; imported, it runs nothing", () => {
   const result = runScript(SCRIPT, { DATABASE_URL: "postgresql://admin:not-printed@db.example.com/pilotswarm" });
   assert.equal(result.status, 1);
-  assert.match(result.stderr, /\[db-role-job\] failed: PS_MODEL_PROVIDERS_PATH must name the model catalog/);
+  assert.match(result.stderr, /\[db-role-job\] failed: PS_MODEL_PROVIDERS_PATH must name the portal's model catalog/);
   assert.ok(!`${result.stdout}${result.stderr}`.includes("not-printed"));
   assert.ok(!result.stdout.includes(COMPLETE_MARKER));
 });
@@ -543,6 +505,8 @@ const portalEnv = (extra = {}) => ({
   PILOTSWARM_USE_MANAGED_IDENTITY: "1",
   WIN_WORKER_IDENTITY_NAME: "psstamp-win-worker-mid",
   EXPECTED_WIN_WORKER_OID: WORKER_OID,
+  COORDINATION_IDENTITY_NAME: "psstamp-linux-worker-mid",
+  COORDINATION_IDENTITY_PRINCIPAL_ID: COORDINATION_OID,
   ...extra,
 });
 const CATALOG_TEXT = JSON.stringify({ providers: [], defaultModel: "azure-foundry:gpt-5.4" }, null, 2);
@@ -583,6 +547,8 @@ test("the manifest holds the script and the staged catalog in a ConfigMap, and a
     PILOTSWARM_USE_MANAGED_IDENTITY: "1",
     WIN_WORKER_IDENTITY_NAME: "psstamp-win-worker-mid",
     EXPECTED_WIN_WORKER_OID: WORKER_OID,
+    COORDINATION_IDENTITY_NAME: "psstamp-linux-worker-mid",
+    COORDINATION_IDENTITY_PRINCIPAL_ID: COORDINATION_OID,
     PS_MODEL_PROVIDERS_PATH: "/app/db-role-job/model_providers.json",
   });
   assert.deepEqual(container.envFrom, [{ secretRef: { name: "pilotswarm-portal-secrets", optional: true } }]);
@@ -591,14 +557,8 @@ test("the manifest holds the script and the staged catalog in a ConfigMap, and a
   assert.deepEqual(pod.spec.volumes, [{ name: "db-role-job", configMap: { name: DB_ROLE_JOB_NAME, defaultMode: 0o444 } }]);
   assert.deepEqual(stagedJob(text), { name: DB_ROLE_JOB_NAME, namespace: "pilotswarm" });
 
-  const coordination = documents(renderDbRoleJobManifest({
-    env: portalEnv({ COORDINATION_IDENTITY_NAME: "psstamp-linux-worker-mid", COORDINATION_IDENTITY_PRINCIPAL_ID: COORDINATION_OID, NAMESPACE: "other" }),
-    catalogText: CATALOG_TEXT, scriptText: SCRIPT_TEXT,
-  }))[1];
-  assert.equal(coordination.metadata.namespace, "other");
-  const values = Object.fromEntries(coordination.spec.template.spec.containers[0].env.map(({ name, value }) => [name, value]));
-  assert.equal(values.COORDINATION_IDENTITY_NAME, "psstamp-linux-worker-mid");
-  assert.equal(values.COORDINATION_IDENTITY_PRINCIPAL_ID, COORDINATION_OID);
+  const other = documents(renderDbRoleJobManifest({ env: portalEnv({ NAMESPACE: "other" }), catalogText: CATALOG_TEXT, scriptText: SCRIPT_TEXT }))[1];
+  assert.equal(other.metadata.namespace, "other");
 });
 
 test("the manifest refuses a password, a missing setting, and what the Job itself would refuse", () => {
@@ -615,13 +575,15 @@ test("the manifest refuses a password, a missing setting, and what the Job itsel
     ["no identity", { PILOTSWARM_USE_MANAGED_IDENTITY: "0" }, /PILOTSWARM_USE_MANAGED_IDENTITY must be 1/],
     ["no worker identity", { WIN_WORKER_IDENTITY_NAME: undefined }, /needs WIN_WORKER_IDENTITY_NAME from base-infra/],
     ["no worker object", { EXPECTED_WIN_WORKER_OID: "__PS_UNSET__" }, /needs EXPECTED_WIN_WORKER_OID from base-infra/],
-    ["half a coordination identity", { COORDINATION_IDENTITY_NAME: "psstamp-linux-worker-mid" }, /go together/],
+    // base-infra reports the host's identity empty without WIN_WORKER_COORDINATION_HOST=true.
+    ["no host identity", { COORDINATION_IDENTITY_NAME: "" }, /needs COORDINATION_IDENTITY_NAME from base-infra: deploy base-infra with WIN_WORKERS_ENABLED=true and WIN_WORKER_COORDINATION_HOST=true/],
+    ["no host object", { COORDINATION_IDENTITY_PRINCIPAL_ID: "__PS_UNSET__" }, /needs COORDINATION_IDENTITY_PRINCIPAL_ID from base-infra/],
+    ["one identity twice", { COORDINATION_IDENTITY_PRINCIPAL_ID: WORKER_OID }, /must be two identities/],
     ["no image", { IMAGE: "" }, /IMAGE is not set/],
   ]) {
     assert.throws(render(extra), message, label);
   }
   assert.throws(() => renderDbRoleJobManifest({ env: portalEnv(), catalogText: "{", scriptText: SCRIPT_TEXT }), /staged model catalog is not valid JSON/);
-  assert.throws(() => renderDbRoleJobManifest({ env: portalEnv(), catalogText: '{"defaultModel":"gpt"}', scriptText: SCRIPT_TEXT }), /is not '<provider>:<model>'/);
 });
 
 // The portal's env map, as the Windows worker deploy tests stage it.
@@ -650,6 +612,12 @@ const stampEnv = (extra = {}) => ({
   ...extra,
 });
 
+// The pool, with what it needs (overlay-contracts.mjs).
+const POOL = Object.freeze({
+  WIN_WORKERS_ENABLED: "true", WIN_WORKER_ALERT_EMAILS: "ops@example.com",
+  WIN_WORKER_COORDINATION_HOST: "true", PILOTSWARM_OWNER_ROUTING: "1", AUTHZ_ENFORCE_OWNERSHIP: "true",
+});
+
 test("stage-manifests stages the Job beside the portal's tree only with the pool, from the portal's staged catalog", (t) => {
   const stagingDir = mkdtempSync(join(tmpdir(), "ps-dbrole-stage-"));
   t.after(() => rmSync(stagingDir, { recursive: true, force: true }));
@@ -659,13 +627,13 @@ test("stage-manifests stages the Job beside the portal's tree only with the pool
   assert.equal(existsSync(manifest), false, "no Job without the pool");
   assert.deepEqual(readdirSync(stagingDir), ["gitops"]);
 
-  const root = stageManifests({ service: "portal", envName: "testenv", env: stampEnv({ WIN_WORKERS_ENABLED: "true" }), stagingDir });
+  const root = stageManifests({ service: "portal", envName: "testenv", env: stampEnv(POOL), stagingDir });
   const [configMap] = documents(readFileSync(manifest, "utf8"));
   assert.equal(configMap.data["model_providers.json"], readFileSync(join(root, "base", "model_providers.json"), "utf8").replace(/\r\n/g, "\n"));
   assert.ok(!readdirSync(join(stagingDir, "gitops", "portal"), { recursive: true }).some((file) => String(file).includes("db-role")),
     "the Job stays out of the published tree");
 
-  stageManifests({ service: "worker", envName: "testenv", env: stampEnv({ WIN_WORKERS_ENABLED: "true" }), stagingDir });
+  stageManifests({ service: "worker", envName: "testenv", env: stampEnv({ ...POOL, COORDINATION_IDENTITY_CLIENT_ID: "55555555-5555-5555-5555-555555555555" }), stagingDir });
   assert.ok(existsSync(manifest), "only the portal's staging touches it");
   stageManifests({ service: "portal", envName: "testenv", env: stampEnv({ WIN_WORKERS_ENABLED: "false" }), stagingDir });
   assert.equal(existsSync(manifest), false, "a run without the pool removes the last one");
@@ -818,7 +786,7 @@ test("deploy.mjs runs the Job in the portal's rollout step, after the rollout, o
   assert.equal(off.result.status, 0, `${off.result.stdout.slice(-3000)}\n${off.result.stderr}`);
   assert.deepEqual(kubectlVerbs(off.logged), ["version --client", "rollout status", "get deployment"]);
 
-  const on = rolloutWithFakeClis(t, { WIN_WORKERS_ENABLED: "true", WIN_WORKER_ALERT_EMAILS: "ops@example.com" });
+  const on = rolloutWithFakeClis(t, POOL);
   assert.equal(on.result.status, 0, `${on.result.stdout.slice(-3000)}\n${on.result.stderr}`);
   assert.deepEqual(kubectlVerbs(on.logged), [
     "version --client", "rollout status", "get deployment",

@@ -8,13 +8,14 @@
  *   PS_DISK_POOL_CONTROLLER_URL=https://<controller>:3003
  *   PS_DISK_CONTROLLER_TOKEN_MODULE=<path>\controller-token.mjs   exports getToken()
  *   PS_DISK_CONTROLLER_CA_CERT=<path>\disk-controller-ca.crt     optional: the only CAs trusted
- *   PS_WORKSPACE_ROOTS=repos=Q:\Repos                            root name = path, on one volume
+ *   PS_WORKSPACE_ROOTS=repos=Q:\Repos                            required: root name = path, on one volume
  *
  * The README lists every setting. register(worker) sets the workspace
- * provider, the admission hook, the credential resolver and (without
- * owner-only workers) the capacity requester, takes over the VM's heartbeat
- * and adds a shutdown hook. The extension holds no cloud code: it reaches
- * the disk controller and the local attacher over HTTP.
+ * provider, the admission hook and the credential resolver, takes over the
+ * VM's heartbeat and adds a shutdown hook. It sets no capacity requester: the
+ * coordination host sends every capacity request. The extension holds no
+ * cloud code: it reaches the disk controller and the local attacher over
+ * HTTP.
  */
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
@@ -26,10 +27,9 @@ import { createGitRunner, createRepoOps } from "./git-repos.mjs";
 import { createHeartbeat, takeOverHeartbeat } from "./heartbeat.mjs";
 import { createDevDriveProvider } from "./provider.mjs";
 import {
-    createAdmittedRoots, createBinding, createCapacityRequester, createCredentialResolver, createSessionAdmission,
+    createAdmittedRoots, createBinding, createCredentialResolver, createSessionAdmission,
 } from "./worker-hooks.mjs";
 
-export const DEFAULT_ROOTS = "repos=Q:\\Repos";
 export const DEFAULT_ADOPT = "instructions,agents,skills";
 export const DEFAULT_WIP_BRANCH_PREFIX = "pilotswarm/wip/";
 /** The exit code that asks the service manager to start the worker again, bound. */
@@ -81,7 +81,9 @@ export function parseWipPrefix(value) {
 
 /** Every setting the extension reads, from the worker's environment. */
 export function settingsFromEnv(env = process.env) {
-    const roots = parseRoots(env.PS_WORKSPACE_ROOTS || DEFAULT_ROOTS);
+    const rootsSetting = String(env.PS_WORKSPACE_ROOTS ?? "").trim();
+    if (!rootsSetting) throw new Error("PS_WORKSPACE_ROOTS is required: the roots on the Dev Drive, name=path, such as repos=Q:\\Repos");
+    const roots = parseRoots(rootsSetting);
     // The worker gives up on an attach after this; the provider starts nothing past it.
     const attachTimeout = Number(String(env.PILOTSWARM_WORKSPACE_ATTACH_TIMEOUT_MS ?? "").trim());
     return {
@@ -164,8 +166,6 @@ export function createDevDriveWorkspaces({
             worker.setWorkspaceProvider(drive.provider);
             worker.setSessionAdmission(createSessionAdmission({ controller, admitted }));
             worker.setPersonalCredentialResolver(createCredentialResolver({ controller }));
-            // With owner-only workers, the coordination host sends every capacity request.
-            if (!settings.ownerOnly) worker.setOwnerCapacityRequester(createCapacityRequester({ controller, ...(timers ? { timers } : {}) }));
             worker.onShutdown(async () => {
                 heartbeat.setDraining(true);
                 // A release still running (its offline and detach) finishes first; the heartbeat runs until then.
@@ -180,9 +180,9 @@ export function createDevDriveWorkspaces({
     };
 }
 
-/** The worker hooks this extension needs (PilotSwarm's worker lifecycle, admission, credential and owner routing hooks). */
+/** The worker hooks this extension needs (PilotSwarm's worker lifecycle, admission and credential hooks). */
 const REQUIRED_WORKER_METHODS = [
-    "setWorkspaceProvider", "setSessionAdmission", "setPersonalCredentialResolver", "setOwnerCapacityRequester",
+    "setWorkspaceProvider", "setSessionAdmission", "setPersonalCredentialResolver",
     "tryReleaseIdleWorkspace", "getActiveWorkloadCount", "onShutdown", "requestExit",
 ];
 

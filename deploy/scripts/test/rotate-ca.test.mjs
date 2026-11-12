@@ -193,6 +193,10 @@ test("status and promote check every trust store for the next CA, and promote re
   assert.throws(() => stamp.run("promote"), /Not promoting the next CA:\n {2}- vms: .*\n {2}- appgw: .*\n {2}- cluster: .*\n {2}- host: /);
   assert.ok(stamp.enabled(NEXT_CA_CERT_SECRET) && stamp.enabled(NEXT_CA_KEY_SECRET), "a refused promote writes nothing");
   assert.ok(!stamp.az.vault(NAMES.deployKeyVaultName).has(PREVIOUS_CA_CERT_SECRET));
+  // A pool always runs the coordination host, so its check runs whatever the env map says.
+  delete stamp.env.WIN_WORKER_COORDINATION_HOST;
+  assert.deepEqual(failing(stamp.run("status")), ["vms", "appgw", "cluster", "host"]);
+  stamp.env.WIN_WORKER_COORDINATION_HOST = "true";
 
   // The deploys ship the bundle, but a standby VM is not replaced yet and AGIC
   // has not applied the Ingress: its setting still names the old root only.

@@ -92,7 +92,7 @@ function localPrincipals(passwords) {
   };
 }
 
-function jobEnv({ url, schemas, member, catalogPath }) {
+function jobEnv({ url, schemas, member, host, catalogPath }) {
   return {
     DATABASE_URL: url,
     PILOTSWARM_DUROXIDE_SCHEMA: schemas.duroxide,
@@ -101,7 +101,23 @@ function jobEnv({ url, schemas, member, catalogPath }) {
     PS_MODEL_PROVIDERS_PATH: catalogPath,
     WIN_WORKER_IDENTITY_NAME: member,
     EXPECTED_WIN_WORKER_OID: "11111111-1111-1111-1111-111111111111",
+    COORDINATION_IDENTITY_NAME: host,
+    COORDINATION_IDENTITY_PRINCIPAL_ID: "22222222-2222-2222-2222-222222222222",
   };
+}
+
+async function defaultModels(schemas, store = DATABASE_URL) {
+  const { sdk, catalogPath } = deps;
+  const mgmt = new sdk.PilotSwarmManagementClient({
+    store, duroxideSchema: schemas.duroxide, cmsSchema: schemas.cms, factsSchema: schemas.facts, modelProvidersPath: catalogPath,
+  });
+  await mgmt.start();
+  try {
+    const defaults = await mgmt.getModelDefaults({ principal: null, isAdmin: true });
+    return { cluster: defaults.clusterSession.configured.model, system: defaults.system.configured.model };
+  } finally {
+    await mgmt.stop();
+  }
 }
 
 async function auditCount(schemas, actions) {
@@ -194,29 +210,29 @@ after(async () => {
   for (const dir of created.dirs) rmSync(dir, { recursive: true, force: true });
 });
 
-test("as a superuser, the Job migrates, creates the group and its member and sets the defaults; a later run puts a changed default back, and the next changes nothing", { skip, timeout: 600_000 }, async () => {
+test("as a superuser, the Job migrates, creates the group and both members; it leaves the default models to the first start and the administrator, and the next run changes nothing", { skip, timeout: 600_000 }, async () => {
   const { sdk, pg, catalogPath } = await setup();
   const schemas = schemasFor("su");
   created.schemas.push(...Object.values(schemas));
   const group = `ps_test_wg_su_${RUN}`;
   const member = `ps_test_ww_su_${RUN}`;
+  const host = `ps_test_ch_su_${RUN}`;
   const password = randomBytes(18).toString("base64url");
+  const hostPassword = randomBytes(18).toString("base64url");
   created.roles.push(group);
-  const env = jobEnv({ url: DATABASE_URL, schemas, member, catalogPath });
+  const env = jobEnv({ url: DATABASE_URL, schemas, member, host, catalogPath });
 
-  const principals = localPrincipals({ [member]: password });
+  const principals = localPrincipals({ [member]: password, [host]: hostPassword });
   const first = quiet();
   const result = await runDbRoleJob({ env, sdk, pg, principals, group, log: first.log });
   assert.deepEqual(result.layout.schemas, [schemas.duroxide, schemas.cms, schemas.facts]);
-  assert.deepEqual(principals.made, [member]);
-  // The first start of a management client seeds the cluster default from
-  // the catalog; the system default is the Job's.
-  assert.deepEqual(result.defaults, { cluster: false, system: true });
+  assert.deepEqual(principals.made, [member, host]);
+  assert.equal(result.defaults, undefined);
   assert.ok(first.lines.some((line) => line.includes(`Created ${group}`)), first.lines.join("\n"));
 
   const { rows: [role] } = await admin.query("SELECT rolcanlogin FROM pg_roles WHERE rolname = $1", [group]);
   assert.equal(role.rolcanlogin, false);
-  assert.equal(await privilege("SELECT pg_has_role($1, $2, 'USAGE') AS allowed", [member, group]), true);
+  for (const name of [member, host]) assert.equal(await privilege("SELECT pg_has_role($1, $2, 'USAGE') AS allowed", [name, group]), true, name);
   const audit = `${schemas.cms}.authz_audit`;
   for (const [what, want] of [["SELECT", true], ["INSERT", true], ["UPDATE", false], ["DELETE", false], ["TRUNCATE", false], ["TRIGGER", false], ["REFERENCES", false]]) {
     assert.equal(await privilege("SELECT has_table_privilege($1, $2, $3) AS allowed", [group, audit, what]), want, `authz_audit ${what}`);
@@ -228,33 +244,34 @@ test("as a superuser, the Job migrates, creates the group and its member and set
     assert.equal(await privilege("SELECT has_table_privilege($1, $2, $3) AS allowed", [group, `${schemas.cms}.users`, what]), want, `users ${what}`);
   }
 
+  // The first start of a management client, the Job's own, seeded the
+  // cluster default from the catalog; the Job set no system default.
+  assert.deepEqual(await defaultModels(schemas), { cluster: "dbrole-test:test-model", system: null });
   const mgmt = new sdk.PilotSwarmManagementClient({
     store: DATABASE_URL, duroxideSchema: schemas.duroxide, cmsSchema: schemas.cms, factsSchema: schemas.facts, modelProvidersPath: catalogPath,
   });
-  const viewer = { principal: null, isAdmin: true };
+  // A default records who set it, so the administrator has a user row.
+  const administrator = { provider: "test", subject: `dbrole-admin-${RUN}`, email: null, displayName: "An administrator" };
+  const viewer = { principal: administrator, isAdmin: true };
   await mgmt.start();
   try {
-    const defaults = await mgmt.getModelDefaults(viewer);
-    assert.equal(defaults.clusterSession.configured.model, "dbrole-test:test-model");
-    assert.equal(defaults.system.configured.model, "dbrole-test:test-model");
-    // An administrator picks another cluster default in the portal.
+    await mgmt.recordUserRole(administrator, "admin");
+    // An administrator picks other defaults in the portal.
     await mgmt.setModelDefault(viewer, { scope: "cluster", provider: "dbrole-test", model: "dbrole-test:other-model" });
+    await mgmt.setSystemModelDefault(viewer, { provider: "dbrole-test", model: "dbrole-test:other-model" });
   } finally {
     await mgmt.stop();
   }
 
-  // The next run puts the catalog's default back, and only that one.
-  const second = await runDbRoleJob({ env, sdk, pg, principals, group, log: quiet().log });
-  assert.deepEqual(second.defaults, { cluster: true, system: false });
-
+  // The next run keeps them, and creates, adds and sets nothing.
   const actions = ["setModelDefault", "setSystemModelDefault"];
   const before = await auditCount(schemas, actions);
-  const third = quiet();
-  const again = await runDbRoleJob({ env, sdk, pg, principals, group, log: third.log });
-  assert.deepEqual(principals.made, [member], "the member is not created again");
-  assert.deepEqual(again.defaults, { cluster: false, system: false });
+  const second = quiet();
+  await runDbRoleJob({ env, sdk, pg, principals, group, log: second.log });
+  assert.deepEqual(principals.made, [member, host], "the members are not created again");
+  assert.deepEqual(await defaultModels(schemas), { cluster: "dbrole-test:other-model", system: "dbrole-test:other-model" });
   assert.equal(await auditCount(schemas, actions), before, "no default is set again");
-  assert.ok(!third.lines.some((line) => line.includes("Created") || line.includes("Added")), third.lines.join("\n"));
+  assert.ok(!second.lines.some((line) => line.includes("Created") || line.includes("Added")), second.lines.join("\n"));
 
   await exerciseMember({ member, password, schemas });
 });
@@ -267,6 +284,7 @@ test("as a non-superuser administrator that may create roles, like the Entra adm
   const administratorPassword = randomBytes(18).toString("base64url");
   const group = `ps_test_wg_adm_${RUN}`;
   const member = `ps_test_ww_adm_${RUN}`;
+  const host = `ps_test_ch_adm_${RUN}`;
   const password = randomBytes(18).toString("base64url");
   const { rows: [{ database }] } = await admin.query("SELECT current_database() AS database");
   await admin.query(`CREATE ROLE ${quoteIdent(administrator)} LOGIN CREATEROLE PASSWORD '${administratorPassword}'`);
@@ -286,27 +304,33 @@ test("as a non-superuser administrator that may create roles, like the Entra adm
       return "created";
     },
   };
+  const store = urlAs(administrator, administratorPassword);
   try {
     // A stamp whose portal first ran with another catalog default.
     const otherCatalog = join(deps.dir, "other-default.json");
     writeFileSync(otherCatalog, readFileSync(catalogPath, "utf8").replace("dbrole-test:test-model", "dbrole-test:other-model"));
     const earlier = new sdk.PilotSwarmManagementClient({
-      store: urlAs(administrator, administratorPassword), duroxideSchema: schemas.duroxide, cmsSchema: schemas.cms, factsSchema: schemas.facts,
+      store, duroxideSchema: schemas.duroxide, cmsSchema: schemas.cms, factsSchema: schemas.facts,
       modelProvidersPath: otherCatalog,
     });
     await earlier.start();
     await earlier.stop();
 
-    const env = jobEnv({ url: urlAs(administrator, administratorPassword), schemas, member, catalogPath });
-    const first = await runDbRoleJob({ env, sdk, pg, principals, group, log: quiet().log });
-    assert.deepEqual(made, [member]);
-    assert.deepEqual(first.defaults, { cluster: true, system: true });
-    const again = await runDbRoleJob({ env, sdk, pg, principals, group, log: quiet().log });
-    assert.deepEqual(made, [member]);
-    assert.deepEqual(again.defaults, { cluster: false, system: false });
+    const env = jobEnv({ url: store, schemas, member, host, catalogPath });
+    await runDbRoleJob({ env, sdk, pg, principals, group, log: quiet().log });
+    assert.deepEqual(made, [member, host]);
+    // The first start's default stays, though the Job's catalog names another.
+    assert.deepEqual(await defaultModels(schemas, store), { cluster: "dbrole-test:other-model", system: null });
+    await runDbRoleJob({ env, sdk, pg, principals, group, log: quiet().log });
+    assert.deepEqual(made, [member, host]);
+    assert.deepEqual(await defaultModels(schemas, store), { cluster: "dbrole-test:other-model", system: null });
   } finally {
     await administratorClient.end().catch(() => {});
     await admin.query(`REVOKE CREATE ON DATABASE ${quoteIdent(database)} FROM ${quoteIdent(administrator)}`).catch(() => {});
   }
   await exerciseMember({ member, password, schemas });
+  for (const name of [member, host]) {
+    const { rows: [row] } = await admin.query("SELECT pg_has_role($1, $2, 'USAGE') AS allowed", [name, group]);
+    assert.equal(row.allowed, true, name);
+  }
 });

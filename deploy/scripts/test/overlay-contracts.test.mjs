@@ -594,6 +594,9 @@ test("AZURE_POLICY_RESTRICTED refuses Blob without managed identity on a portal 
 const POOL_ENV = Object.freeze({
   WIN_WORKERS_ENABLED: "true",
   WIN_WORKER_ALERT_EMAILS: "ops@example.com",
+  WIN_WORKER_COORDINATION_HOST: "true",
+  PILOTSWARM_OWNER_ROUTING: "1",
+  AUTHZ_ENFORCE_OWNERSHIP: "true",
   PORTAL_AUTH_ENTRA_CLIENT_ID: "11111111-1111-1111-1111-111111111111",
   PILOTSWARM_USE_MANAGED_IDENTITY: "1",
   ACME_EMAIL: "operator@example.com",
@@ -620,6 +623,39 @@ test("the pool's settings at their defaults refuse nothing, whatever the edge", 
   assert.deepEqual(poolErrors("private", "akv"), []);
 });
 
+test("WIN_WORKERS_ENABLED=true needs the coordination host: no Windows worker runs another user's work next to its owner's token", () => {
+  for (const host of [undefined, "false", "", "__PS_UNSET__"]) {
+    const errors = poolErrors("afd", "letsencrypt", { WIN_WORKER_COORDINATION_HOST: host, PILOTSWARM_OWNER_ROUTING: undefined });
+    assert.deepEqual(codes(errors), ["win-workers-requires-coordination-host"], `WIN_WORKER_COORDINATION_HOST=${host}`);
+    assert.match(errors[0].message, /needs WIN_WORKER_COORDINATION_HOST=true: the coordination host makes the Windows workers owner-only/);
+  }
+  // Whatever the pool's size: Y=0 included, which the host makes possible.
+  assert.deepEqual(poolErrors("afd", "letsencrypt", { WIN_WORKER_MIN_RUNNING: "0" }), []);
+  assert.deepEqual(codes(poolErrors("afd", "letsencrypt", { WIN_WORKER_MIN_RUNNING: "0", WIN_WORKER_COORDINATION_HOST: "false", PILOTSWARM_OWNER_ROUTING: "0" })),
+    ["win-workers-requires-coordination-host"]);
+});
+
+test("the pool and a dispatcher need AUTHZ_ENFORCE_OWNERSHIP, read as the portal reads it", () => {
+  const DISPATCHER = "33333333-3333-3333-3333-333333333333";
+  for (const value of [undefined, "", "__PS_UNSET__", "false", "0", "no", "off", "maybe"]) {
+    const errors = poolErrors("afd", "letsencrypt", { AUTHZ_ENFORCE_OWNERSHIP: value });
+    assert.deepEqual(codes(errors), ["win-workers-requires-ownership-enforcement"], `AUTHZ_ENFORCE_OWNERSHIP=${value}`);
+    assert.match(errors[0].message, /needs AUTHZ_ENFORCE_OWNERSHIP=true: otherwise the portal only audits/);
+    const dispatcher = validateWinWorkersCombo({ edgeMode: "afd", tlsSource: "letsencrypt", env: { DISPATCHER_SP_OBJECT_ID: DISPATCHER, AUTHZ_ENFORCE_OWNERSHIP: value } });
+    assert.deepEqual(codes(dispatcher), ["dispatcher-requires-ownership-enforcement"], `a dispatcher without the pool, AUTHZ_ENFORCE_OWNERSHIP=${value}`);
+    assert.match(dispatcher[0].message, /DISPATCHER_SP_OBJECT_ID needs AUTHZ_ENFORCE_OWNERSHIP=true/);
+    assert.deepEqual(codes(poolErrors("afd", "letsencrypt", { AUTHZ_ENFORCE_OWNERSHIP: value, DISPATCHER_SP_OBJECT_ID: DISPATCHER })),
+      ["win-workers-requires-ownership-enforcement", "dispatcher-requires-ownership-enforcement"]);
+  }
+  for (const value of ["true", "1", "yes", "on", " TRUE ", "On"]) {
+    assert.deepEqual(poolErrors("afd", "letsencrypt", { AUTHZ_ENFORCE_OWNERSHIP: value, DISPATCHER_SP_OBJECT_ID: DISPATCHER }), [], value);
+  }
+  // Without the pool and the dispatcher nothing reads it: a stamp keeps today's default.
+  for (const unset of [undefined, "", "__PS_UNSET__"]) {
+    assert.deepEqual(validateWinWorkersCombo({ edgeMode: "afd", tlsSource: "letsencrypt", env: { DISPATCHER_SP_OBJECT_ID: unset, AUTHZ_ENFORCE_OWNERSHIP: "false" } }), []);
+  }
+});
+
 test("WIN_WORKERS_ENABLED=true needs the stamp VNet: EDGE_MODE afd or private", () => {
   const errors = poolErrors("public", "letsencrypt");
   assert.deepEqual(codes(errors), ["win-workers-requires-vnet"]);
@@ -638,38 +674,23 @@ test("WIN_WORKERS_ENABLED=true needs at least one alert receiver, and refuses a 
   assert.deepEqual(poolErrors("afd", "letsencrypt", { WIN_WORKER_ALERT_EMAILS: "a@example.com,b@example.com" }), []);
 });
 
-test("WIN_WORKER_MIN_RUNNING=0 needs the coordination host", () => {
-  const errors = poolErrors("afd", "letsencrypt", { WIN_WORKER_MIN_RUNNING: "0" });
-  assert.deepEqual(codes(errors), ["win-workers-min-running-requires-coordination-host"]);
-  assert.match(errors[0].message, /only the coordination host runs orchestrations and timers/);
-  // Without the pool, too: the coordination host itself needs the pool.
-  assert.deepEqual(codes(validateWinWorkersCombo({ edgeMode: "afd", tlsSource: "letsencrypt", env: { WIN_WORKER_MIN_RUNNING: "0" } })),
-    ["win-workers-min-running-requires-coordination-host"]);
-  assert.deepEqual(poolErrors("afd", "letsencrypt", {
-    WIN_WORKER_MIN_RUNNING: "0", WIN_WORKER_COORDINATION_HOST: "true", PILOTSWARM_OWNER_ROUTING: "1",
-  }), []);
-});
-
 test("the coordination host needs the pool and owner routing", () => {
   const off = validateWinWorkersCombo({ edgeMode: "afd", tlsSource: "letsencrypt", env: { WIN_WORKER_COORDINATION_HOST: "true" } });
   assert.deepEqual(codes(off), ["coordination-host-requires-win-workers", "coordination-host-requires-owner-routing"]);
-  const noTags = poolErrors("afd", "letsencrypt", { WIN_WORKER_COORDINATION_HOST: "true" });
+  const noTags = poolErrors("afd", "letsencrypt", { PILOTSWARM_OWNER_ROUTING: "0" });
   assert.deepEqual(codes(noTags), ["coordination-host-requires-owner-routing"]);
-  assert.match(noTags[0].message, /without owner tags no user turn would run/);
+  assert.match(noTags[0].message, /only owner routing records the owner's tag on each session the dispatcher creates for a user/);
+  assert.doesNotMatch(noTags[0].message, /runs no user turn/);
 });
 
-test("the coordination host runs no session workspace, and its own settings are checked before any step", () => {
-  const host = { WIN_WORKER_COORDINATION_HOST: "true", PILOTSWARM_OWNER_ROUTING: "1" };
-  const errors = poolErrors("afd", "letsencrypt", { ...host, WORKSPACES_ENABLED: "true" });
-  assert.deepEqual(codes(errors), ["coordination-host-excludes-workspaces"]);
-  assert.match(errors[0].message, /needs WORKSPACES_ENABLED=false/);
-  assert.deepEqual(poolErrors("afd", "letsencrypt", { WORKSPACES_ENABLED: "true" }), [], "the pool alone does not refuse them");
+test("the coordination host takes session workspaces, and its own settings are checked before any step", () => {
+  assert.deepEqual(poolErrors("afd", "letsencrypt", { WORKSPACES_ENABLED: "true" }), [], "the host runs the Portal's sessions with their workspaces");
   for (const bad of [
     { WIN_WORKER_COORDINATION_HOST_REPLICAS: "21" },
     { WIN_WORKER_COORDINATION_HOST_PLUGIN_CONFIGMAP: "Not_A_Name" },
     { WIN_WORKER_COORDINATION_HOST_REDACT_SECRET_PREFIXES: "x" },
   ]) {
-    assert.deepEqual(codes(poolErrors("afd", "letsencrypt", { ...host, ...bad })), ["win-workers-settings"], JSON.stringify(bad));
+    assert.deepEqual(codes(poolErrors("afd", "letsencrypt", bad)), ["win-workers-settings"], JSON.stringify(bad));
   }
 });
 
@@ -681,7 +702,7 @@ test("owner routing needs the pool, and takes only 1 or 0", () => {
   for (const value of ["0", "", "__PS_UNSET__"]) {
     assert.deepEqual(validateWinWorkersCombo({ edgeMode: "afd", tlsSource: "letsencrypt", env: { PILOTSWARM_OWNER_ROUTING: value } }), []);
   }
-  // The portal records owner tags only for exactly 1; "true" would quietly be off.
+  // The portal records the owner's tag only for exactly 1; "true" would quietly be off.
   assert.deepEqual(codes(validateWinWorkersCombo({ edgeMode: "afd", tlsSource: "letsencrypt", env: { PILOTSWARM_OWNER_ROUTING: "true" } })),
     ["win-workers-settings"]);
 });
@@ -732,10 +753,13 @@ test("the pool's refusals stop a portal run that only publishes manifests, befor
   for (const [settings, expected] of [
     [{ EDGE_MODE: "public", WIN_WORKERS_ENABLED: "true" }, [/\[win-workers-requires-vnet\]/]],
     [{ EDGE_MODE: "afd", WIN_WORKERS_ENABLED: "true", WIN_WORKER_ALERT_EMAILS: "" }, [/\[win-workers-requires-alert-emails\]/]],
-    [{ EDGE_MODE: "afd", WIN_WORKERS_ENABLED: "true", WIN_WORKER_MIN_RUNNING: "0" }, [/\[win-workers-min-running-requires-coordination-host\]/]],
+    [{ EDGE_MODE: "afd", WIN_WORKERS_ENABLED: "true" },
+      [/\[win-workers-requires-coordination-host\]/, /\[win-workers-requires-ownership-enforcement\]/]],
     [{ EDGE_MODE: "afd", WIN_WORKERS_ENABLED: "true", WIN_WORKER_COORDINATION_HOST: "true" }, [/\[coordination-host-requires-owner-routing\]/]],
     [{ EDGE_MODE: "afd", WIN_WORKER_COORDINATION_HOST: "true", PILOTSWARM_OWNER_ROUTING: "1" },
       [/\[coordination-host-requires-win-workers\]/, /\[owner-routing-requires-win-workers\]/]],
+    [{ EDGE_MODE: "afd", DISPATCHER_SP_OBJECT_ID: "33333333-3333-3333-3333-333333333333", AUTHZ_ENFORCE_OWNERSHIP: "false" },
+      [/\[dispatcher-requires-ownership-enforcement\]/]],
   ]) {
     const { result, logged } = manifestsOnlyPortalRun(t, { ...POOL_STAMP, ...settings });
     assert.equal(result.status, 1, result.stderr);

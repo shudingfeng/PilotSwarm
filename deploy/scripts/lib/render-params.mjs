@@ -406,8 +406,9 @@ export function renderWinWorkerUserData(env, { caPem } = {}) {
     AZURE_CLIENT_ID: clientId,
     EXPECTED_WIN_WORKER_OID: principalId,
     ARTIFACTS_CREDENTIALPROVIDER_FEED_ENDPOINTS: winWorkerFeedEndpoints(env, clientId),
-    // With the coordination host, the Windows workers leave untagged work to it.
-    PILOTSWARM_WORKER_OWNER_ONLY: settings.coordinationHost ? "1" : "0",
+    // The deploy refuses a pool without the coordination host, which runs the
+    // untagged work, so the Windows workers are always owner-only.
+    PILOTSWARM_WORKER_OWNER_ONLY: "1",
   };
   const extraEnv = winWorkerExtraEnv(env);
   const controllerCaCert = caCertificatePem(caPem);
@@ -483,7 +484,8 @@ export function winWorkerParameters(module, env) {
     params.winWorkerUserData = userData;
     params.winWorkerConfigVersion = configVersion;
   }
-  // Only when on, so a pool without the coordination host renders as before.
+  // The coordination host's identity, grants and alert. The deploy refuses
+  // the pool without it (overlay-contracts.mjs).
   if (settings.coordinationHost) params.winWorkerCoordinationHost = true;
   return params;
 }

@@ -59,16 +59,16 @@ spec:
       containers:
         - name: worker
           env:
-            # The capacity requester and the system-only admission hook
-            # (deploy/providers/azure/linux-worker/README.md), and the disk
-            # controller's CA, which the deploy step puts in the cluster.
+            # The capacity requester (deploy/providers/azure/linux-worker/README.md),
+            # and the disk controller's CA, which the deploy step puts in the
+            # cluster.
             - name: PILOTSWARM_EXTENSION_MODULES
               value: /app/deploy/providers/azure/linux-worker/capacity-requester.mjs
             - name: NODE_EXTRA_CA_CERTS
               value: /etc/pilotswarm/disk-controller-ca/ca.crt
             # What the Windows workers run with, for the activities that run
-            # here now: the title generator, the system agents and every
-            # turn's bookkeeping.
+            # here: the title generator, the system agents, every turn's
+            # bookkeeping, and the sessions that people start in the Portal.
             - name: PILOTSWARM_LIMIT_TITLE_SESSION_TOOLS
               value: "1"
             - name: PILOTSWARM_LIMIT_SYSTEM_SESSION_TOOLS
@@ -102,10 +102,8 @@ spec:
               value: "43200"
             - name: PILOTSWARM_DISABLE_K8S_SCALING
               value: "1"
-            - name: PILOTSWARM_DISABLE_CHILD_WORKSPACE_INHERITANCE
-              value: "1"
-            # The system agents' turns share the activity slots with every
-            # turn's bookkeeping and with capacity requests.
+            # The system agents' and Portal sessions' turns share the activity
+            # slots with every turn's bookkeeping and with capacity requests.
             - name: PILOTSWARM_WORKER_CONCURRENCY
               value: "8"
             - name: PILOTSWARM_ORCHESTRATION_CONCURRENCY

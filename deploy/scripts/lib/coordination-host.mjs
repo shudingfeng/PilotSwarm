@@ -1,8 +1,9 @@
-// The coordination host (WIN_WORKER_COORDINATION_HOST=true, with the Windows
-// worker pool): the Linux worker, `copilot-runtime-worker`, runs the
-// orchestrations, durable timers, system agents, title generator and every
-// turn's bookkeeping, and sends every capacity request to the disk controller,
-// while the Windows workers run only their owner's turns. It runs no user turn
+// The coordination host (WIN_WORKER_COORDINATION_HOST=true, which the Windows
+// worker pool requires): the Linux worker, `copilot-runtime-worker`, runs the
+// orchestrations, durable timers, system agents, title generator, every
+// turn's bookkeeping, the sessions that people start in the Portal with their
+// workspaces and every Workflow activity, and sends every capacity request to
+// the disk controller, while the Windows workers run only their owner's turns
 // (deploy/providers/azure/linux-worker/README.md).
 //
 // stage-manifests.mjs stages the worker with:
@@ -15,18 +16,23 @@
 //                      portal stages from, keeps the portal's identity. The
 //                      staged overlay gets the coordination-host component,
 //                      and coordination-host-plugin with
-//                      WIN_WORKER_COORDINATION_HOST_PLUGIN_CONFIGMAP, and
+//                      WIN_WORKER_COORDINATION_HOST_PLUGIN_CONFIGMAP,
 //                      coordination-host-ca while the disk controller trusts
-//                      two CAs (a CA rotation), and
+//                      two CAs (a CA rotation), coordination-host-workspaces
+//                      with WORKSPACES_ENABLED=true, and
 //                      WIN_WORKER_COORDINATION_HOST_REPLICAS replicas (2)
 //                      (stageCoordinationHost). The staged model catalog's
 //                      Foundry providers take the host's identity too, since
 //                      it loads no Key Vault secret;
-//   pool on, host off  0 replicas: the Windows workers run all the work;
+//   pool on, host off  refused, as overlay-contracts.mjs refuses it before
+//                      any step;
 //   pool off           nothing changes, so the worker keeps its 3 replicas.
 //
 // The Flux path stays overlays/default: the components and the replica count
 // go into the staged copy only, the way workspaces.mjs adds its component.
+// With workspaces on, workspaces.mjs puts its component first in the list,
+// so coordination-host-workspaces, last of the host's, sets the extension
+// modules and plugin folders of both.
 // deploy.mjs builds the worker image with COPILOT_PKG_CACHE_HOME while the
 // host is on (workerImageBuildArgs), and the Windows worker deploy step
 // deletes the portal identity's credential for the worker's service account
@@ -44,6 +50,7 @@ import { workspacesEnabled } from "./workspaces.mjs";
 export const COORDINATION_HOST_COMPONENT = "coordination-host";
 export const COORDINATION_HOST_PLUGIN_COMPONENT = "coordination-host-plugin";
 export const COORDINATION_HOST_CA_COMPONENT = "coordination-host-ca";
+export const COORDINATION_HOST_WORKSPACES_COMPONENT = "coordination-host-workspaces";
 export const WORKER_DEPLOYMENT = "copilot-runtime-worker";
 // While the disk controller trusts two CAs (a CA rotation), the host's pod
 // template carries the SHA-256 of their PEM bundle, which the Windows worker
@@ -63,6 +70,13 @@ export const COORDINATION_HOST_PKG_CACHE_HOME = "/app/copilot-pkg";
 export const COORDINATION_SERVICE = "pilotswarm-disk-controller-coordination";
 export const COORDINATION_PORT = 3005;
 export const PLUGIN_CONFIGMAP_PLACEHOLDER = "__COORDINATION_HOST_PLUGIN_CONFIGMAP__";
+// With workspaces, the host loads the plugin folder of the workspaces
+// component (gitops/worker/components/workspaces/worker-patch.yaml), and with
+// WIN_WORKER_COORDINATION_HOST_PLUGIN_CONFIGMAP the coordination-host-plugin
+// component's folder before it: coordination-host-workspaces names both.
+export const PLUGIN_DIRS_PLACEHOLDER = "__COORDINATION_HOST_PLUGIN_DIRS__";
+export const COORDINATION_HOST_PLUGIN_DIR = "/app/coordination-plugin";
+export const WORKSPACES_PLUGIN_DIR = "/app/packages/sdk/examples/repo-workspaces/plugin";
 
 const GUID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
 const REDACT_SECRET_PREFIXES = "PILOTSWARM_REDACT_SECRET_PREFIXES";
@@ -109,10 +123,10 @@ export function coordinationHostComponentEnv(env) {
   };
 }
 
-// The worker Deployment's replica count, or null to keep the manifest's.
+// The worker Deployment's replica count, or null to keep the manifest's. With
+// the pool the worker runs as the coordination host.
 export function workerReplicas(env) {
   if (!winWorkersEnabled(env)) return null;
-  if (!winWorkerCoordinationHost(env)) return 0;
   return winWorkerSettings(env).coordinationHostReplicas;
 }
 
@@ -166,17 +180,13 @@ export function stageCoordinationHost({ service, env, stagedServiceRoot, overlay
   if (service !== "worker") return null;
   const replicas = workerReplicas(env);
   if (replicas === null) return null;
-  const overlayPath = join(stagedServiceRoot, "overlays", overlayName, "kustomization.yaml");
   if (!coordinationHostEnabled(env)) {
-    setReplicas(overlayPath, replicas);
-    return { coordinationHost: false, replicas, components: [] };
-  }
-  if (workspacesEnabled(env)) {
     throw new Error(
-      "WIN_WORKER_COORDINATION_HOST=true needs WORKSPACES_ENABLED=false: the coordination host runs no user turn, " +
-        "so it mounts no session workspace and loads no workspace provider.",
+      "WIN_WORKERS_ENABLED=true needs WIN_WORKER_COORDINATION_HOST=true: the coordination host makes the Windows " +
+        "workers owner-only and runs everything else.",
     );
   }
+  const overlayPath = join(stagedServiceRoot, "overlays", overlayName, "kustomization.yaml");
   const componentRoot = join(stagedServiceRoot, "components", COORDINATION_HOST_COMPONENT);
   if (!existsSync(join(componentRoot, "kustomization.yaml"))) {
     throw new Error(`WIN_WORKER_COORDINATION_HOST=true, but the worker has no ${COORDINATION_HOST_COMPONENT} component at ${componentRoot}.`);
@@ -189,23 +199,29 @@ export function stageCoordinationHost({ service, env, stagedServiceRoot, overlay
     envMap: values,
     omittedKeys: REDACT_SECRET_PREFIXES in values ? [] : [REDACT_SECRET_PREFIXES],
   });
+  const replace = (file, placeholder, value) => {
+    const text = readFileSync(file, "utf8");
+    if (!text.includes(placeholder)) throw new Error(`${file} has no ${placeholder} to replace.`);
+    writeFileSync(file, text.split(placeholder).join(value));
+  };
   const components = [COORDINATION_HOST_COMPONENT];
   const pluginConfigMap = winWorkerSettings(env).coordinationHostPluginConfigMap;
   if (pluginConfigMap) {
-    const patch = join(stagedServiceRoot, "components", COORDINATION_HOST_PLUGIN_COMPONENT, "deployment-patch.yaml");
-    const text = readFileSync(patch, "utf8");
-    if (!text.includes(PLUGIN_CONFIGMAP_PLACEHOLDER)) throw new Error(`${patch} has no ${PLUGIN_CONFIGMAP_PLACEHOLDER} to replace.`);
-    writeFileSync(patch, text.split(PLUGIN_CONFIGMAP_PLACEHOLDER).join(pluginConfigMap));
+    replace(join(stagedServiceRoot, "components", COORDINATION_HOST_PLUGIN_COMPONENT, "deployment-patch.yaml"),
+      PLUGIN_CONFIGMAP_PLACEHOLDER, pluginConfigMap);
     components.push(COORDINATION_HOST_PLUGIN_COMPONENT);
   }
   const caHash = settingValue(env, COORDINATION_HOST_CA_HASH_KEY);
   if (caHash) {
     if (!/^[0-9a-f]{64}$/.test(caHash)) throw new Error(`${COORDINATION_HOST_CA_HASH_KEY} must be the SHA-256 of the disk controller's CA bundle, in hex.`);
-    const kustomization = join(stagedServiceRoot, "components", COORDINATION_HOST_CA_COMPONENT, "kustomization.yaml");
-    const text = readFileSync(kustomization, "utf8");
-    if (!text.includes(CA_HASH_PLACEHOLDER)) throw new Error(`${kustomization} has no ${CA_HASH_PLACEHOLDER} to replace.`);
-    writeFileSync(kustomization, text.split(CA_HASH_PLACEHOLDER).join(caHash));
+    replace(join(stagedServiceRoot, "components", COORDINATION_HOST_CA_COMPONENT, "kustomization.yaml"), CA_HASH_PLACEHOLDER, caHash);
     components.push(COORDINATION_HOST_CA_COMPONENT);
+  }
+  if (workspacesEnabled(env)) {
+    const pluginDirs = [...(pluginConfigMap ? [COORDINATION_HOST_PLUGIN_DIR] : []), WORKSPACES_PLUGIN_DIR].join(",");
+    replace(join(stagedServiceRoot, "components", COORDINATION_HOST_WORKSPACES_COMPONENT, "deployment-patch.yaml"),
+      PLUGIN_DIRS_PLACEHOLDER, pluginDirs);
+    components.push(COORDINATION_HOST_WORKSPACES_COMPONENT);
   }
   addComponents(overlayPath, components);
   setReplicas(overlayPath, replicas);

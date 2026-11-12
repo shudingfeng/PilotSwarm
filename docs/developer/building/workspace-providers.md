@@ -156,8 +156,9 @@ README), builds on these calls: on Windows workers each root session's work
 is on its own disk, which a VM holds one at a time. It takes a disk back from
 an idle session with `tryReleaseIdleWorkspace`, reports
 `getActiveWorkloadCount()` to its disk controller, finishes a release still
-running in an `onShutdown` hook, and asks for a restart with `requestExit`
-when its VM is bound to an owner. It also sets an admission hook (below) and
+running in an `onShutdown` hook, and, on a worker that isn't owner-only, asks
+for a restart with `requestExit` when its VM is bound to an owner. It also
+sets an admission hook (below) and
 refuses to load without `PILOTSWARM_DISABLE_CHILD_WORKSPACE_INHERITANCE=1`.
 [Windows workers](../deploy/windows-workers.md) describes the deployment it
 runs in, including how a disk is parked while its owner works elsewhere: the

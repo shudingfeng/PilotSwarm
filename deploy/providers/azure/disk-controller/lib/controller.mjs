@@ -2,10 +2,11 @@
 // listeners' route tables, the 15-second tick and the refresh timer.
 //
 //   :3003  worker routes (worker role, the workers' identity, a pool VM's
-//          source IP) and /v1/admin/* (admin; upgrade freeze also deployer)
+//          source IP; no capacity route: owner-only workers send no capacity
+//          request) and /v1/admin/* (admin; upgrade freeze also deployer)
 //   :3004  dispatcher routes (user role, DISPATCHER_SP_OBJECT_ID only) and
 //          the health probe, which takes no token and answers no data
-//   :3005  /v1/coordination/demand (coordinator role)
+//   :3005  /v1/coordination/demand (coordinator role), every capacity request
 import { KeyedMutex } from "./mutex.mjs";
 import { HttpError, createApp } from "./http.mjs";
 import { TIMING, leaseView } from "./model.mjs";
@@ -108,12 +109,6 @@ export function createController({
     workerRoute("/v1/vms/register", ({ vm }) => register(ctl, vm).then(ok)),
     workerRoute("/v1/vms/heartbeat", ({ vm, body }) => heartbeat(ctl, vm, body).then(ok)),
     workerRoute("/v1/vms/admit", ({ vm, body }) => admit(ctl, vm, body).then(ok)),
-    workerRoute("/v1/vms/demand", async ({ body }) => {
-      if (ctl.config.vms.ownerOnly) {
-        throw new HttpError(403, "COORDINATION_HOST", "On this pool the coordination host sends every capacity request.");
-      }
-      return ok(await capacityRequest(ctl, body, { kind: "demand" }));
-    }),
     workerRoute("/v1/vms/busy", ({ vm, body }) => busyRequest(ctl, vm, body).then(ok)),
     workerRoute("/v1/leases/attach", ({ vm, body }) => attach(ctl, vm, body).then(ok)),
     workerRoute("/v1/leases/detach", ({ vm, body }) => detach(ctl, vm, body).then(ok)),

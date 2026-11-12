@@ -8,8 +8,8 @@ import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import path from "node:path";
 import {
-    applyEnv, buildWorkerEnv, checkNodeVersion, clearFolderContents, createAttacherClient, createAzSignIn, decodeUserData,
-    EXPECTED_NODE_VERSION, HEARTBEAT_HANDOVER, LaunchError, LAUNCHER_SETTINGS, parseEnvFile, pinReleasePaths, runLauncher,
+    applyEnv, buildWorkerEnv, checkNodeVersion, checkPersonalSecretsOwnerOnly, clearFolderContents, createAttacherClient, createAzSignIn,
+    decodeUserData, EXPECTED_NODE_VERSION, HEARTBEAT_HANDOVER, LaunchError, LAUNCHER_SETTINGS, parseEnvFile, pinReleasePaths, runLauncher,
     syncReleaseWithRetry, tokenObjectId, USER_DATA_SETTINGS, waitForActive,
 } from "../launcher.mjs";
 import { takeOverHeartbeat } from "../../../../../packages/sdk/examples/devdrive-workspaces/heartbeat.mjs";
@@ -147,6 +147,24 @@ test("the worker's environment: worker.env, then userData, then extra pairs that
     assert.throws(() => buildWorkerEnv({ workerEnv: parseEnvFile("DATABASE_URL=postgresql://image@db/x\n"), userData: decoded }), /only userData may set/);
     for (const name of LAUNCHER_SETTINGS) {
         assert.throws(() => buildWorkerEnv({ workerEnv: parseEnvFile(`${name}=x\n`), userData: decoded }), /only the launcher sets/);
+    }
+});
+
+test("external personal secrets need an owner-only worker: worker.env's mode, else the service's, against userData", () => {
+    const refused = /PILOTSWARM_PERSONAL_SECRETS=external needs PILOTSWARM_WORKER_OWNER_ONLY=1/;
+    const valuesOf = (workerEnv, ownerOnly) => buildWorkerEnv({
+        workerEnv: parseEnvFile(workerEnv),
+        userData: decodeUserData(userData({ env: { PILOTSWARM_WORKER_OWNER_ONLY: ownerOnly } })),
+    });
+    for (const workerEnv of ["PILOTSWARM_PERSONAL_SECRETS=external\n", "pilotswarm_personal_secrets= External \n"]) {
+        assert.throws(() => checkPersonalSecretsOwnerOnly(valuesOf(workerEnv, "0")), (error) => error instanceof LaunchError && refused.test(error.message), workerEnv);
+        assert.doesNotThrow(() => checkPersonalSecretsOwnerOnly(valuesOf(workerEnv, "1")), workerEnv);
+    }
+    assert.throws(() => checkPersonalSecretsOwnerOnly(valuesOf("", "0"), { PILOTSWARM_PERSONAL_SECRETS: "external" }), refused, "the service's own");
+    assert.doesNotThrow(() => checkPersonalSecretsOwnerOnly(valuesOf("PILOTSWARM_PERSONAL_SECRETS=database\n", "0"), { PILOTSWARM_PERSONAL_SECRETS: "external" }),
+        "worker.env's value is the one the worker gets");
+    for (const workerEnv of ["", "PILOTSWARM_PERSONAL_SECRETS=database\n"]) {
+        assert.doesNotThrow(() => checkPersonalSecretsOwnerOnly(valuesOf(workerEnv, "0")), `database secrets: ${JSON.stringify(workerEnv)}`);
     }
 });
 
@@ -401,6 +419,21 @@ test("a missing userData value or another identity stops the launch before the f
     await assert.rejects(other.run(), /not to the worker identity/);
     assert.equal(other.counts.heartbeat, 0);
     assert.equal(other.state.controllerCreated, false);
+});
+
+test("external personal secrets on a worker that isn't owner-only stop the launch before a token, a heartbeat or a worker", async (t) => {
+    const workerEnv = "PILOTSWARM_PERSONAL_SECRETS=external\n";
+    const refused = harness(t, { workerEnv });
+    await assert.rejects(refused.run(), (error) => error instanceof LaunchError && /PILOTSWARM_WORKER_OWNER_ONLY=1/.test(error.message));
+    assert.equal(refused.counts.imds, 1, "only userData was read");
+    assert.equal(refused.counts.heartbeat, 0);
+    assert.equal(refused.state.controllerCreated, false);
+    assert.equal(refused.state.imported, null);
+
+    const ownerOnly = harness(t, { workerEnv, env: { PILOTSWARM_WORKER_OWNER_ONLY: "1" }, register: () => ({ status: "active", ownerOid: OWNER_OID }) });
+    assert.equal((await ownerOnly.run()).workerStarted, true);
+    assert.equal(ownerOnly.state.imported.env.PILOTSWARM_PERSONAL_SECRETS, "external");
+    assert.equal(ownerOnly.state.imported.env.PILOTSWARM_WORKER_OWNER_TAG, `owner.${OWNER_OID}`);
 });
 
 test("during a CA rotation the controller client trusts both CAs of userData, and a bad second certificate stops the launch", async (t) => {

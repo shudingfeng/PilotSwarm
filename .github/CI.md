@@ -319,9 +319,9 @@ needs no cloud credentials to test:
 - **The Windows scripts' tests** parse every PowerShell script when the runner
   has PowerShell 7. Their Windows-only checks (Windows PowerShell 5.1, the disk
   script's process search, the drain and the seed's `-Verify` run for real) run
-  only on Windows, and the Windows job doesn't run this suite: run
-  `node --test deploy/providers/azure/windows/test/*.test.mjs` on a Windows
-  machine when you change those scripts.
+  only on Windows: the Windows job of PR checks runs
+  `node --test deploy/providers/azure/windows/test/*.test.mjs` after the SDK
+  unit tests.
 
 No workflow deploys a pool. **Deploy Azure stamp** requires `EDGE_MODE=public`
 and an external database, and the pool needs `afd` or `private` and the stamp's

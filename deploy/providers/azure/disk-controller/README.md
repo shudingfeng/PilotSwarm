@@ -68,7 +68,6 @@ token, `403` a caller the route does not take.
 | `POST /v1/vms/register` | `worker` role, `EXPECTED_WIN_WORKER_OID`, from a VM of the scale set (source IP) | `{ status: "active", ownerOid }` for an activated VM, otherwise `{ status: "inactive", reason }` (`STANDBY`, `FROZEN`, `DRAINING`, `RESERVED`, `UNKNOWN`). Creates the VM's data collection rule association first |
 | `POST /v1/vms/heartbeat` | as above | `{ ownerOid, attached, releaseRequested, extendRequested, draining, frozen }` |
 | `POST /v1/vms/admit` | as above | `{ decision: "admit" }`, `busy` with `WORKSPACE_BUSY`, or `deny` with `NO_DRIVE_LEASE` |
-| `POST /v1/vms/demand` | as above; `403 COORDINATION_HOST` when `WIN_WORKER_COORDINATION_HOST=true` | the capacity answer below |
 | `POST /v1/vms/busy` | as above | the capacity answer below, for the VM's own owner |
 | `POST /v1/leases/attach` | as above | `{ ok: true, diskName, lun: 0, rootSessionId, ownerOid, takeover, needsFsck, sync }` or `{ ok: false, code, reason, retryAfterMs }` |
 | `POST /v1/leases/detach` | as above | `{ ok: true, detached }`; idempotent |
@@ -126,10 +125,12 @@ replaces it with its own.
 `{ decision: "ok" }`, `{ decision: "busy", code: "WORKSPACE_BUSY", reason,
 retryAfterMs, message }` (a parked, returning or quarantined drive waits 15
 minutes), or `{ decision: "deny", code: "NO_DRIVE_LEASE", message }` for a
-root without a lease. A returning lease answers busy on attach, admission,
-both capacity routes and both credential routes until the return completes;
-only then does its root hold no lease. Only a root with a live lease counts
-as demand.
+root without a lease. Only the coordination host asks for capacity, on its
+own port: the worker port has no capacity route, because owner-only workers
+send no capacity request. A returning lease answers busy on attach,
+admission, the coordination route, `/v1/vms/busy` and both credential routes
+until the return completes; only then does its root hold no lease. Only a
+root with a live lease counts as demand.
 
 **Broker answers** follow PilotSwarm's personal credential resolver
 contract: `{ status: "ok", token | credential }`, `{ status: "refused", code,
@@ -161,7 +162,7 @@ lists every setting. Unset, empty and `__PS_UNSET__` all mean unset.
 | `WIN_WORKER_WORKING_HOURS` | unset | Such as `Mon-Fri 08:00-18:00 America/Los_Angeles`: inside these hours at least one VM stays, even with Y of 0 |
 | `WIN_WORKER_IDLE_RECYCLE_MINUTES` | `30` | How long a bound VM stays idle before a scale-in step may take it, and how long recent demand keeps one unbound VM ready |
 | `WIN_WORKER_SCALE_IN_BATCH`, `WIN_WORKER_SCALE_IN_INTERVAL_MINUTES` | `1`, `5` | The size of a scale-in step and the pause between steps |
-| `WIN_WORKER_COORDINATION_HOST` | `false` | `true` when the coordination host sends every capacity request |
+| `WIN_WORKER_COORDINATION_HOST` | `false` | `true` when the Windows workers are owner-only and the coordination host runs everything else, as the repository's deployment always sets it with the pool: a system session's admission on a VM answers `busy` (`SYSTEM_SESSION`), and binding a VM opens no restart window. `false` is for workers that aren't owner-only: they run system sessions, and a VM bound after its worker started gets 3 minutes for its restart with the owner's tag |
 | `WIN_DEV_DRIVE_GOLDEN_SNAPSHOT_ID` | unset | The first golden snapshot; the weekly refresh replaces it |
 | `WIN_DEV_DRIVE_POOL_COUNT` | `10` | M, the most drives |
 | `WIN_DEV_DRIVE_SPARE_COUNT` | `2` | Hydrated spares kept ready |
@@ -361,8 +362,8 @@ run again after an interruption at any write, and completes what is left.
    between two trusted CAs of one name. With a next CA there already, it
    reports it and changes nothing. It refuses while the last rotation's
    previous CA is still trusted.
-3. **Deploy** base-infra and `disk-controller`, and the worker with
-   `WIN_WORKER_COORDINATION_HOST=true`. Every trust store gets both CAs, the
+3. **Deploy** base-infra, `disk-controller` and the worker, the coordination
+   host. Every trust store gets both CAs, the
    current one first:
    - base-infra writes the bundle into the workers' `userData`, which changes
      `WIN_WORKER_CONFIG_VERSION`;

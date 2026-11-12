@@ -79,7 +79,7 @@ aggregate. It runs the canonical enterprise-equivalent sequence
 (`globalinfra → baseinfra → horizondb, when enabled → worker → portal`) in a single invocation,
 sharing the same env map across services so Bicep outputs (ACR login
 server, deployment storage account, etc.) cascade forward automatically.
-With the Windows worker pool's coordination host
+With the Windows worker pool, whose worker runs as the coordination host
 (`WIN_WORKER_COORDINATION_HOST=true`), the worker comes just after the portal
 instead (see "The coordination host"):
 
@@ -187,10 +187,10 @@ Files are flat `KEY=value`, no quoting, no shell expansion.
 | `TLS_SOURCE` | bicep, manifests | `letsencrypt` \| `akv` \| `akv-selfsigned`. Drives Portal overlay path and AKV cert issuer. See [docs/developer/deploy/aks.md](../../docs/developer/deploy/aks.md) for the supported `(EDGE_MODE × TLS_SOURCE)` combos. |
 | `AZURE_POLICY_RESTRICTED` | bicep, manifests | `false` (default) or `true`. Deploys a stamp for a subscription whose Azure Policy requires a network security perimeter and denies Storage shared keys and deployment scripts. Requires `EDGE_MODE=afd` and `TLS_SOURCE=letsencrypt`. See [policy-restricted subscriptions](../../docs/developer/deploy/aks.md#optional-policy-restricted-subscriptions). |
 | `PERIMETER_OPERATOR_IP_PREFIXES` | bicep (base-infra) | Optional, with `AZURE_POLICY_RESTRICTED=true`: comma-separated public IPv4 addresses or CIDR prefixes that the network security perimeter also admits. |
-| `WIN_WORKERS_ENABLED` | bicep, manifests, rollout (portal) | `false` (default) or `true`. Deploys a Windows worker pool beside the cluster and the `disk-controller` service, and runs the database role Job after the portal's rollout. Requires `EDGE_MODE=afd` or `private`, the stamp's own PostgreSQL with `PILOTSWARM_USE_MANAGED_IDENTITY=1`, `PORTAL_AUTH_ENTRA_CLIENT_ID` and `WIN_WORKER_ALERT_EMAILS`. See [Optional: Windows worker pool](#optional-windows-worker-pool). |
+| `WIN_WORKERS_ENABLED` | bicep, manifests, rollout (portal) | `false` (default) or `true`. Deploys a Windows worker pool beside the cluster and the `disk-controller` service, and runs the database role Job after the portal's rollout. Requires `EDGE_MODE=afd` or `private`, the stamp's own PostgreSQL with `PILOTSWARM_USE_MANAGED_IDENTITY=1`, `PORTAL_AUTH_ENTRA_CLIENT_ID`, `WIN_WORKER_ALERT_EMAILS`, `WIN_WORKER_COORDINATION_HOST=true`, `PILOTSWARM_OWNER_ROUTING=1` and `AUTHZ_ENFORCE_OWNERSHIP=true`. See [Optional: Windows worker pool](#optional-windows-worker-pool). |
 | `WIN_WORKER_ALERT_EMAILS` | bicep (base-infra) | Required with `WIN_WORKERS_ENABLED=true`: comma-separated receivers of the pool's alerts. |
 | `WIN_WORKER_*`, `WIN_DEV_DRIVE_*` | bicep (base-infra), manifests (disk-controller, worker) | The pool's size, image version, VM size, scaling, extra worker settings, the coordination host and Dev Drives. Each defaults to the value in `template.env`'s Windows worker pool section. |
-| `PILOTSWARM_REQUIRE_FINE_GRAINED_GH_PAT`, `PILOTSWARM_PERSONAL_SECRETS`, `PILOTSWARM_PERSONAL_SECRET_STORE_MODULE`, `PILOTSWARM_PERSONAL_SECRET_VAULT_URI`, `PILOTSWARM_OWNER_ROUTING`, `PILOTSWARM_WORKSPACE_BUSY_FAST_RELEASE`, `PILOTSWARM_DEFAULT_IDLE_TIMEOUT_SEC`, `PILOTSWARM_SESSION_MESSAGE_SCOPE` | manifests (portal) | Optional portal settings. At its default a setting stays out of the staged overlay, so the portal's manifests don't change. `PILOTSWARM_OWNER_ROUTING=1` needs `WIN_WORKERS_ENABLED=true`; with the pool, `PILOTSWARM_PERSONAL_SECRET_VAULT_URI` defaults to the stamp's personal vault. |
+| `PILOTSWARM_REQUIRE_FINE_GRAINED_GH_PAT`, `PILOTSWARM_PERSONAL_SECRETS`, `PILOTSWARM_PERSONAL_SECRET_STORE_MODULE`, `PILOTSWARM_PERSONAL_SECRET_VAULT_URI`, `PILOTSWARM_OWNER_ROUTING`, `PILOTSWARM_WORKSPACE_BUSY_FAST_RELEASE`, `PILOTSWARM_DEFAULT_IDLE_TIMEOUT_SEC`, `PILOTSWARM_SESSION_MESSAGE_SCOPE` | manifests (portal) | Optional portal settings. At its default a setting stays out of the staged overlay, so the portal's manifests don't change. `PILOTSWARM_OWNER_ROUTING=1` records the owner's tag on each session the dispatcher creates for a user, and needs `WIN_WORKERS_ENABLED=true`; with the pool, `PILOTSWARM_PERSONAL_SECRET_VAULT_URI` defaults to the stamp's personal vault. |
 | `HOST`, `PRIVATE_DNS_ZONE` | bicep (portal), rollout (portal) | Required when `EDGE_MODE=private`. Bicep provisions the Private DNS Zone + VNet link; deploy.mjs writes the A record `${HOST}.${PRIVATE_DNS_ZONE}` → internal LB IP after Portal rollout. |
 | `ACME_EMAIL` | bicep (cert-manager-issuers) | Required when `TLS_SOURCE=letsencrypt`. Let's Encrypt registration / renewal-failure notices. |
 | `PORTAL_TLS_ISSUER_NAME` | bicep (portal) | Optional override for the AKV cert issuer name. Defaults to `OneCertV2-PublicCA` (afd) / `OneCertV2-PrivateCA` (private), auto-registered by Portal bicep. |
@@ -218,6 +218,15 @@ staged manifests are exactly those of a stamp without it, and the
 `disk-controller` service is skipped, as `repo-cache` is without
 `WORKSPACES_ENABLED=true`.
 
+Before any step, `deploy.mjs` refuses the pool without
+`WIN_WORKER_COORDINATION_HOST=true` (see "The coordination host"),
+`PILOTSWARM_OWNER_ROUTING=1` and `AUTHZ_ENFORCE_OWNERSHIP=true`, read as the
+portal reads it: otherwise the portal only audits who may open a session, and
+an owner's session runs on that owner's Windows worker with the owner's
+token. It refuses `DISPATCHER_SP_OBJECT_ID` without enforced ownership too,
+with the pool or without it. `npm run deploy:new-env` writes all three with
+the pool.
+
 Base-infra then deploys, each only with the setting:
 
 - the workers' identity (`<prefix>-win-worker-mid`, the only identity of every
@@ -239,7 +248,9 @@ Base-infra then deploys, each only with the setting:
   instead of the whole account, and the workers' on `copilot-sessions` and
   `win-worker-releases` (read);
 - an Entra-only PostgreSQL server whose firewall admits only the cluster's
-  and the workers' egress addresses;
+  and the workers' egress addresses. The pool pins the cluster's outbound
+  address to the static IP `<prefix>-hdb-egress`, in every edge mode, which
+  changes an existing stamp's outbound address;
 - the workers' data collection rule, and the pool's security logs, alerts and
   action group;
 - once `WIN_WORKER_IMAGE_VERSION` is set, the Flexible scale set and its
@@ -295,7 +306,7 @@ that never rotates has one CA, as before.
 `render-params.mjs` renders the VMs' `userData`: the stamp's database,
 storage, controller and identity values, the controller's trusted CA
 certificates (one, or two during a rotation),
-`PILOTSWARM_WORKER_OWNER_ONLY` (`1` with `WIN_WORKER_COORDINATION_HOST=true`)
+`PILOTSWARM_WORKER_OWNER_ONLY=1` (a pool always has the coordination host)
 and the `WIN_WORKER_EXTRA_ENV` pairs. It holds no secret, and the renderer
 refuses any value the workers' launcher would refuse, including a reserved
 or repeated `WIN_WORKER_EXTRA_ENV` name. `WIN_WORKER_CONFIG_VERSION`, a SHA-256
@@ -326,8 +337,8 @@ script and the portal's staged model catalog, and a Job `pilotswarm-db-role`
 that runs the script in the portal's image and namespace, with the portal's
 service account (and so its workload identity) and database settings. The
 portal's rollout step runs it once the portal has rolled out, before the
-`disk-controller` service starts any VM and, with the coordination host,
-before `all` deploys the `worker` service (see "The coordination host"): it
+`disk-controller` service starts any VM and before `all` deploys the
+`worker` service, the coordination host (see "The coordination host"): it
 deletes the last run's Job and
 ConfigMap, applies the manifest and waits for the Job (30 minutes at most),
 then prints its last log lines. The names are fixed and every run deletes
@@ -348,19 +359,20 @@ exit, which fails the deploy:
    transaction. The same grants become the migrating role's default
    privileges there, so a later migration's objects get them too;
 3. adds the members: `WIN_WORKER_IDENTITY_NAME` with
-   `EXPECTED_WIN_WORKER_OID` (base-infra's outputs) and, when both are set,
-   `COORDINATION_IDENTITY_NAME` with `COORDINATION_IDENTITY_PRINCIPAL_ID`. A
-   missing member is created as a Microsoft Entra service principal with
-   `pgaadauth_create_principal_with_oid` on the server's `postgres` database;
-   an existing role of that name must be the Entra principal of that object
-   ID. Members are only added, never removed;
+   `EXPECTED_WIN_WORKER_OID` and `COORDINATION_IDENTITY_NAME` with
+   `COORDINATION_IDENTITY_PRINCIPAL_ID` (base-infra's outputs; it refuses to
+   run without both). A missing member is created as a Microsoft Entra
+   service principal with `pgaadauth_create_principal_with_oid` on the
+   server's `postgres` database; an existing role of that name must be the
+   Entra principal of that object ID. Members are only added, never removed;
 4. reads the group's privileges back through PostgreSQL's privilege
-   functions and fails on any difference;
-5. sets the cluster and the system default model to the model catalog's
-   `defaultModel`, through the management client, when either differs. A
-   default changed in the portal returns to the catalog's at the next run.
-   When the deployment has no shared provider for the `defaultModel`'s
-   provider (it holds no credential for it), both defaults stay as they are.
+   functions and fails on any difference.
+
+The clients start with the portal's staged model catalog and the portal's
+model credentials, as the portal's do: on a new database the first client to
+start seeds the catalog's providers and its cluster default model, once. The
+Job never sets a default model, so an administrator's choice in the portal
+stays.
 
 What the group can do in each of the three schemas:
 
@@ -380,6 +392,13 @@ one, and it can't create one, a schema included. The group can't log in.
 Like every role, its members keep what PostgreSQL gives `PUBLIC`: `CONNECT`
 to the database and temporary tables.
 
+The table grants cover the session catalog's authorization records too:
+`session_owners`, `session_shares`, `users` (with each user's
+`allow_dispatcher_delegation`) and the provider tables. Whoever holds a
+member's database token can change who owns or shares a session, or opt a
+user into delegation; on a Windows VM an agent can reach that token through
+the instance metadata service. Narrower grants are future hardening.
+
 A member starts without any DDL once the migrations are applied: duroxide's
 connect then only reads its migration table, and the SDK only checks its own
 (`PILOTSWARM_SKIP_DB_MIGRATIONS=1`). A worker of a release whose migrations
@@ -388,19 +407,17 @@ Job before the workers start again.
 
 #### The coordination host
 
-`WIN_WORKER_COORDINATION_HOST=true` makes the Linux worker,
-`copilot-runtime-worker`, the coordination host. The Windows workers then run
-only their owner's turns (`PILOTSWARM_WORKER_OWNER_ONLY=1` in their
+A pool requires `WIN_WORKER_COORDINATION_HOST=true`, which makes the Linux
+worker, `copilot-runtime-worker`, the coordination host. The Windows workers
+then run only their owner's turns (`PILOTSWARM_WORKER_OWNER_ONLY=1` in their
 `userData`), and the coordination host runs the orchestrations, durable
-timers, system agents, title generator and every turn's bookkeeping, and
-sends every capacity request to the disk controller. It runs no user turn
+timers, system agents, title generator, every turn's bookkeeping, the
+sessions that people start in the portal, with their workspaces, and every
+Workflow activity, and sends every capacity request to the disk controller
 (`deploy/providers/azure/linux-worker/README.md`). It needs
-`WIN_WORKERS_ENABLED=true`, `PILOTSWARM_OWNER_ROUTING=1` and
-`WORKSPACES_ENABLED=false`. Without it, a stamp with the pool keeps
-`copilot-runtime-worker` at 0 replicas, and the Windows workers run all of
-that work themselves.
+`WIN_WORKERS_ENABLED=true` and `PILOTSWARM_OWNER_ROUTING=1`.
 
-With the setting, base-infra also deploys the host's own identity,
+With the pool, base-infra also deploys the host's own identity,
 `<prefix>-linux-worker-mid`:
 
 - federated with the worker's service account, `copilot-runtime-worker`.
@@ -428,8 +445,8 @@ Before the worker's manifests, on any stamp with the pool, the Windows worker
 deploy step deletes the portal identity's federated credential for the
 worker's service account, `worker-fedcred`, which an earlier deploy created
 and an incremental deployment keeps, and fails the deploy while one remains:
-with the pool the worker runs as the host or runs no pod. With the setting, it
-then puts the controller's trusted CAs in the cluster (the ConfigMap
+with the pool the worker runs as the host, with its own identity. It then
+puts the controller's trusted CAs in the cluster (the ConfigMap
 `pilotswarm-disk-controller-ca`), making the controller's TLS certificate
 first on a stamp's first deploy, where the worker comes before the
 `disk-controller` service. While the controller trusts two CAs (a CA
@@ -440,12 +457,12 @@ component): the host reads `NODE_EXTRA_CA_CERTS` only when it starts, so a
 new bundle restarts it. With one CA the component is left out, and the pod
 template stays as it was.
 
-With the setting, `all` deploys the `worker` service just after the
+With the pool, `all` deploys the `worker` service just after the
 `portal`, not before it: the portal's rollout step runs the database role Job
 (above), which applies the migrations and makes the host's identity a member
 of `pilotswarm_worker_group`, and the host's pods sign in as that identity
 with `PILOTSWARM_SKIP_DB_MIGRATIONS=1`. When you deploy the services one at a
-time, deploy `portal` before `worker` the first time you turn the setting on:
+time, deploy `portal` before `worker` the first time you deploy the pool:
 until the Job has run, the host's pods can't use the database, and the
 worker's rollout fails.
 
@@ -470,10 +487,10 @@ worker with:
   (`COPILOT_HOME`) root's, with the Windows image's read-only placeholders and
   the fixed `settings.json` and `config.json`, and only `session-state` the
   worker's;
-- the settings the Windows workers run with: the capacity requester and the
-  system-only admission hook (`PILOTSWARM_EXTENSION_MODULES`,
-  `PS_COORDINATION_URL`, `PS_COORDINATION_TOKEN_SCOPE`), the title and system
-  session tool limits, `PILOTSWARM_SCRUB_CLI_ENV=1`,
+- the settings the Windows workers run with: the capacity requester
+  (`PILOTSWARM_EXTENSION_MODULES`, `PS_COORDINATION_URL`,
+  `PS_COORDINATION_TOKEN_SCOPE`), which registers no admission hook, the title
+  and system session tool limits, `PILOTSWARM_SCRUB_CLI_ENV=1`,
   `PILOTSWARM_CLI_DISABLE_HOOKS=1`, `PILOTSWARM_AGENT_PACKAGES=0`,
   `PILOTSWARM_SKIP_DB_MIGRATIONS=1`, `PILOTSWARM_SESSION_MESSAGE_SCOPE=owner`,
   `PILOTSWARM_PERSONAL_SECRETS=external` with
@@ -481,9 +498,17 @@ worker with:
   `PILOTSWARM_CLI_SECRET_ENV_VARS=COPILOT_SDK_AUTH_TOKEN`,
   `COPILOT_PKG_CACHE_HOME=/app/copilot-pkg`, `COPILOT_HOME`,
   `SESSION_STATE_DIR`, `PILOTSWARM_EVENT_RETENTION_MINUTES=43200`,
-  `PILOTSWARM_DISABLE_K8S_SCALING=1`,
-  `PILOTSWARM_DISABLE_CHILD_WORKSPACE_INHERITANCE=1`, and a worker and
-  orchestration concurrency of 8 and 4;
+  `PILOTSWARM_DISABLE_K8S_SCALING=1`, and a worker and orchestration
+  concurrency of 8 and 4. A portal session's sub-agents keep its workspace,
+  as on the Linux worker without the pool;
+- with `WORKSPACES_ENABLED=true`, the `workspaces` component as without the
+  pool, and after the host's own components `coordination-host-workspaces`:
+  it loads the workspace provider and clone tools beside the capacity
+  requester, names the plugin folders of both components in `PLUGIN_DIRS`
+  (the Windows workers' plugin first), passes the repo service's URL and
+  Git's author settings to agents' tools through
+  `PILOTSWARM_CLI_ENV_ALLOWLIST`, and adds a second egress policy that opens
+  only TCP 8080 to the repo pod;
 - `WIN_WORKER_COORDINATION_HOST_REPLICAS` replicas;
 - the model catalog's Foundry providers on the host's workload identity, in
   either `FOUNDRY_AUTH_MODE`. The host has no GitHub token and no Key Vault
@@ -494,30 +519,13 @@ The `build` step builds the worker image with
 `--build-arg COPILOT_PKG_CACHE_HOME=/app/copilot-pkg`, so the image holds the
 Copilot CLI program's unpacked copy, owned by root, which external personal
 secrets require. A worker image built without it does not start as the
-coordination host: rebuild it when you turn the setting on.
+coordination host: rebuild it when you turn the pool on.
 
 | Setting | Default | |
 |---|---|---|
 | `WIN_WORKER_COORDINATION_HOST_REPLICAS` | `2` | 0 to 20. A Windows release's upgrade freeze publishes 0 (`Bootstrap-WinWorkerStamp.ps1 -CoordinationHostScript`), for example with `WIN_WORKER_COORDINATION_HOST_REPLICAS=0 npm run deploy -- worker <env> --steps manifests`: a shell value wins over the env file. |
 | `WIN_WORKER_COORDINATION_HOST_PLUGIN_CONFIGMAP` | unset | A ConfigMap in the worker's namespace with the definitions of the plugin whose session policy and agents the Windows workers load: `plugin.json`, `session-policy.json`, the agents' `*.agent.md` files, and each skill an agent declares as `<skill>.SKILL.md` (and `<skill>.tools.json`). The host loads a read-only copy of only those (`PLUGIN_DIRS`), no tool module or MCP server. Unset: the image's own plugins. |
 | `WIN_WORKER_COORDINATION_HOST_REDACT_SECRET_PREFIXES` | unset | Comma-separated token prefixes the host redacts from what it persists (`PILOTSWARM_REDACT_SECRET_PREFIXES`), as the Windows workers do. |
-
-Turning the setting off needs an order, or sessions stop at their next turn
-until the controller has replaced the VMs that run only their owner's work:
-
-1. Set `WIN_WORKER_COORDINATION_HOST=false` (with `WIN_WORKER_MIN_RUNNING` of
-   at least 1) and deploy `base-infra`, then `disk-controller`, one service at
-   a time. The host keeps running from its current manifest. New VMs take the
-   new `userData`, and the controller replaces each older VM once it is idle
-   and holds no Dev Drive.
-2. Wait until the controller's `GET /v1/admin/status` lists no VM whose
-   `outdated` is `true` or `null`.
-3. Deploy `worker`, which now has 0 replicas.
-
-The portal's identity gets no `worker-fedcred` back while the pool is on. The
-host's identity, its credential and its grants stay, since an incremental
-deployment deletes nothing: delete `<prefix>-linux-worker-mid` and its role
-assignments by hand.
 
 ## How `.env` substitution works (vs. The enterprise path)
 

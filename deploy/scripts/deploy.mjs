@@ -255,10 +255,10 @@ async function runStage(name, ctx) {
         await refreshAzureOidcLogin(ctx.env, "the Windows worker deploy step");
         winWorkersBeforeManifests({ env: ctx.env, stagingDir: ctx.stagingDir });
       }
-      // With the Windows worker pool, the worker signs in as the coordination
-      // host's own identity or runs no pod: the portal identity's credential
-      // for the worker's service account goes first, and with the host the
-      // controller's CA is in the cluster before the host's pods.
+      // With the Windows worker pool, the worker runs as the coordination
+      // host, with its own identity: the portal identity's credential for the
+      // worker's service account goes first, and the controller's CA is in
+      // the cluster before the host's pods.
       if (ctx.service === "worker" && winWorkersEnabled(ctx.env)) {
         await refreshAzureOidcLogin(ctx.env, "the Windows worker deploy step");
         winWorkersBeforeWorkerManifests({ env: ctx.env, stagingDir: ctx.stagingDir });
@@ -301,8 +301,8 @@ async function runStage(name, ctx) {
       });
       // WIN_WORKERS_ENABLED=true: once the portal runs, the database role Job
       // (its image, service account and identity) migrates and grants the
-      // Windows workers' group, before the disk controller starts any VM and,
-      // with the coordination host, before `all` deploys the worker.
+      // Windows workers' group, before the disk controller starts any VM and
+      // before `all` deploys the coordination host.
       if (ctx.service === "portal" && winWorkersEnabled(ctx.env)) {
         await runStagedDbRoleJob({ env: ctx.env, stagingDir: ctx.stagingDir });
       }

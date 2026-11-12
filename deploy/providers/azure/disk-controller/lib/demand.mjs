@@ -1,4 +1,4 @@
-// Owner demand: the capacity requests (/v1/vms/demand, /v1/coordination/demand),
+// Owner demand: the capacity requests (/v1/coordination/demand),
 // /v1/vms/busy, claims and branch syncs. Only a root session that holds a
 // live drive lease of the owner counts. Each counted request is a demand
 // signal, which keeps one unbound VM ready for a while, and enters the queue

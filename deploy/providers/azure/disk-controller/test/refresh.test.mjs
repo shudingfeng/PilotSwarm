@@ -94,7 +94,7 @@ test("a refresh seeds a fresh copy on a VM that never activates, verifies it, an
   const c = h.state.get("controller", "controller");
   assert.match(c.golden.id, new RegExp(`/snapshots/${snapshotName}$`));
   assert.equal(c.golden.manifestSha256, "c".repeat(64));
-  assert.equal(c.previousGolden.id, GOLDEN_ID, "the previous snapshot is kept for rollback");
+  assert.equal(c.previousGolden.id, GOLDEN_ID, "the previous snapshot is kept, as previousGolden");
   assert.ok(c.lastRefreshAt > 0 && c.lastRefreshAt <= h.clock.now(), "the run is recorded");
   assert.equal((await h.admin("GET", "/v1/admin/status")).body.goldenSnapshot, c.golden.id);
   assert.equal(h.log.events("snapshot.refresh-completed").length, 1);

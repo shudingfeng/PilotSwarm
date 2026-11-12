@@ -213,7 +213,7 @@ object:
 | Field | Rule |
 |---|---|
 | `version` | `1` |
-| `env` | Exactly the eleven names above, each a non-empty string. Database URLs are `postgres://` or `postgresql://` without a password; the storage and controller URLs are plain `https://`; the client ID and object ID are GUIDs; the feed endpoints are `{"endpointCredentials":[...]}` (an empty list for none), each with an `endpoint` and no `password`; the configuration version is 1 to 128 letters, digits and `. _ : -`; `PILOTSWARM_WORKER_OWNER_ONLY` is exactly `"0"` or `"1"` |
+| `env` | Exactly the eleven names above, each a non-empty string. Database URLs are `postgres://` or `postgresql://` without a password; the storage and controller URLs are plain `https://`; the client ID and object ID are GUIDs; the feed endpoints are `{"endpointCredentials":[...]}` (an empty list for none), each with an `endpoint` and no `password`; the configuration version is 1 to 128 letters, digits and `. _ : -`; `PILOTSWARM_WORKER_OWNER_ONLY` is exactly `"0"` or `"1"`. The deploy always writes `"1"`, and the launcher refuses `"0"` with external personal secrets (below) |
 | `extraEnv` | Optional extra `NAME: value` pairs for the deployment's own tools. A name may not be one that `worker.env` or `env` sets (compared without case), one the launcher sets (`PILOTSWARM_WORKER_OWNER_TAG`, `PS_LAUNCH_ID`), a process or profile variable (`PATH`, `TEMP`, `APPDATA` and the like), `GITHUB_TOKEN` or `GH_TOKEN`, or start with `NODE_`, `COPILOT_`, `PILOTSWARM_`, `PS_` or `WIN_WORKER_` (the platform's own settings), or with `AZURE_`, `GIT_`, `NUGET_`, `GCM_` or `ARTIFACTS_CREDENTIALPROVIDER_`, which would change every session's Azure CLI, Git, NuGet or credential flow (`GIT_CONFIG_PARAMETERS` injects Git configuration; `AZURE_EXTENSION_*` turns dynamic CLI extensions back on) |
 | `controllerCaCert` | The controller's trusted CA certificates as one PEM bundle: its CA, or during a CA rotation two CAs, the current one first (see "Rotating the CA" in [the disk controller's README](../disk-controller/README.md#rotating-the-ca)). Each certificate must be a CA, and nothing but whitespace may come before, between or after them |
 
@@ -226,7 +226,11 @@ another one.
 
 1. Refuses any Node.js but `24.22.1` (the version `deploy/Dockerfile.worker`
    pins).
-2. Reads `worker.env` and userData and builds the worker's environment.
+2. Reads `worker.env` and userData and builds the worker's environment. It
+   refuses `PILOTSWARM_PERSONAL_SECRETS=external`, from `worker.env` or the
+   service's own environment, unless userData's
+   `PILOTSWARM_WORKER_OWNER_ONLY` is `"1"`: a worker that isn't owner-only
+   runs other users' work, so it must not hold an owner's token.
 3. Asks IMDS for a controller token and refuses to start unless its `oid` is
    `EXPECTED_WIN_WORKER_OID`.
 4. Creates this start's launch ID (`PS_LAUNCH_ID`) and starts the 15-second
@@ -607,8 +611,8 @@ Two pieces come from the deployment, as parameters:
 - `-CoordinationHostScript`: called as `& <script> -Replicas <n> -Step
   Freeze|Publish|Unfreeze`; it publishes the coordination host's manifest with
   that many replicas (the current image at `Freeze`, the new one from `Publish`
-  on) and returns once it is applied and the pods are gone or ready.
-  `-NoCoordinationHost` skips it on a stamp without one.
+  on) and returns once it is applied and the pods are gone or ready. It is
+  required: a Windows worker pool always runs with the coordination host.
 - `-MigrationJobManifest`: the migration Job for `kubectl apply`, with the
   objects it mounts; it must create exactly one Job, and the step deletes its
   objects first. With `WIN_WORKERS_ENABLED=true`, the portal's manifests step
@@ -636,7 +640,8 @@ and run again with `-From` at the failed step; the pool stays frozen until
 node --test deploy/providers/azure/windows/test/*.test.mjs
 ```
 
-`npm run test:deploy-scripts` runs them too. They need no dependency: IMDS,
+`npm run test:deploy-scripts` runs them too, and the Windows job of PR checks
+runs this command. They need no dependency: IMDS,
 the controller, the release container, PowerShell's disk operations and the
 worker are fakes, and the heartbeat hand-over uses the Dev Drive extension's own
 `takeOverHeartbeat()`. With PowerShell 7 installed, every script is parsed, and
@@ -681,6 +686,11 @@ VM:
 - the controller: register, heartbeats, the detach, and the timings that size the
   controller's windows (service start to first heartbeat and to `running`, cold
   with a release download, warm and after a crash);
+- the design targets for drives, which nothing measures: under 50 ms to
+  reattach a drive a session holds, under 25 seconds to attach one, and under
+  40 seconds for a take-back. The extension gives each session that holds the
+  drive up to 60 seconds to release it, and its attacher calls up to 5
+  minutes;
 - the release sync against the real container, a hash mismatch failing every
   start, and `az login --identity` as the worker account;
 - the seed and its refresh on full repositories: clones, LFS, caches, owners

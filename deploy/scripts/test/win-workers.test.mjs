@@ -112,11 +112,18 @@ const OUTPUTS = Object.freeze({
   WIN_WORKER_GALLERY_IMAGE_ID: `/subscriptions/${SUBSCRIPTION}/resourceGroups/stamp-rg/providers/Microsoft.Compute/galleries/psstampgallery/images/pilotswarm-win-worker`,
   WIN_WORKER_SCALE_SET_ID: `/subscriptions/${SUBSCRIPTION}/resourceGroups/stamp-rg/providers/Microsoft.Compute/virtualMachineScaleSets/psstamp-win-workers`,
   WIN_WORKER_DCR_ID: `/subscriptions/${SUBSCRIPTION}/resourceGroups/stamp-rg/providers/Microsoft.Insights/dataCollectionRules/psstamp-win-worker-dcr`,
+  COORDINATION_IDENTITY_CLIENT_ID: "cccccccc-cccc-cccc-cccc-cccccccccccc",
+  COORDINATION_IDENTITY_PRINCIPAL_ID: "dddddddd-dddd-dddd-dddd-dddddddddddd",
+  COORDINATION_IDENTITY_NAME: "psstamp-linux-worker-mid",
 });
 
+// The pool, with what it needs (overlay-contracts.mjs).
 const POOL = Object.freeze({
   WIN_WORKERS_ENABLED: "true",
   WIN_WORKER_ALERT_EMAILS: "ops@example.com",
+  WIN_WORKER_COORDINATION_HOST: "true",
+  PILOTSWARM_OWNER_ROUTING: "1",
+  AUTHZ_ENFORCE_OWNERSHIP: "true",
 });
 
 const poolEnv = (extra = {}) => {
@@ -256,6 +263,7 @@ test("WIN_WORKERS_ENABLED=true adds only the pool's parameters to base-infra, an
     diskPoolControllerRoleId: { value: ROLE_IDS.WIN_WORKER_CONTROLLER_ROLE_ID },
     workerSubnetJoinRoleId: { value: ROLE_IDS.WIN_WORKER_SUBNET_JOIN_ROLE_ID },
     personalVaultWriterRoleId: { value: ROLE_IDS.WIN_WORKER_VAULT_WRITER_ROLE_ID },
+    winWorkerCoordinationHost: { value: true },
   });
   withTmp((dir) => {
     for (const module of ["portal", "worker", "disk-controller"]) {
@@ -322,7 +330,7 @@ test("userData carries every setting the launcher requires, the CA and no secret
     EXPECTED_WIN_WORKER_OID: WORKER_OID,
     ARTIFACTS_CREDENTIALPROVIDER_FEED_ENDPOINTS: JSON.stringify({ endpointCredentials: [] }),
     WIN_WORKER_CONFIG_VERSION: configVersion,
-    PILOTSWARM_WORKER_OWNER_ONLY: "0",
+    PILOTSWARM_WORKER_OWNER_ONLY: "1",
   });
   assert.equal(DISK_CONTROLLER_WORKER_URL, "https://10.20.15.250:3003");
   assert.ok(new X509Certificate(document.controllerCaCert).ca);
@@ -333,9 +341,12 @@ test("userData carries every setting the launcher requires, the CA and no secret
   assert.doesNotThrow(() => loadConfig({ ...diskControllerOverlayEnv(poolEnv()), WIN_WORKER_CONFIG_VERSION: configVersion }));
 });
 
-test("userData: owner-only workers with the coordination host, feed endpoints and extra pairs for the deployment", () => {
+test("userData: the workers are owner-only whatever the env map says, and the deployment's feed endpoints and extra pairs go in", () => {
+  for (const host of ["true", "false", undefined]) {
+    const { document } = renderWinWorkerUserData(userDataEnv({ WIN_WORKER_COORDINATION_HOST: host }), { caPem: pki.caPem });
+    assert.equal(document.env.PILOTSWARM_WORKER_OWNER_ONLY, "1", `WIN_WORKER_COORDINATION_HOST=${host}`);
+  }
   const env = userDataEnv({
-    WIN_WORKER_COORDINATION_HOST: "true",
     WIN_WORKER_FEED_ENDPOINTS: "https://feeds.example.com/one/index.json, https://feeds.example.com/two/index.json",
     WIN_WORKER_EXTRA_ENV: "EXAMPLE_API_URL=https://api.example.com/v1?a=b ; EXAMPLE_API_SCOPE=api://example/.default",
   });
@@ -360,7 +371,6 @@ test("the configuration version follows every userData value and the settings a 
   for (const [label, extra, caPem] of [
     ["VM size", { WIN_WORKER_VM_SIZE: "Standard_D32ds_v5" }],
     ["image version", { WIN_WORKER_IMAGE_VERSION: "1.0.20261201" }],
-    ["owner-only", { WIN_WORKER_COORDINATION_HOST: "true" }],
     ["extra pair", { WIN_WORKER_EXTRA_ENV: "EXAMPLE_MODE=on" }],
     ["extra value", { WIN_WORKER_EXTRA_ENV: "EXAMPLE_MODE=off" }],
     ["feed", { WIN_WORKER_FEED_ENDPOINTS: "https://feeds.example.com/one/index.json" }],
@@ -1894,7 +1904,7 @@ test("deploy.mjs runs the Windows worker step around base-infra's Bicep only wit
   for (const name of POOL_PARAMETERS) assert.ok(!(name in off.logged[0].parameters[0]), name);
 
   // On, before an image version: the role lookups before, the clean-ups after.
-  const on = deployWithFakeAz(t, { settings: { WIN_WORKERS_ENABLED: "true", WIN_WORKER_ALERT_EMAILS: "ops@example.com" } });
+  const on = deployWithFakeAz(t, { settings: { ...POOL } });
   assert.equal(on.result.status, 0, output(on.result));
   assert.deepEqual(verbsOf(on.logged), [
     "role definition list", "role definition list", "role definition list",
@@ -1913,7 +1923,7 @@ test("deploy.mjs runs the Windows worker step around base-infra's Bicep only wit
 
 test("deploy.mjs hands the administrator password to the deployment that creates the scale set as a secure parameter only", (t) => {
   const { result, logged, temp } = deployWithFakeAz(t, { settings: {
-    WIN_WORKERS_ENABLED: "true", WIN_WORKER_ALERT_EMAILS: "ops@example.com", WIN_WORKER_IMAGE_VERSION: "1.0.20261104",
+    ...POOL, WIN_WORKER_IMAGE_VERSION: "1.0.20261104",
     WIN_WORKER_STANDBY_POOL_PRINCIPAL_ID: STANDBY_OID,
     // base-infra's outputs from an earlier deploy, as the outputs cache holds them.
     POSTGRES_FQDN: OUTPUTS.POSTGRES_FQDN, POSTGRES_AAD_ADMIN_PRINCIPAL_NAME: "psstamp-csi-mid",
@@ -1956,7 +1966,6 @@ test("the rendered userData is what the Windows image's launcher and attacher re
     [{}, pki.caPem],
     [{}, rotation],
     [{
-      WIN_WORKER_COORDINATION_HOST: "true",
       WIN_WORKER_FEED_ENDPOINTS: "https://feeds.example.com/one/index.json, https://feeds.example.com/two/index.json",
       WIN_WORKER_EXTRA_ENV: "EXAMPLE_API_URL=https://api.example.com/v1?a=b ; EXAMPLE_API_SCOPE=api://example/.default",
     }, pki.caPem],

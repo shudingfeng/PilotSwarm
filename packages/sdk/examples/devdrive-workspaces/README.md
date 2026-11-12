@@ -23,13 +23,13 @@ routing and personal-credential hooks of the
 
 | File | What it does |
 |---|---|
-| `index.mjs` | `register(worker)`: reads the settings, sets the workspace provider, the admission hook, the credential resolver and (without owner-only workers) the capacity requester, takes over the VM's heartbeat, and adds a shutdown hook |
+| `index.mjs` | `register(worker)`: reads the settings, sets the workspace provider, the admission hook and the credential resolver, takes over the VM's heartbeat, and adds a shutdown hook |
 | `provider.mjs` | The `WorkspaceProvider` and its LUN 0 state: the VM's LUN 0 mutex, attach, release, take-backs, orphans, the controller's release and growth requests |
 | `disk-pool-client.mjs` | The controller's worker routes over HTTPS, with a token from the deployment's token module and a TLS agent that trusts only the configured CA; `fetchWorkCredential()` for the deployment's tool modules |
 | `attacher-client.mjs` | The attacher's routes on the loopback address, with its token file |
 | `git-repos.mjs` | Everything the extension does with Git on the drive: the clean-detach record, crash recovery, the WIP push and the branch sync |
 | `heartbeat.mjs` | The VM's 15-second heartbeat and its take-over from a launcher |
-| `worker-hooks.mjs` | Admission, the credential resolver, the capacity requester and the owner binding |
+| `worker-hooks.mjs` | Admission, the credential resolver and the owner binding |
 
 ## Loading it
 
@@ -45,8 +45,13 @@ PS_WORKSPACE_ROOTS=repos=Q:\Repos
 `register()` refuses to load, and so stops the worker, on a platform other
 than Windows, without `PILOTSWARM_DISABLE_CHILD_WORKSPACE_INHERITANCE=1`
 (only a root session may hold a drive: a sub-agent that inherited the
-workspace on another VM would wait for its parent's drive), or without the
-controller's URL and token module.
+workspace on another VM would wait for its parent's drive), without
+`PS_WORKSPACE_ROOTS`, or without the controller's URL and token module.
+
+It sets no capacity requester. A worker that declares its owner's tag can't
+declare the capacity tag as well, so the coordination host
+(`deploy/providers/azure/linux-worker/`) sends every capacity request, to the
+controller's coordination port.
 
 ## Settings
 
@@ -58,14 +63,14 @@ controller's URL and token module.
 | `PS_DISK_CONTROLLER_CA_CERT` | unset: Node's default roots | A PEM file of the only CAs the client trusts: one, or two while the controller's CA rotates. Read again for every TLS agent, so the CA can rotate without a worker restart |
 | `PS_DISK_ATTACHER_URL` | `http://127.0.0.1:3099` | The attacher; must be `http://` on a loopback address |
 | `PS_DISK_ATTACHER_TOKEN_FILE` | `C:\pilotswarm\run\attacher.token` | The attacher's token; read again after a `401` |
-| `PS_WORKSPACE_ROOTS` | `repos=Q:\Repos` | The roots, `name=path` comma-separated, all on the drive's volume |
+| `PS_WORKSPACE_ROOTS` | — (required) | The roots, `name=path` comma-separated, all on the drive's volume, such as `repos=Q:\Repos` |
 | `PS_WORKSPACE_ADOPT` | `instructions,agents,skills` | What PilotSwarm may adopt from a working folder; `none` adopts nothing |
 | `PS_EMPTY_HOOKS_DIR` | unset: the null device | `core.hooksPath` of the extension's own Git calls. Point it at an empty folder the worker cannot write |
 | `PS_WIP_BRANCH_PREFIX` | `pilotswarm/wip/` | The WIP branch is `<prefix><rootSessionId>` on each repository's `origin` |
 | `PS_LAUNCH_ID` | a new ID | This service start's ID, reported in every heartbeat |
 | `WIN_WORKER_CONFIG_VERSION` | unset | The VM's configuration version, reported in every heartbeat |
 | `PILOTSWARM_WORKER_OWNER_TAG` | unset | The worker started bound to this owner (`owner.<ownerOid>`): no binding restart |
-| `PILOTSWARM_WORKER_OWNER_ONLY` | unset | `1`: no capacity requester, and no binding restart |
+| `PILOTSWARM_WORKER_OWNER_ONLY` | unset | `1`: an owner-only worker, which starts only once bound: no binding restart |
 | `PILOTSWARM_WORKSPACE_ATTACH_TIMEOUT_MS` | unset: 10 minutes | The attach budget: an attach that waited for LUN 0 past it starts nothing |
 
 The extension's Git calls use the worker's own Git settings for
@@ -158,7 +163,8 @@ Each heartbeat answer may ask for something:
   (`worker.requestExit(75, "bind", { drainTimeoutMs: 120_000 })`), so that
   its service manager starts it again with the owner's tag. The drain gets 2
   minutes, and the heartbeat keeps running, with `draining: true`, until the
-  worker stops.
+  worker stops. The repository's Azure deployment runs only owner-only
+  workers, which start bound, so none restarts there.
 
 ## Git on the drive
 
@@ -217,13 +223,19 @@ remote or credential helpers).
   again. A sync the drive already applied is never applied again, also after a
   lost heartbeat report and a detach.
 
-## Admission, credentials and capacity
+## Admission and credentials
 
 | Hook | Controller route | What passes on |
 |---|---|---|
 | `worker.setSessionAdmission` | `POST /v1/vms/admit` `{ sessionId, rootSessionId, isSystem }` | `admit`, `busy` (with `retryAfterMs`), `deny`; a controller that does not answer fails the turn, which is retried. The roots it admits are the VM's owner's, and only they may take a drive back here |
 | `worker.setPersonalCredentialResolver` | `POST /v1/credentials/model` `{ sessionId, rootSessionId, provider, secretName, secretVersion }` | `ok` with the token, `refused`, `busy`, `unavailable`. PilotSwarm keeps the token in memory by secret name and version and asks again after a `401` |
-| `worker.setOwnerCapacityRequester` (not with owner-only workers) | `POST /v1/vms/demand` `{ ownerOid, rootSessionId }` | `ok`, `deny`, `busy` (with `retryAfterMs`). Retried until the controller answers or PilotSwarm's 15-second signal fires; a refused route (`4xx`) is not retried. An owner whose tag holds no object ID gets `deny` (`OWNER_NOT_SUPPORTED`) without a request: the controller binds VMs to object IDs only |
+
+A worker with this resolver starts only when the Copilot CLI program passes
+the checks for people's tokens, in either credential mode
+(`PILOTSWARM_PERSONAL_SECRETS`): `PILOTSWARM_CLI_SECRET_ENV_VARS` and the
+protected copy of the program (`COPILOT_PKG_CACHE_HOME`; see "Fail closed" in
+[Personal Keys in an External Secret Store](../../../../docs/developer/reference/configuration.md#personal-keys-in-an-external-secret-store)).
+It also redacts GitHub tokens from what it persists.
 
 The deployment's tool modules get a root session's per-work credential
 (`POST /v1/credentials/work` `{ rootSessionId }`) with
@@ -242,7 +254,6 @@ A non-`2xx` answer counts as no answer, except where the table says otherwise.
 | `/v1/leases/detach` | `{ diskName, rootSessionId?, requestId, crashed }` | any `2xx`; idempotent, retried with the same `requestId` |
 | `/v1/vms/busy` | `{ rootSessionId }` | ignored |
 | `/v1/vms/admit` | `{ sessionId, rootSessionId, isSystem }` | `{ decision: "admit" \| "busy" \| "deny", message?, retryAfterMs? }` |
-| `/v1/vms/demand` | `{ ownerOid, rootSessionId }` | `{ decision: "ok" \| "deny" \| "busy", code?, message?, retryAfterMs? }`; `4xx`: given up |
 | `/v1/credentials/model` | `{ sessionId, rootSessionId, provider, secretName, secretVersion }` | `{ status: "ok", token }`, `{ status: "refused" \| "busy" \| "unavailable", message?, retryAfterMs? }` |
 | `/v1/credentials/work` | `{ rootSessionId }` | `{ status: "ok", credential }`, or refused, busy or unavailable |
 
