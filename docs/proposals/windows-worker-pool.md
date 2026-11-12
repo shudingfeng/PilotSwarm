@@ -4,7 +4,7 @@
 > **Date:** 2026-11-11
 > **Goal:** Let a PilotSwarm deployment run the agent sessions that need Windows on a pool of Windows VMs, each serving one
 > user, with a persistent Dev Drive per root session, behind opt-in settings that leave every existing deployment unchanged.
-> **Discussion:** `<ISSUE_LINK>`
+> **Discussion:** https://github.com/microsoft/PilotSwarm/issues/293
 > **Builds on:** [session workspaces](./session-workspaces.md) (the workspace provider hook),
 > [multitenant PilotSwarm](./multitenant-pilotswarm.md) §2c (tag routing), [worker registry](./worker-registry.md), the
 > deferred owner-scoped messaging item in [base-infra-deferred-items-may-26](./base-infra-deferred-items-may-26.md), and the
