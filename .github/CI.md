@@ -316,6 +316,13 @@ needs no cloud credentials to test:
 - **The SDK unit tests,** which include the Dev Drive extension's
   (`devdrive-workspace-provider.test.mjs`), run in both the Linux and the
   Windows jobs of PR checks.
+- **A fine-grained GitHub token, live**
+  (`packages/sdk/test/local/fine-grained-token-live.test.js`) is in the local
+  suite but skipped unless `PS_TEST_FINE_GRAINED_GH_PAT` holds a fine-grained
+  token with only the Copilot Requests permission, which no workflow sets. Run
+  it with such a token when you change the fine-grained token gate or the
+  Copilot CLI program's start. The other Copilot CLI program tests need no
+  credentials.
 - **The Windows scripts' tests** parse every PowerShell script when the runner
   has PowerShell 7. Their Windows-only checks (Windows PowerShell 5.1, the disk
   script's process search, the drain and the seed's `-Verify` run for real) run

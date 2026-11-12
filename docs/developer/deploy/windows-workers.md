@@ -321,7 +321,11 @@ sequenceDiagram
   each registration writes a new secret `ghcp-<owner>-<32 hex>`, where `<owner>`
   is the owner's subject (the Entra object ID), tagged `ownerOid` with the same
   value and expiring with the token. An update writes a new version, and the
-  provider row keeps only the store's reference, never the token.
+  provider row keeps only the store's reference, never the token. Workers
+  don't use a key saved in the database before the switch: a turn on a
+  provider whose key is still in its row fails until its owner updates the
+  key, which moves it to the vault, and a legacy per-user key isn't used at
+  all.
 - **Registration happens only on the Portal.** In external mode an agent's
   `manage_provider` tool refuses to add a personal provider or change its key.
 - **The store is pluggable.** `PILOTSWARM_PERSONAL_SECRET_STORE_MODULE` names
@@ -381,13 +385,17 @@ During the controller's start-up grace every credential request answers `busy`
   the Copilot CLI program with `--secret-env-vars`, which keeps the variable out
   of the environments of shells, MCP servers and hooks. The program runs from
   an unpacked copy the worker can only read (`COPILOT_PKG_CACHE_HOME`), so no
-  session can plant a modified one. See
+  session can plant a modified one. A worker with the extension's credential
+  resolver doesn't start unless all of this holds, whatever
+  `PILOTSWARM_PERSONAL_SECRETS` says, so a VM built without these settings
+  runs no turn. See
   [Copilot CLI Environment](../reference/configuration.md#copilot-cli-environment).
 - **Out of sight is not out of reach.** The program redacts nothing it prints,
   and an agent that reads the token from memory can print it. PilotSwarm
   redacts token patterns from the events, tool output and logs it persists,
   and from what an agent sends another session, so a sub-agent gets
-  `[REDACTED]` where its parent quoted a token. It doesn't redact what agents
+  `[REDACTED]` where its parent quoted a token; a worker with a credential
+  resolver always redacts GitHub tokens. It doesn't redact what agents
   store on purpose (facts, artifacts and canvas content), nor the CLI's own
   session files, which dehydration archives to Blob as the CLI wrote them.
 - **Rotation.** An update on the Portal writes a new version, which the next
@@ -1017,6 +1025,12 @@ See [Session Message Scope](../reference/configuration.md#session-message-scope)
   the image; a Windows x64 machine with Node.js 24.22.1 to pack releases.
 - **A dispatcher** (`DISPATCHER_SP_OBJECT_ID`), the only caller that claims
   drives.
+- **No personal keys in the database.** Before you turn on
+  `PILOTSWARM_PERSONAL_SECRETS=external`, have each owner update their personal
+  GitHub provider's key, which then moves to the personal vault, or delete the
+  provider, and clear the legacy per-user keys. A row keeps a key saved before
+  the switch, where every worker's database identity can read it, and workers
+  in external mode no longer use it. The deploy can't check this.
 
 `deploy.mjs` refuses a missing requirement before any step, and also refuses
 `WIN_WORKER_MIN_RUNNING=0` without the coordination host, the coordination host
@@ -1986,7 +2000,7 @@ settings file adds:
 | Setting | Upstream default | For a shared pool |
 |---|---|---|
 | `PILOTSWARM_PERSONAL_SECRETS` | `database` | `external` |
-| `PILOTSWARM_CLI_SECRET_ENV_VARS` | unset | `COPILOT_SDK_AUTH_TOKEN`, which `external` mode requires |
+| `PILOTSWARM_CLI_SECRET_ENV_VARS` | unset | `COPILOT_SDK_AUTH_TOKEN`, which `external` mode and the extension's credential resolver require |
 | `PILOTSWARM_REQUIRE_FINE_GRAINED_GH_PAT` | unset (off) | `1` |
 | `PILOTSWARM_SESSION_MESSAGE_SCOPE` | `fleet` | `owner` |
 | `PILOTSWARM_REDACT_SECRET_PREFIXES` | unset | The prefixes of your own credentials, such as the per-work credential's |
@@ -2137,6 +2151,17 @@ script's exit code doesn't become the command's.
 - **The SDK.** Owner routing, owner-only workers, admission, personal
   credentials, delegation and the message scope have unit tests in
   `packages/sdk/test/unit/` and local tests in `packages/sdk/test/local/`.
+- **The Copilot CLI program.** Local tests run the real program against the
+  scripted model and a local stand-in for GitHub's API
+  (`packages/sdk/test/helpers/fake-github-copilot.mjs`), so nothing leaves the
+  machine: what `--secret-env-vars` hides and what it doesn't redact
+  (`cli-program-secret-env.test.js`), every hook source, switch and session
+  kind (`cli-hooks.test.js`), the home's placeholders and the package cache
+  (`cli-program-planted-files.test.js`), and that a resolved token reaches the
+  CLI and no file (`personal-credential-cli.test.js`). They skip, saying why,
+  without the program. `fine-grained-token-live.test.js` runs a turn on GitHub
+  Copilot with a real fine-grained token, and is skipped unless
+  `PS_TEST_FINE_GRAINED_GH_PAT` holds one.
 
 No test reaches Azure, a scale set or a data disk. The
 [Windows image README](../../../deploy/providers/azure/windows/README.md#what-only-a-real-vm-can-verify)

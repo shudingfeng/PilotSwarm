@@ -42,6 +42,7 @@ import { createProviderTools, holdsProviderTools } from "./provider-tools.js";
 import { requiresFineGrainedGitHubTokens } from "./provider-store.js";
 import {
     PersonalCredentialError,
+    personalSecretsMode,
     readsAsAuthFailure,
     type ExternalSecretRef,
     type PersonalCredentialAnswer,
@@ -1402,12 +1403,14 @@ export class SessionManager {
         let sdkModelName = String(modelRef || "").trim();
         // Hoisted out of the try: the declared-capability check below needs it.
         let descriptor: ReturnType<NonNullable<typeof this.workerDefaults.modelProviders>["getDescriptor"]> | undefined;
-        // A key in the deployment's secret store: only that key may ask.
+        // A key in the deployment's secret store: only that key may ask. A
+        // personal key that external mode leaves unused: no key may ask.
         let externalSecret = false;
         try {
             const normalized = this.normalizeModelRef(modelRef || undefined);
             descriptor = this.workerDefaults.modelProviders?.getDescriptor(normalized);
-            externalSecret = Boolean(this.workerDefaults.modelProviders?.resolve(normalized)?.externalSecret);
+            const resolved = this.workerDefaults.modelProviders?.resolve(normalized);
+            externalSecret = Boolean(resolved?.externalSecret || resolved?.databaseKeyIgnored);
             if (descriptor?.modelName) sdkModelName = descriptor.modelName;
             else if (normalized) sdkModelName = normalized.includes(":") ? normalized.split(":").slice(1).join(":") : normalized;
         } catch {
@@ -1548,6 +1551,10 @@ export class SessionManager {
         this.personalCredentials.clear();
     }
 
+    getPersonalCredentialResolver(): PersonalCredentialResolver | null {
+        return this.personalCredentialResolver;
+    }
+
     /**
      * Drop the cached token this session's turn ran with, after the model
      * refused it: the session's next turn asks the resolver again.
@@ -1560,8 +1567,10 @@ export class SessionManager {
     /**
      * Resolve this turn's key when the session's model runs on a key kept in
      * the deployment's secret store; otherwise do nothing. Throws a
-     * PersonalCredentialError the turn must act on. Called before anything is
-     * attached or created, so the session's own resolution finds it cached.
+     * PersonalCredentialError the turn must act on, also for a personal key
+     * that external mode leaves unused in the database. Called before
+     * anything is attached or created, so the session's own resolution finds
+     * it cached.
      */
     async preparePersonalCredential(sessionId: string, model: string | undefined, preloadedRow?: any): Promise<void> {
         let effectiveModel = "";
@@ -1570,7 +1579,8 @@ export class SessionManager {
         } catch {
             return;
         }
-        if (!effectiveModel || !this.workerDefaults.modelProviders?.resolve(effectiveModel)?.externalSecret) return;
+        const resolved = effectiveModel ? this.workerDefaults.modelProviders?.resolve(effectiveModel) : undefined;
+        if (!resolved?.externalSecret && !resolved?.databaseKeyIgnored) return;
         await this._resolveSessionGitHubToken(sessionId, {} as ManagedSessionConfig, effectiveModel, preloadedRow);
     }
 
@@ -1939,6 +1949,8 @@ export class SessionManager {
      *      effective model resolves to a `type=github` provider — for
      *      BYOK Anthropic/OpenAI sessions the SDK never reads the token
      *      so there is no point spinning up a per-user CLI process.
+     *      With PILOTSWARM_PERSONAL_SECRETS=external only the System key
+     *      is read this way, never a person's.
      *   2. Worker-default resolution (constructor token > registry).
      *
      * Returns `undefined` to mean "use the worker default", which is the
@@ -1957,6 +1969,16 @@ export class SessionManager {
         // not the worker's GITHUB_TOKEN, not another provider.
         if (resolved?.type === "github" && resolved.externalSecret) {
             return this._resolvePersonalCredential(sessionId, resolved.providerId, resolved.externalSecret, preloadedRow);
+        }
+        // External mode leaves a personal key saved in the database unused,
+        // and nothing stands in for it either. "Authentication failed" ends
+        // the turn without a retry, as a refused key does.
+        if (resolved?.type === "github" && resolved.databaseKeyIgnored) {
+            throw new PersonalCredentialError("refused", resolved.providerId,
+                `Authentication failed: provider "${resolved.providerId}" has no key in the deployment's secret store. `
+                + "Its key was saved in the database, which this deployment does not use for personal keys "
+                + "(PILOTSWARM_PERSONAL_SECRETS=external). Update the provider's key, which moves it to the store, "
+                + "then send the prompt again.");
         }
         if (!this.sessionCatalog) return undefined;
 
@@ -1990,6 +2012,12 @@ export class SessionManager {
             }
             : (row?.isSystem ? SYSTEM_USER_PRINCIPAL : null);
         if (!principal) return undefined;
+        // External mode keeps personal keys out of the database, so a
+        // person's legacy key is not used. The System key, which an
+        // administrator stores for the deployment, still is.
+        const systemKey = principal.provider === SYSTEM_USER_PRINCIPAL.provider
+            && principal.subject === SYSTEM_USER_PRINCIPAL.subject;
+        if (!systemKey && personalSecretsMode() === "external") return undefined;
 
         try {
             const userKey = await this.sessionCatalog.getUserGitHubCopilotKey(principal);
@@ -2675,8 +2703,9 @@ export class SessionManager {
         // is wired in. Skipping the await on the no-catalog path matters
         // for the SessionManager unit tests that exercise lock ordering
         // by counting microtasks before the first `resumeSession()` call.
-        // A key in the deployment's secret store is resolved either way.
-        const userGithubToken = this.sessionCatalog || resolvedProvider?.externalSecret
+        // A key in the deployment's secret store is resolved either way,
+        // and a personal key that external mode leaves unused refuses either way.
+        const userGithubToken = this.sessionCatalog || resolvedProvider?.externalSecret || resolvedProvider?.databaseKeyIgnored
             ? await this._resolveSessionGitHubToken(sessionId, config, effectiveModel, catalogRow)
             : undefined;
         if (resolvedProvider?.type === "github" && !userGithubToken && !this.githubToken && !resolvedProvider.githubToken) {
