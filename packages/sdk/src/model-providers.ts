@@ -173,6 +173,14 @@ export interface ModelProviderConfig {
      */
     externalSecret?: ExternalSecretRef;
     /**
+     * With PILOTSWARM_PERSONAL_SECRETS=external, a personal provider whose
+     * GitHub token is still in its database row, saved before the setting was
+     * turned on. Workers don't use that token: the provider's turns fail
+     * until its owner updates the key, which moves it to the secret store.
+     * Set only by the provider catalog; a model-providers file cannot set it.
+     */
+    databaseKeyIgnored?: true;
+    /**
      * API endpoint URL. Required for non-github providers.
      * For Azure: base URL without /deployments/ (e.g. https://resource.openai.azure.com/openai)
      * For OpenAI: https://api.openai.com/v1
@@ -263,6 +271,8 @@ export interface ResolvedProvider {
      * credential resolver, and nothing else stands in for it.
      */
     externalSecret?: ExternalSecretRef;
+    /** See ModelProviderConfig.databaseKeyIgnored: no token, and nothing stands in for it. */
+    databaseKeyIgnored?: true;
     /**
      * True when this provider authenticates as the worker rather than with a
      * key, so `sdkProvider` carries no `apiKey` and is incomplete on its own.
@@ -437,8 +447,11 @@ export class ModelProviderRegistry {
         // A secret-store reference belongs to a provider row. Only the
         // runtime registry, built from those rows, may carry one.
         if (!opts.externalSecrets) {
-            const named = config.providers.find((p) => p.externalSecret !== undefined);
-            if (named) throw new Error(`Provider "${named.id}": externalSecret is not a model-providers setting.`);
+            const named = config.providers.find((p) => p.externalSecret !== undefined || p.databaseKeyIgnored !== undefined);
+            if (named) {
+                const field = named.externalSecret !== undefined ? "externalSecret" : "databaseKeyIgnored";
+                throw new Error(`Provider "${named.id}": ${field} is not a model-providers setting.`);
+            }
         }
 
         // Filter to providers whose credentials are actually available.
@@ -584,6 +597,7 @@ export class ModelProviderRegistry {
                 modelName: desc.modelName,
                 githubToken: resolveEnvValue(provider.githubToken),
                 ...(provider.externalSecret ? { externalSecret: { ...provider.externalSecret } } : {}),
+                ...(provider.databaseKeyIgnored ? { databaseKeyIgnored: true as const } : {}),
             };
         }
 

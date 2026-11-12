@@ -646,11 +646,13 @@ The SDK exports both contents (`CLI_HOOKS_OFF_SETTINGS_TEXT`,
 of time: a file already in its form is never written. The files in the home's
 `hooks/` folder still run, so keep that folder empty and read-only.
 
-The setting rewrites the CLI home's settings, so it never runs against an
-account's own `~/.copilot`: every CLI needs `COPILOT_HOME`, and the worker
+The setting rewrites the CLI home's settings, so it never runs against the
+CLI's default home: every CLI needs an explicit `COPILOT_HOME`, and the worker
 refuses to start unless its session state folder (`sessionStateDir`) is
-`COPILOT_HOME`'s `session-state` folder. Unset, PilotSwarm passes no
-`enableFileHooks` and leaves both files alone.
+`COPILOT_HOME`'s `session-state` folder. Point `COPILOT_HOME` at a folder of
+the worker's own, never at an account's `~/.copilot`: the worker doesn't check
+which folder it is. Unset, PilotSwarm passes no `enableFileHooks` and leaves
+both files alone.
 
 ## Owner Routing (optional)
 
@@ -1227,8 +1229,25 @@ worker's `GITHUB_TOKEN`, the first GitHub provider or another provider. The
 model's vision lookup uses the same key or none. Replacing the resolver
 empties the cache.
 
-**Redaction.** In external mode PilotSwarm redacts GitHub tokens
-(`github_pat_`, `ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`) from what it persists.
+A worker with a resolver, in either mode, makes the checks that external mode
+makes when it starts (see **Fail closed** below), and doesn't start when one
+fails; a resolver set once `start()` was called is checked when it is set,
+which throws on a failure. Such a worker also redacts GitHub tokens: it holds
+people's tokens.
+
+**Keys saved before external mode.** In external mode a worker doesn't use a
+personal GitHub provider's key that is still in its row, or a person's legacy
+key (`setCurrentUserGitHubCopilotKey`). A turn on such a provider fails as an
+authentication failure and is not retried: the owner uses **Update Key**,
+which moves the key to the store, and sends the prompt again. A session on a
+legacy `github-copilot:` model runs as if its owner had set no key. The
+System key, which an administrator stores for system sessions, still works.
+Such keys stay in the database until they are updated or deleted, so update
+or delete them before you turn the setting on.
+
+**Redaction.** In external mode, and in a worker with a credential resolver,
+PilotSwarm redacts GitHub tokens (`github_pat_`, `ghp_`, `gho_`, `ghu_`,
+`ghs_`, `ghr_`) from what it persists.
 In either mode it also redacts tokens that start with a prefix listed in
 `PILOTSWARM_REDACT_SECRET_PREFIXES` (default: unset), comma-separated. Each
 prefix is at least three letters, digits, `_` or `-`; the portal and workers
@@ -1269,7 +1288,8 @@ PILOTSWARM_PERSONAL_SECRET_STORE_MODULE=/opt/pilotswarm/secret-store.mjs   # por
 PILOTSWARM_REDACT_SECRET_PREFIXES=acme_
 ```
 
-**Fail closed.** In external mode a worker refuses to start unless:
+**Fail closed.** In external mode, and with a credential resolver in either
+mode, a worker refuses to start unless:
 
 1. `PILOTSWARM_CLI_SECRET_ENV_VARS` names `COPILOT_SDK_AUTH_TOKEN`, so every
    CLI is the Copilot CLI program and keeps the token from agents' shells and
@@ -1318,12 +1338,13 @@ argument, the image holds no unpacked copy.
   its permissions back: let another account, such as Administrators, own it.
   The folders above `COPILOT_PKG_CACHE_HOME` are not checked; an account that
   can write one can replace the copy.
-- A key stored in a row before the setting was turned on keeps working until
-  it is updated, which moves it to the store. The keys of shared providers
-  stay in the database.
+- Keys saved in the database before the setting was turned on stay there,
+  unused, until they are updated or deleted
+  ([above](#personal-keys-in-an-external-secret-store)). The keys of shared
+  providers stay in the database.
 - After a switch back to `database`, saved references keep resolving through
-  the workers' resolver. Updating such a provider's key stores it in the row
-  and leaves the old secret in the store.
+  the workers' resolver, with its checks and redaction. Updating such a
+  provider's key stores it in the row and leaves the old secret in the store.
 - A provider removed without being deleted, as when the database removes a
   user's providers with the user, leaves its secret in the store.
 - A key in the store is checked only when it is saved, like any other key.
@@ -1604,7 +1625,8 @@ desired state rather than maintain a second long-lived configuration source.
 With [`PILOTSWARM_REQUIRE_FINE_GRAINED_GH_PAT`](#fine-grained-github-tokens-only)
 on, the portal refuses to set a key through them; clearing one still works.
 With [`PILOTSWARM_PERSONAL_SECRETS=external`](#personal-keys-in-an-external-secret-store),
-it refuses a key on `setCurrentUserGitHubCopilotKey`.
+it refuses a key on `setCurrentUserGitHubCopilotKey`, and workers don't use a
+person's key already stored there; the System key still works.
 
 ## npm Scripts
 

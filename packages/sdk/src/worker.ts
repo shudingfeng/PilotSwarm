@@ -38,8 +38,8 @@ import { createSweeperTools } from "./sweeper-tools.js";
 import { createResourceManagerTools, eventRetentionMinutesFromEnv } from "./resourcemgr-tools.js";
 import { cliSecretEnvVars, copilotCliProgramPath, scrubbedCliEnvironment } from "./copilot-client.js";
 import { assertCliProgramForExternalSecrets } from "./cli-program-guard.js";
-import { personalSecretsMode, type PersonalCredentialResolver } from "./personal-secret-store.js";
-import { installLogRedaction } from "./secret-redaction.js";
+import { personalSecretsMode, type PersonalCredentialResolver, type PersonalSecretsMode } from "./personal-secret-store.js";
+import { installLogRedaction, redactGitHubTokens } from "./secret-redaction.js";
 import { assertCliHooksHome } from "./cli-hooks.js";
 import { composeSystemPrompt, mergePromptSections } from "./prompt-layering.js";
 import { buildSchemaIdentifier } from "./prompt-layers.js";
@@ -70,6 +70,7 @@ const DEFAULT_SESSION_STATE_DIR = path.join(os.homedir(), ".copilot", "session-s
 const DEFAULT_ORCHESTRATION_CONCURRENCY = 2;
 const DEFAULT_WORKER_CONCURRENCY = 2;
 const DEFAULT_DUROXIDE_PG_POOL_MAX = 10;
+const PERSONAL_CREDENTIAL_RESOLVER = "A personal credential resolver (worker.setPersonalCredentialResolver)";
 
 function normalizeAgentIdentity(value: unknown): string {
     return String(value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "");
@@ -398,6 +399,12 @@ export class PilotSwarmWorker {
     private _agentPackagesRefreshError: string | null = null;
     private _featureFlags: FeatureFlagCache | null = null;
     private _registryReporting = false;
+    /** The Copilot CLI program passed the checks for people's tokens (assertCliProgramForExternalSecrets). */
+    private _cliProgramChecked = false;
+    /** start() was called: a personal credential resolver set from then on is checked when it is set. */
+    private _startCalled = false;
+    /** PILOTSWARM_PERSONAL_SECRETS, read once: the provider catalog is rebuilt before every turn. */
+    private readonly _personalSecrets: PersonalSecretsMode;
 
     constructor(options: PilotSwarmWorkerOptions) {
         this.config = {
@@ -416,7 +423,11 @@ export class PilotSwarmWorker {
         if (cliSecretEnvVars()) copilotCliProgramPath();
         // External personal secrets start only with a CLI that keeps the
         // token from agents and runs only its own, protected code.
-        if (personalSecretsMode() === "external") assertCliProgramForExternalSecrets();
+        this._personalSecrets = personalSecretsMode();
+        if (this._personalSecrets === "external") {
+            assertCliProgramForExternalSecrets();
+            this._cliProgramChecked = true;
+        }
         // A malformed PILOTSWARM_REDACT_SECRET_PREFIXES stops the worker here;
         // when redaction is on, this process's logs are redacted from now on.
         installLogRedaction();
@@ -605,7 +616,7 @@ export class PilotSwarmWorker {
                 store.getDefaults(null),
             ]);
             this._modelProviders = buildRuntimeRegistry(
-                this._modelProviderTypes, credentials, defaults.cluster.model);
+                this._modelProviderTypes, credentials, defaults.cluster.model, { personalSecrets: this._personalSecrets });
             this.sessionManager.setModelProviders(this._modelProviders);
         } catch (err) {
             // Provider identity and credentials are authoritative in CMS.
@@ -715,9 +726,26 @@ export class PilotSwarmWorker {
      * only credential: `refused` ends the turn as an authentication failure,
      * `unavailable` (or a throw) fails it and the turn is retried, and `busy`
      * holds the session the way a busy workspace does. Pass null to remove it.
+     *
+     * In either mode, a worker with a resolver holds people's tokens: it
+     * starts only when the Copilot CLI program passes the checks that
+     * external mode makes, and it redacts GitHub tokens. A resolver set
+     * before start() is checked there; one set once start() was called is
+     * checked here, and refused by a throw.
      */
     setPersonalCredentialResolver(resolver: PersonalCredentialResolver | null): void {
+        if (resolver && this._startCalled) this._prepareForPersonalCredentials();
         this.sessionManager.setPersonalCredentialResolver(resolver);
+    }
+
+    /** Throw unless the CLI program keeps people's tokens from agents; then redact GitHub tokens in this process. */
+    private _prepareForPersonalCredentials(): void {
+        if (!this._cliProgramChecked) {
+            assertCliProgramForExternalSecrets(process.env, { subject: PERSONAL_CREDENTIAL_RESOLVER });
+            this._cliProgramChecked = true;
+        }
+        redactGitHubTokens();
+        installLogRedaction();
     }
 
     /**
@@ -729,7 +757,9 @@ export class PilotSwarmWorker {
      * capacity tag and take those requests. An owner-only worker never
      * takes them, and a worker with an owner tag that is not owner-only
      * refuses to start with one: the owner tag and the capacity tag together
-     * exceed duroxide's five tags. Null removes it.
+     * exceed duroxide's five tags. With a requester, the worker also refuses,
+     * without a retry, a turn whose session's creation config holds an owner
+     * tag that the turn doesn't carry (`OWNER_TAG_MISSING`). Null removes it.
      */
     setOwnerCapacityRequester(requester: OwnerCapacityRequester | null): void {
         if (requester !== null && typeof requester !== "function") {
@@ -845,6 +875,10 @@ export class PilotSwarmWorker {
             ownerOnly: this.config.ownerOnly === true,
             ownerCapacity: this.sessionManager.getOwnerCapacityRequester() !== null,
         });
+        // People's tokens: refuse an unsafe Copilot CLI before anything opens, too.
+        // A resolver set from here on is checked when it is set.
+        this._startCalled = true;
+        if (this.sessionManager.getPersonalCredentialResolver()) this._prepareForPersonalCredentials();
         this._stopRequested = false;
         this._exitRequest = null;
         this._shutdownResult = null;

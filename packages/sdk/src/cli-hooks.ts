@@ -93,9 +93,10 @@ export function resetCliHomeSettings(home: string): Promise<void> {
 
 /**
  * The setting rewrites the CLI home's settings, so the worker refuses it
- * unless that home is a folder of its own: `COPILOT_HOME` must be set and the
- * session state folder must be its `session-state` folder, never an
- * account's own `~/.copilot`.
+ * unless that home is named explicitly: `COPILOT_HOME` must be set, so the
+ * CLI's default home is never rewritten, and the session state folder must
+ * be its `session-state` folder. Which folder it names is the deployment's
+ * choice: one of the worker's own, never an account's `~/.copilot`.
  */
 export function assertCliHooksHome(sessionStateDir: string, env: NodeJS.ProcessEnv = process.env): void {
     if (!cliHooksDisabled(env)) return;

@@ -2,10 +2,11 @@
  * Secret redaction for what PilotSwarm persists: session events (tool output
  * included), turn results and logs.
  *
- * With PILOTSWARM_PERSONAL_SECRETS=external, GitHub tokens (`github_pat_`,
- * `ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`) are redacted. Prefixes listed in
- * PILOTSWARM_REDACT_SECRET_PREFIXES are redacted in either mode. With
- * neither setting, everything passes through untouched.
+ * With PILOTSWARM_PERSONAL_SECRETS=external, and in a worker with a personal
+ * credential resolver, GitHub tokens (`github_pat_`, `ghp_`, `gho_`, `ghu_`,
+ * `ghs_`, `ghr_`) are redacted. Prefixes listed in
+ * PILOTSWARM_REDACT_SECRET_PREFIXES are redacted in either mode. With none
+ * of these, everything passes through untouched.
  *
  * A match keeps its prefix, so a reader can tell which kind of secret was
  * there: `ghp_abc…` becomes `ghp_[REDACTED]`.
@@ -48,12 +49,24 @@ interface Redaction {
 }
 
 let compiled: { key: string; redaction: Redaction | null } | null = null;
+// Set for good by redactGitHubTokens().
+let githubTokensAlways = false;
+
+/**
+ * From now on, redact GitHub tokens in this process whatever
+ * PILOTSWARM_PERSONAL_SECRETS says. A worker with a personal credential
+ * resolver calls it, because it holds people's tokens. There is no way
+ * back: a token fetched once may still be in use.
+ */
+export function redactGitHubTokens(): void {
+    githubTokensAlways = true;
+}
 
 /** What these settings redact, or null when they redact nothing. Throws on a malformed setting. */
 function redactionFor(env: Record<string, string | undefined>): Redaction | null {
-    const key = `${env[PERSONAL_SECRETS_SETTING] ?? ""}\u0000${env[REDACT_SECRET_PREFIXES_SETTING] ?? ""}`;
+    const key = `${githubTokensAlways ? 1 : 0}\u0000${env[PERSONAL_SECRETS_SETTING] ?? ""}\u0000${env[REDACT_SECRET_PREFIXES_SETTING] ?? ""}`;
     if (compiled?.key === key) return compiled.redaction;
-    const github = personalSecretsMode(env) === "external";
+    const github = personalSecretsMode(env) === "external" || githubTokensAlways;
     const listed = redactSecretPrefixes(env);
     const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\-]/g, "\\$&");
     const alternatives = [
@@ -161,8 +174,8 @@ function redactDurableTraces(): void {
 
 /**
  * Redact secrets from this process's logs: everything written to stdout and
- * stderr, and the orchestration and activity traces. Does nothing when the
- * settings redact nothing; installing twice changes nothing. A secret split
+ * stderr, and the orchestration and activity traces. Does nothing when
+ * nothing is redacted; installing twice changes nothing. A secret split
  * across two writes is not recognized.
  */
 export function installLogRedaction(env: Record<string, string | undefined> = process.env): boolean {
