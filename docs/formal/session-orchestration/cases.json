@@ -4984,6 +4984,7 @@
    "comment": "vh.safety (latest-1083; expected PASS): 91def26a: a thrown-turn retry, a queued prompt with the digest in its text, an unread prompt and set_model, a cron schedule: nothing lost, one model call, the 1.0.82 history replays.",
    "spec": "Spec",
    "constants": {
+    "From": "\"82\"",
     "PendKind": "\"thrown\"",
     "SourceStamp": "\"82\"",
     "RegistryOK": "TRUE",
@@ -4993,6 +4994,7 @@
     "FifoTookDigest": "TRUE",
     "AllowLateCancel": "FALSE",
     "AllowSweepSetModel": "FALSE",
+    "Extra": "{}",
     "FieldFault": "\"none\""
    },
    "invariants": [
@@ -5029,6 +5031,7 @@
    "comment": "vh.live (latest-1083; expected PASS): 91def26a: everything is processed on 1.0.83.",
    "spec": "LiveSpec",
    "constants": {
+    "From": "\"82\"",
     "PendKind": "\"thrown\"",
     "SourceStamp": "\"82\"",
     "RegistryOK": "TRUE",
@@ -5038,6 +5041,7 @@
     "FifoTookDigest": "TRUE",
     "AllowLateCancel": "FALSE",
     "AllowSweepSetModel": "FALSE",
+    "Extra": "{}",
     "FieldFault": "\"none\""
    },
    "invariants": [
@@ -5076,6 +5080,7 @@
    "comment": "vh.plain (latest-1083; expected PASS): 91def26a: a plain pending prompt.",
    "spec": "LiveSpec",
    "constants": {
+    "From": "\"82\"",
     "PendKind": "\"plain\"",
     "SourceStamp": "\"82\"",
     "RegistryOK": "TRUE",
@@ -5085,6 +5090,7 @@
     "FifoTookDigest": "TRUE",
     "AllowLateCancel": "FALSE",
     "AllowSweepSetModel": "FALSE",
+    "Extra": "{}",
     "FieldFault": "\"none\""
    },
    "invariants": [
@@ -5123,6 +5129,7 @@
    "comment": "vh.returned-error (latest-1083; expected PASS): 91def26a: a returned error's retry stays the pending prompt and runs once.",
    "spec": "LiveSpec",
    "constants": {
+    "From": "\"82\"",
     "PendKind": "\"retErr\"",
     "SourceStamp": "\"82\"",
     "RegistryOK": "TRUE",
@@ -5132,6 +5139,7 @@
     "FifoTookDigest": "TRUE",
     "AllowLateCancel": "FALSE",
     "AllowSweepSetModel": "FALSE",
+    "Extra": "{}",
     "FieldFault": "\"none\""
    },
    "invariants": [
@@ -5170,6 +5178,7 @@
    "comment": "vh.lossy (latest-1083; expected PASS): 91def26a: a lossy hand-off with its rehydration notice.",
    "spec": "LiveSpec",
    "constants": {
+    "From": "\"82\"",
     "PendKind": "\"lossy\"",
     "SourceStamp": "\"82\"",
     "RegistryOK": "TRUE",
@@ -5179,6 +5188,7 @@
     "FifoTookDigest": "TRUE",
     "AllowLateCancel": "FALSE",
     "AllowSweepSetModel": "FALSE",
+    "Extra": "{}",
     "FieldFault": "\"none\""
    },
    "invariants": [
@@ -5215,6 +5225,7 @@
    "comment": "vh.older-floor (latest-1083; expected PASS): 91def26a: an input from 1.0.47-1.0.81 (no source version) also converts the thrown retry.",
    "spec": "Spec",
    "constants": {
+    "From": "\"82\"",
     "PendKind": "\"thrown\"",
     "SourceStamp": "\"absent\"",
     "RegistryOK": "TRUE",
@@ -5224,6 +5235,7 @@
     "FifoTookDigest": "TRUE",
     "AllowLateCancel": "FALSE",
     "AllowSweepSetModel": "FALSE",
+    "Extra": "{}",
     "FieldFault": "\"none\""
    },
    "invariants": [
@@ -5260,6 +5272,7 @@
    "comment": "vh.no-digest-in-fifo (latest-1083; expected PASS): 91def26a: the digest is a carried input field; two unread prompts and set_model.",
    "spec": "LiveSpec",
    "constants": {
+    "From": "\"82\"",
     "PendKind": "\"thrown\"",
     "SourceStamp": "\"82\"",
     "RegistryOK": "TRUE",
@@ -5269,6 +5282,7 @@
     "FifoTookDigest": "FALSE",
     "AllowLateCancel": "FALSE",
     "AllowSweepSetModel": "FALSE",
+    "Extra": "{}",
     "FieldFault": "\"none\""
    },
    "invariants": [
@@ -5302,6 +5316,7 @@
    "comment": "fault.vh-registry-unfrozen (latest-1083; expected safety): the 1.0.82 entry follows LATEST, so 1.0.82 is unregistered and its in-flight history cannot replay.",
    "spec": "Spec",
    "constants": {
+    "From": "\"82\"",
     "PendKind": "\"thrown\"",
     "SourceStamp": "\"82\"",
     "RegistryOK": "FALSE",
@@ -5311,6 +5326,7 @@
     "FifoTookDigest": "TRUE",
     "AllowLateCancel": "FALSE",
     "AllowSweepSetModel": "FALSE",
+    "Extra": "{}",
     "FieldFault": "\"none\""
    },
    "invariants": [
@@ -5339,6 +5355,7 @@
    "comment": "fault.vh-source-stamp-1083 (latest-1083; expected safety): the 1.0.82 handler stamps 1.0.83, the thrown key is dropped, the model runs again.",
    "spec": "Spec",
    "constants": {
+    "From": "\"82\"",
     "PendKind": "\"thrown\"",
     "SourceStamp": "\"83\"",
     "RegistryOK": "TRUE",
@@ -5348,6 +5365,7 @@
     "FifoTookDigest": "TRUE",
     "AllowLateCancel": "FALSE",
     "AllowSweepSetModel": "FALSE",
+    "Extra": "{}",
     "FieldFault": "\"none\""
    },
    "invariants": [
@@ -5376,6 +5394,7 @@
    "comment": "fault.vh-drop-cron (latest-1083; expected safety): The cron schedule is not carried.",
    "spec": "Spec",
    "constants": {
+    "From": "\"82\"",
     "PendKind": "\"thrown\"",
     "SourceStamp": "\"82\"",
     "RegistryOK": "TRUE",
@@ -5385,6 +5404,7 @@
     "FifoTookDigest": "TRUE",
     "AllowLateCancel": "FALSE",
     "AllowSweepSetModel": "FALSE",
+    "Extra": "{}",
     "FieldFault": "\"cron\""
    },
    "invariants": [
@@ -5413,6 +5433,7 @@
    "comment": "fault.vh-drop-digest (latest-1083; expected safety): The pending child digest is not carried.",
    "spec": "Spec",
    "constants": {
+    "From": "\"82\"",
     "PendKind": "\"thrown\"",
     "SourceStamp": "\"82\"",
     "RegistryOK": "TRUE",
@@ -5422,6 +5443,7 @@
     "FifoTookDigest": "FALSE",
     "AllowLateCancel": "FALSE",
     "AllowSweepSetModel": "FALSE",
+    "Extra": "{}",
     "FieldFault": "\"digest\""
    },
    "invariants": [
@@ -5450,6 +5472,7 @@
    "comment": "fault.vh-drop-notice (latest-1083; expected safety): The rehydration notice is not carried.",
    "spec": "Spec",
    "constants": {
+    "From": "\"82\"",
     "PendKind": "\"lossy\"",
     "SourceStamp": "\"82\"",
     "RegistryOK": "TRUE",
@@ -5459,6 +5482,7 @@
     "FifoTookDigest": "TRUE",
     "AllowLateCancel": "FALSE",
     "AllowSweepSetModel": "FALSE",
+    "Extra": "{}",
     "FieldFault": "\"notice\""
    },
    "invariants": [
@@ -5487,6 +5511,7 @@
    "comment": "fault.vh-drop-fifo (latest-1083; expected safety): The queued prompt (KV FIFO) is not kept.",
    "spec": "Spec",
    "constants": {
+    "From": "\"82\"",
     "PendKind": "\"thrown\"",
     "SourceStamp": "\"82\"",
     "RegistryOK": "TRUE",
@@ -5496,6 +5521,7 @@
     "FifoTookDigest": "TRUE",
     "AllowLateCancel": "FALSE",
     "AllowSweepSetModel": "FALSE",
+    "Extra": "{}",
     "FieldFault": "\"fifo\""
    },
    "invariants": [
@@ -5524,6 +5550,7 @@
    "comment": "vh.carry-cap (latest-1083; expected safety): Duroxide carries at most 100 unread messages (Cap here); the rest are dropped with a warning. Unchanged, version independent.",
    "spec": "Spec",
    "constants": {
+    "From": "\"82\"",
     "PendKind": "\"thrown\"",
     "SourceStamp": "\"82\"",
     "RegistryOK": "TRUE",
@@ -5533,6 +5560,7 @@
     "FifoTookDigest": "TRUE",
     "AllowLateCancel": "FALSE",
     "AllowSweepSetModel": "FALSE",
+    "Extra": "{}",
     "FieldFault": "\"none\""
    },
    "invariants": [
@@ -5561,6 +5589,7 @@
    "comment": "vh.legacy-late-cancel (latest-1083; expected safety): a 1.0.82-queued prompt has no give-back markers; cancelled at dispatch on 1.0.83 it gives the digest back to no one, as on 1.0.82.",
    "spec": "Spec",
    "constants": {
+    "From": "\"82\"",
     "PendKind": "\"thrown\"",
     "SourceStamp": "\"82\"",
     "RegistryOK": "TRUE",
@@ -5570,6 +5599,7 @@
     "FifoTookDigest": "TRUE",
     "AllowLateCancel": "TRUE",
     "AllowSweepSetModel": "FALSE",
+    "Extra": "{}",
     "FieldFault": "\"none\""
    },
    "invariants": [
@@ -5598,6 +5628,7 @@
    "comment": "vh.82-sweep-set-model (latest-1083; expected safety): Known 1.0.82 issue at the hand-off: a set_model in 1.0.82's pre-dispatch sweep continues as new without the popped prompt.",
    "spec": "Spec",
    "constants": {
+    "From": "\"82\"",
     "PendKind": "\"thrown\"",
     "SourceStamp": "\"82\"",
     "RegistryOK": "TRUE",
@@ -5607,6 +5638,7 @@
     "FifoTookDigest": "TRUE",
     "AllowLateCancel": "FALSE",
     "AllowSweepSetModel": "TRUE",
+    "Extra": "{}",
     "FieldFault": "\"none\""
    },
    "invariants": [
@@ -5635,6 +5667,7 @@
    "comment": "wit.vh-adopted (latest-1083; expected safety): The converted retry adopts the thrown attempt's saved turn.",
    "spec": "Spec",
    "constants": {
+    "From": "\"82\"",
     "PendKind": "\"thrown\"",
     "SourceStamp": "\"82\"",
     "RegistryOK": "TRUE",
@@ -5644,6 +5677,7 @@
     "FifoTookDigest": "TRUE",
     "AllowLateCancel": "FALSE",
     "AllowSweepSetModel": "FALSE",
+    "Extra": "{}",
     "FieldFault": "\"none\""
    },
    "invariants": [
@@ -5672,6 +5706,7 @@
    "comment": "wit.vh-set-model (latest-1083; expected safety): The carried set_model is applied on 1.0.83.",
    "spec": "Spec",
    "constants": {
+    "From": "\"82\"",
     "PendKind": "\"thrown\"",
     "SourceStamp": "\"82\"",
     "RegistryOK": "TRUE",
@@ -5681,6 +5716,7 @@
     "FifoTookDigest": "TRUE",
     "AllowLateCancel": "FALSE",
     "AllowSweepSetModel": "FALSE",
+    "Extra": "{}",
     "FieldFault": "\"none\""
    },
    "invariants": [
@@ -5709,6 +5745,7 @@
    "comment": "wit.vh-cron (latest-1083; expected safety): The carried cron schedule fires on 1.0.83.",
    "spec": "Spec",
    "constants": {
+    "From": "\"82\"",
     "PendKind": "\"thrown\"",
     "SourceStamp": "\"82\"",
     "RegistryOK": "TRUE",
@@ -5718,6 +5755,7 @@
     "FifoTookDigest": "TRUE",
     "AllowLateCancel": "FALSE",
     "AllowSweepSetModel": "FALSE",
+    "Extra": "{}",
     "FieldFault": "\"none\""
    },
    "invariants": [
@@ -7280,6 +7318,2261 @@
    },
    "invariants": [
     "W_NoDroppedReport"
+   ],
+   "properties": [],
+   "deadlock": true
+  }
+ },
+ {
+  "id": "ch.untagged",
+  "module": "CapacityHold",
+  "config": "ch.untagged.cfg",
+  "mode": "impl",
+  "meaning": "confirmed",
+  "spec": "Spec",
+  "expected": "PASS",
+  "invariants": [
+   "TypeOK",
+   "Inv_SameAs83",
+   "Inv_RequestBeforeTurn",
+   "Inv_UncountedReleasesNothing",
+   "Inv_UncountedKeepsStep",
+   "Inv_UncountedWait",
+   "Inv_ReleaseRule",
+   "Inv_HoldEndsAfterTurn",
+   "Inv_DenyHoldsNothing",
+   "Inv_NothingLost"
+  ],
+  "properties": [],
+  "deadlock": true,
+  "note": "34e73cb1: a session with no owner tag and no fast flag and no workspace, refused at the gate (WORKSPACE_BUSY or another code) on either worker, holds, waits and releases affinity exactly as 1.0.83 (C4).",
+  "batch": "latest-1084",
+  "tlc": {
+   "comment": "ch.untagged (latest-1084; expected PASS): 34e73cb1: a session with no owner tag and no fast flag and no workspace, refused at the gate (WORKSPACE_BUSY or another code) on either worker, holds, waits and releases affinity exactly as 1.0.83 (C4).",
+   "spec": "Spec",
+   "constants": {
+    "Tagged": "FALSE",
+    "Fast": "FALSE",
+    "HasWorkspace": "FALSE",
+    "StepRule": "\"flat\"",
+    "ResetRule": "\"flagged\"",
+    "Answers": "{\"ok\", \"deny\", \"busyWB\", \"busyOther\", \"busyCU\", \"unanswered\"}",
+    "Results": "{\"pass\", \"gateWB\", \"gateOther\"}",
+    "BusyRetry": "0",
+    "HoldWindow": "1800",
+    "MaxPrompts": "2",
+    "MaxRefusals": "4",
+    "Fault": "\"none\""
+   },
+   "invariants": [
+    "TypeOK",
+    "Inv_SameAs83",
+    "Inv_RequestBeforeTurn",
+    "Inv_UncountedReleasesNothing",
+    "Inv_UncountedKeepsStep",
+    "Inv_UncountedWait",
+    "Inv_ReleaseRule",
+    "Inv_HoldEndsAfterTurn",
+    "Inv_DenyHoldsNothing",
+    "Inv_NothingLost"
+   ],
+   "properties": [],
+   "deadlock": true
+  }
+ },
+ {
+  "id": "ch.untagged-workspace",
+  "module": "CapacityHold",
+  "config": "ch.untagged-workspace.cfg",
+  "mode": "impl",
+  "meaning": "confirmed",
+  "spec": "Spec",
+  "expected": "PASS",
+  "invariants": [
+   "TypeOK",
+   "Inv_SameAs83",
+   "Inv_RequestBeforeTurn",
+   "Inv_UncountedReleasesNothing",
+   "Inv_UncountedKeepsStep",
+   "Inv_UncountedWait",
+   "Inv_ReleaseRule",
+   "Inv_HoldEndsAfterTurn",
+   "Inv_DenyHoldsNothing",
+   "Inv_NothingLost"
+  ],
+  "properties": [],
+  "deadlock": true,
+  "note": "34e73cb1: the same with a workspace: a turn past the gates ends the hold in both versions.",
+  "batch": "latest-1084",
+  "tlc": {
+   "comment": "ch.untagged-workspace (latest-1084; expected PASS): 34e73cb1: the same with a workspace: a turn past the gates ends the hold in both versions.",
+   "spec": "Spec",
+   "constants": {
+    "Tagged": "FALSE",
+    "Fast": "FALSE",
+    "HasWorkspace": "TRUE",
+    "StepRule": "\"flat\"",
+    "ResetRule": "\"flagged\"",
+    "Answers": "{\"ok\", \"deny\", \"busyWB\", \"busyOther\", \"busyCU\", \"unanswered\"}",
+    "Results": "{\"pass\", \"gateWB\", \"gateOther\"}",
+    "BusyRetry": "0",
+    "HoldWindow": "1800",
+    "MaxPrompts": "2",
+    "MaxRefusals": "4",
+    "Fault": "\"none\""
+   },
+   "invariants": [
+    "TypeOK",
+    "Inv_SameAs83",
+    "Inv_RequestBeforeTurn",
+    "Inv_UncountedReleasesNothing",
+    "Inv_UncountedKeepsStep",
+    "Inv_UncountedWait",
+    "Inv_ReleaseRule",
+    "Inv_HoldEndsAfterTurn",
+    "Inv_DenyHoldsNothing",
+    "Inv_NothingLost"
+   ],
+   "properties": [],
+   "deadlock": true
+  }
+ },
+ {
+  "id": "ch.fast-only",
+  "module": "CapacityHold",
+  "config": "ch.fast-only.cfg",
+  "mode": "impl",
+  "meaning": "confirmed",
+  "spec": "Spec",
+  "expected": "PASS",
+  "invariants": [
+   "TypeOK",
+   "Inv_SameAs83",
+   "Inv_RequestBeforeTurn",
+   "Inv_UncountedReleasesNothing",
+   "Inv_UncountedKeepsStep",
+   "Inv_UncountedWait",
+   "Inv_ReleaseRule",
+   "Inv_HoldEndsAfterTurn",
+   "Inv_DenyHoldsNothing",
+   "Inv_NothingLost"
+  ],
+  "properties": [],
+  "deadlock": true,
+  "note": "34e73cb1: the fast flag without a tag: a WORKSPACE_BUSY gate refusal releases at once and retries at 10, 20, 60, 180 s; a turn past the gates ends the hold.",
+  "batch": "latest-1084",
+  "tlc": {
+   "comment": "ch.fast-only (latest-1084; expected PASS): 34e73cb1: the fast flag without a tag: a WORKSPACE_BUSY gate refusal releases at once and retries at 10, 20, 60, 180 s; a turn past the gates ends the hold.",
+   "spec": "Spec",
+   "constants": {
+    "Tagged": "FALSE",
+    "Fast": "TRUE",
+    "HasWorkspace": "FALSE",
+    "StepRule": "\"flat\"",
+    "ResetRule": "\"flagged\"",
+    "Answers": "{\"ok\", \"deny\", \"busyWB\", \"busyOther\", \"busyCU\", \"unanswered\"}",
+    "Results": "{\"pass\", \"gateWB\", \"gateOther\"}",
+    "BusyRetry": "0",
+    "HoldWindow": "1800",
+    "MaxPrompts": "2",
+    "MaxRefusals": "4",
+    "Fault": "\"none\""
+   },
+   "invariants": [
+    "TypeOK",
+    "Inv_SameAs83",
+    "Inv_RequestBeforeTurn",
+    "Inv_UncountedReleasesNothing",
+    "Inv_UncountedKeepsStep",
+    "Inv_UncountedWait",
+    "Inv_ReleaseRule",
+    "Inv_HoldEndsAfterTurn",
+    "Inv_DenyHoldsNothing",
+    "Inv_NothingLost"
+   ],
+   "properties": [],
+   "deadlock": true
+  }
+ },
+ {
+  "id": "ch.tagged",
+  "module": "CapacityHold",
+  "config": "ch.tagged.cfg",
+  "mode": "impl",
+  "meaning": "confirmed",
+  "spec": "Spec",
+  "expected": "PASS",
+  "invariants": [
+   "TypeOK",
+   "Inv_SameAs83",
+   "Inv_RequestBeforeTurn",
+   "Inv_UncountedReleasesNothing",
+   "Inv_UncountedKeepsStep",
+   "Inv_UncountedWait",
+   "Inv_ReleaseRule",
+   "Inv_HoldEndsAfterTurn",
+   "Inv_DenyHoldsNothing",
+   "Inv_NothingLost"
+  ],
+  "properties": [],
+  "deadlock": true,
+  "note": "34e73cb1: a tagged session, default policy: every capacity answer (ok, deny, busy with WORKSPACE_BUSY, another code or CAPACITY_UNAVAILABLE, no answer) and every gate refusal; a turn runs only after ok; no answer waits its retryAfterMs (60 s, or the requester's own), keeps the step and the failures and releases nothing; two refusals in a row on one worker release.",
+  "batch": "latest-1084",
+  "tlc": {
+   "comment": "ch.tagged (latest-1084; expected PASS): 34e73cb1: a tagged session, default policy: every capacity answer (ok, deny, busy with WORKSPACE_BUSY, another code or CAPACITY_UNAVAILABLE, no answer) and every gate refusal; a turn runs only after ok; no answer waits its retryAfterMs (60 s, or the requester's own), keeps the step and the failures and releases nothing; two refusals in a row on one worker release.",
+   "spec": "Spec",
+   "constants": {
+    "Tagged": "TRUE",
+    "Fast": "FALSE",
+    "HasWorkspace": "FALSE",
+    "StepRule": "\"flat\"",
+    "ResetRule": "\"flagged\"",
+    "Answers": "{\"ok\", \"deny\", \"busyWB\", \"busyOther\", \"busyCU\", \"unanswered\"}",
+    "Results": "{\"pass\", \"gateWB\", \"gateOther\"}",
+    "BusyRetry": "0",
+    "HoldWindow": "1800",
+    "MaxPrompts": "2",
+    "MaxRefusals": "4",
+    "Fault": "\"none\""
+   },
+   "invariants": [
+    "TypeOK",
+    "Inv_SameAs83",
+    "Inv_RequestBeforeTurn",
+    "Inv_UncountedReleasesNothing",
+    "Inv_UncountedKeepsStep",
+    "Inv_UncountedWait",
+    "Inv_ReleaseRule",
+    "Inv_HoldEndsAfterTurn",
+    "Inv_DenyHoldsNothing",
+    "Inv_NothingLost"
+   ],
+   "properties": [],
+   "deadlock": true
+  }
+ },
+ {
+  "id": "ch.tagged-fast",
+  "module": "CapacityHold",
+  "config": "ch.tagged-fast.cfg",
+  "mode": "impl",
+  "meaning": "confirmed",
+  "spec": "Spec",
+  "expected": "PASS",
+  "invariants": [
+   "TypeOK",
+   "Inv_SameAs83",
+   "Inv_RequestBeforeTurn",
+   "Inv_UncountedReleasesNothing",
+   "Inv_UncountedKeepsStep",
+   "Inv_UncountedWait",
+   "Inv_ReleaseRule",
+   "Inv_HoldEndsAfterTurn",
+   "Inv_DenyHoldsNothing",
+   "Inv_NothingLost"
+  ],
+  "properties": [],
+  "deadlock": true,
+  "note": "34e73cb1: a tagged session with the fast policy: the first WORKSPACE_BUSY refusal (capacity or gate) releases.",
+  "batch": "latest-1084",
+  "tlc": {
+   "comment": "ch.tagged-fast (latest-1084; expected PASS): 34e73cb1: a tagged session with the fast policy: the first WORKSPACE_BUSY refusal (capacity or gate) releases.",
+   "spec": "Spec",
+   "constants": {
+    "Tagged": "TRUE",
+    "Fast": "TRUE",
+    "HasWorkspace": "FALSE",
+    "StepRule": "\"flat\"",
+    "ResetRule": "\"flagged\"",
+    "Answers": "{\"ok\", \"deny\", \"busyWB\", \"busyOther\", \"busyCU\", \"unanswered\"}",
+    "Results": "{\"pass\", \"gateWB\", \"gateOther\"}",
+    "BusyRetry": "0",
+    "HoldWindow": "1800",
+    "MaxPrompts": "2",
+    "MaxRefusals": "4",
+    "Fault": "\"none\""
+   },
+   "invariants": [
+    "TypeOK",
+    "Inv_SameAs83",
+    "Inv_RequestBeforeTurn",
+    "Inv_UncountedReleasesNothing",
+    "Inv_UncountedKeepsStep",
+    "Inv_UncountedWait",
+    "Inv_ReleaseRule",
+    "Inv_HoldEndsAfterTurn",
+    "Inv_DenyHoldsNothing",
+    "Inv_NothingLost"
+   ],
+   "properties": [],
+   "deadlock": true
+  }
+ },
+ {
+  "id": "ch.tagged-workspace",
+  "module": "CapacityHold",
+  "config": "ch.tagged-workspace.cfg",
+  "mode": "impl",
+  "meaning": "confirmed",
+  "spec": "Spec",
+  "expected": "PASS",
+  "invariants": [
+   "TypeOK",
+   "Inv_SameAs83",
+   "Inv_RequestBeforeTurn",
+   "Inv_UncountedReleasesNothing",
+   "Inv_UncountedKeepsStep",
+   "Inv_UncountedWait",
+   "Inv_ReleaseRule",
+   "Inv_HoldEndsAfterTurn",
+   "Inv_DenyHoldsNothing",
+   "Inv_NothingLost"
+  ],
+  "properties": [],
+  "deadlock": true,
+  "note": "34e73cb1: a tagged session with the fast policy and a workspace.",
+  "batch": "latest-1084",
+  "tlc": {
+   "comment": "ch.tagged-workspace (latest-1084; expected PASS): 34e73cb1: a tagged session with the fast policy and a workspace.",
+   "spec": "Spec",
+   "constants": {
+    "Tagged": "TRUE",
+    "Fast": "TRUE",
+    "HasWorkspace": "TRUE",
+    "StepRule": "\"flat\"",
+    "ResetRule": "\"flagged\"",
+    "Answers": "{\"ok\", \"deny\", \"busyWB\", \"busyOther\", \"busyCU\", \"unanswered\"}",
+    "Results": "{\"pass\", \"gateWB\", \"gateOther\"}",
+    "BusyRetry": "0",
+    "HoldWindow": "1800",
+    "MaxPrompts": "2",
+    "MaxRefusals": "4",
+    "Fault": "\"none\""
+   },
+   "invariants": [
+    "TypeOK",
+    "Inv_SameAs83",
+    "Inv_RequestBeforeTurn",
+    "Inv_UncountedReleasesNothing",
+    "Inv_UncountedKeepsStep",
+    "Inv_UncountedWait",
+    "Inv_ReleaseRule",
+    "Inv_HoldEndsAfterTurn",
+    "Inv_DenyHoldsNothing",
+    "Inv_NothingLost"
+   ],
+   "properties": [],
+   "deadlock": true
+  }
+ },
+ {
+  "id": "ch.tagged-window",
+  "module": "CapacityHold",
+  "config": "ch.tagged-window.cfg",
+  "mode": "impl",
+  "meaning": "confirmed",
+  "spec": "Spec",
+  "expected": "PASS",
+  "invariants": [
+   "TypeOK",
+   "Inv_SameAs83",
+   "Inv_RequestBeforeTurn",
+   "Inv_UncountedReleasesNothing",
+   "Inv_UncountedKeepsStep",
+   "Inv_UncountedWait",
+   "Inv_ReleaseRule",
+   "Inv_HoldEndsAfterTurn",
+   "Inv_DenyHoldsNothing",
+   "Inv_NothingLost"
+  ],
+  "properties": [],
+  "deadlock": true,
+  "note": "34e73cb1: a hold window of 100 s and a busy retryAfterMs of 45 s: counted holds longer than the window release as timer; uncounted ones release nothing.",
+  "batch": "latest-1084",
+  "tlc": {
+   "comment": "ch.tagged-window (latest-1084; expected PASS): 34e73cb1: a hold window of 100 s and a busy retryAfterMs of 45 s: counted holds longer than the window release as timer; uncounted ones release nothing.",
+   "spec": "Spec",
+   "constants": {
+    "Tagged": "TRUE",
+    "Fast": "FALSE",
+    "HasWorkspace": "FALSE",
+    "StepRule": "\"flat\"",
+    "ResetRule": "\"flagged\"",
+    "Answers": "{\"ok\", \"deny\", \"busyWB\", \"busyOther\", \"busyCU\", \"unanswered\"}",
+    "Results": "{\"pass\", \"gateWB\", \"gateOther\"}",
+    "BusyRetry": "45",
+    "HoldWindow": "100",
+    "MaxPrompts": "2",
+    "MaxRefusals": "4",
+    "Fault": "\"none\""
+   },
+   "invariants": [
+    "TypeOK",
+    "Inv_SameAs83",
+    "Inv_RequestBeforeTurn",
+    "Inv_UncountedReleasesNothing",
+    "Inv_UncountedKeepsStep",
+    "Inv_UncountedWait",
+    "Inv_ReleaseRule",
+    "Inv_HoldEndsAfterTurn",
+    "Inv_DenyHoldsNothing",
+    "Inv_NothingLost"
+   ],
+   "properties": [],
+   "deadlock": true
+  }
+ },
+ {
+  "id": "ch.live",
+  "module": "CapacityHold",
+  "config": "ch.live.cfg",
+  "mode": "impl",
+  "meaning": "confirmed",
+  "spec": "LiveSpec",
+  "expected": "PASS",
+  "invariants": [
+   "TypeOK",
+   "Inv_NothingLost"
+  ],
+  "properties": [
+   "Prop_HeldDelivered"
+  ],
+  "deadlock": true,
+  "note": "34e73cb1: held prompts reach the model once the answers turn ok (fairness: a queued prompt is attempted, an armed hold timer fires).",
+  "batch": "latest-1084",
+  "tlc": {
+   "comment": "ch.live (latest-1084; expected PASS): 34e73cb1: held prompts reach the model once the answers turn ok (fairness: a queued prompt is attempted, an armed hold timer fires).",
+   "spec": "LiveSpec",
+   "constants": {
+    "Tagged": "TRUE",
+    "Fast": "TRUE",
+    "HasWorkspace": "FALSE",
+    "StepRule": "\"flat\"",
+    "ResetRule": "\"flagged\"",
+    "Answers": "{\"ok\", \"busyWB\", \"busyOther\", \"unanswered\"}",
+    "Results": "{\"pass\", \"gateWB\", \"gateOther\"}",
+    "BusyRetry": "0",
+    "HoldWindow": "1800",
+    "MaxPrompts": "2",
+    "MaxRefusals": "3",
+    "Fault": "\"none\""
+   },
+   "invariants": [
+    "TypeOK",
+    "Inv_NothingLost"
+   ],
+   "properties": [
+    "Prop_HeldDelivered"
+   ],
+   "deadlock": true
+  }
+ },
+ {
+  "id": "ch.live-untagged",
+  "module": "CapacityHold",
+  "config": "ch.live-untagged.cfg",
+  "mode": "impl",
+  "meaning": "confirmed",
+  "spec": "LiveSpec",
+  "expected": "PASS",
+  "invariants": [
+   "TypeOK",
+   "Inv_NothingLost"
+  ],
+  "properties": [
+   "Prop_HeldDelivered"
+  ],
+  "deadlock": true,
+  "note": "34e73cb1: the same for an untagged session refused at the gate.",
+  "batch": "latest-1084",
+  "tlc": {
+   "comment": "ch.live-untagged (latest-1084; expected PASS): 34e73cb1: the same for an untagged session refused at the gate.",
+   "spec": "LiveSpec",
+   "constants": {
+    "Tagged": "FALSE",
+    "Fast": "FALSE",
+    "HasWorkspace": "FALSE",
+    "StepRule": "\"flat\"",
+    "ResetRule": "\"flagged\"",
+    "Answers": "{\"ok\", \"deny\", \"busyWB\", \"busyOther\", \"busyCU\", \"unanswered\"}",
+    "Results": "{\"pass\", \"gateWB\", \"gateOther\"}",
+    "BusyRetry": "0",
+    "HoldWindow": "1800",
+    "MaxPrompts": "2",
+    "MaxRefusals": "3",
+    "Fault": "\"none\""
+   },
+   "invariants": [
+    "TypeOK",
+    "Inv_NothingLost"
+   ],
+   "properties": [
+    "Prop_HeldDelivered"
+   ],
+   "deadlock": true
+  }
+ },
+ {
+  "id": "ref.ch-76e4af8f-reset",
+  "module": "CapacityHold",
+  "config": "ref.ch-76e4af8f-reset.cfg",
+  "mode": "comparison",
+  "meaning": "code-before-fix",
+  "spec": "Spec",
+  "expected": "safety",
+  "invariants": [
+   "Inv_SameAs83"
+  ],
+  "properties": [],
+  "deadlock": false,
+  "note": "76e4af8f: a turn past the gates clears the hold of every session without a workspace, so an untagged session held at the gate (an admission hook, a credential resolver, the default folders) restarts the schedule and the failure count where 1.0.83 goes on (the owner-routing review).",
+  "batch": "latest-1084",
+  "tlc": {
+   "comment": "ref.ch-76e4af8f-reset (latest-1084; expected safety): 76e4af8f: a turn past the gates clears the hold of every session without a workspace, so an untagged session held at the gate (an admission hook, a credential resolver, the default folders) restarts the schedule and the failure count where 1.0.83 goes on (the owner-routing review).",
+   "spec": "Spec",
+   "constants": {
+    "Tagged": "FALSE",
+    "Fast": "FALSE",
+    "HasWorkspace": "FALSE",
+    "StepRule": "\"advance\"",
+    "ResetRule": "\"all\"",
+    "Answers": "{\"ok\", \"deny\", \"busyWB\", \"busyOther\", \"busyCU\", \"unanswered\"}",
+    "Results": "{\"pass\", \"gateWB\", \"gateOther\"}",
+    "BusyRetry": "0",
+    "HoldWindow": "1800",
+    "MaxPrompts": "2",
+    "MaxRefusals": "4",
+    "Fault": "\"none\""
+   },
+   "invariants": [
+    "Inv_SameAs83"
+   ],
+   "properties": [],
+   "deadlock": false
+  }
+ },
+ {
+  "id": "ref.ch-76e4af8f-unanswered-step",
+  "module": "CapacityHold",
+  "config": "ref.ch-76e4af8f-unanswered-step.cfg",
+  "mode": "comparison",
+  "meaning": "code-before-fix",
+  "spec": "Spec",
+  "expected": "safety",
+  "invariants": [
+   "Inv_UncountedKeepsStep"
+  ],
+  "properties": [],
+  "deadlock": false,
+  "note": "76e4af8f: an unanswered capacity request (CAPACITY_UNAVAILABLE, not counted) still advances the schedule's step (the owner-routing review).",
+  "batch": "latest-1084",
+  "tlc": {
+   "comment": "ref.ch-76e4af8f-unanswered-step (latest-1084; expected safety): 76e4af8f: an unanswered capacity request (CAPACITY_UNAVAILABLE, not counted) still advances the schedule's step (the owner-routing review).",
+   "spec": "Spec",
+   "constants": {
+    "Tagged": "TRUE",
+    "Fast": "FALSE",
+    "HasWorkspace": "FALSE",
+    "StepRule": "\"advance\"",
+    "ResetRule": "\"all\"",
+    "Answers": "{\"ok\", \"unanswered\"}",
+    "Results": "{\"pass\"}",
+    "BusyRetry": "0",
+    "HoldWindow": "1800",
+    "MaxPrompts": "2",
+    "MaxRefusals": "4",
+    "Fault": "\"none\""
+   },
+   "invariants": [
+    "Inv_UncountedKeepsStep"
+   ],
+   "properties": [],
+   "deadlock": false
+  }
+ },
+ {
+  "id": "ref.ch-76e4af8f-unanswered-wait",
+  "module": "CapacityHold",
+  "config": "ref.ch-76e4af8f-unanswered-wait.cfg",
+  "mode": "comparison",
+  "meaning": "code-before-fix",
+  "spec": "Spec",
+  "expected": "safety",
+  "invariants": [
+   "Inv_UncountedWait"
+  ],
+  "properties": [],
+  "deadlock": false,
+  "note": "76e4af8f: unanswered requests in a row wait 60, 120, 300, 900 s instead of 60 s each (the owner-routing review's probe).",
+  "batch": "latest-1084",
+  "tlc": {
+   "comment": "ref.ch-76e4af8f-unanswered-wait (latest-1084; expected safety): 76e4af8f: unanswered requests in a row wait 60, 120, 300, 900 s instead of 60 s each (the owner-routing review's probe).",
+   "spec": "Spec",
+   "constants": {
+    "Tagged": "TRUE",
+    "Fast": "FALSE",
+    "HasWorkspace": "FALSE",
+    "StepRule": "\"advance\"",
+    "ResetRule": "\"all\"",
+    "Answers": "{\"ok\", \"unanswered\"}",
+    "Results": "{\"pass\"}",
+    "BusyRetry": "0",
+    "HoldWindow": "1800",
+    "MaxPrompts": "2",
+    "MaxRefusals": "4",
+    "Fault": "\"none\""
+   },
+   "invariants": [
+    "Inv_UncountedWait"
+   ],
+   "properties": [],
+   "deadlock": false
+  }
+ },
+ {
+  "id": "ref.ch-e94c62e4-unanswered-after-busy",
+  "module": "CapacityHold",
+  "config": "ref.ch-e94c62e4-unanswered-after-busy.cfg",
+  "mode": "comparison",
+  "meaning": "code-before-fix",
+  "spec": "Spec",
+  "expected": "safety",
+  "invariants": [
+   "Inv_UncountedWait"
+  ],
+  "properties": [],
+  "deadlock": false,
+  "note": "e94c62e4: an unanswered request after a busy answer waits the kept step's delay of the default schedule (120 s here, 900 s after three busy answers), also under the fast policy, instead of its retryAfterMs; 34e73cb1 waits retryAfterMs.",
+  "batch": "latest-1084",
+  "tlc": {
+   "comment": "ref.ch-e94c62e4-unanswered-after-busy (latest-1084; expected safety): e94c62e4: an unanswered request after a busy answer waits the kept step's delay of the default schedule (120 s here, 900 s after three busy answers), also under the fast policy, instead of its retryAfterMs; 34e73cb1 waits retryAfterMs.",
+   "spec": "Spec",
+   "constants": {
+    "Tagged": "TRUE",
+    "Fast": "TRUE",
+    "HasWorkspace": "FALSE",
+    "StepRule": "\"keep\"",
+    "ResetRule": "\"flagged\"",
+    "Answers": "{\"ok\", \"busyWB\", \"unanswered\"}",
+    "Results": "{\"pass\"}",
+    "BusyRetry": "0",
+    "HoldWindow": "1800",
+    "MaxPrompts": "2",
+    "MaxRefusals": "4",
+    "Fault": "\"none\""
+   },
+   "invariants": [
+    "Inv_UncountedWait"
+   ],
+   "properties": [],
+   "deadlock": false
+  }
+ },
+ {
+  "id": "fault.ch-skip-request",
+  "module": "CapacityHold",
+  "config": "fault.ch-skip-request.cfg",
+  "mode": "deliberate",
+  "meaning": "deliberate",
+  "spec": "Spec",
+  "expected": "safety",
+  "invariants": [
+   "Inv_RequestBeforeTurn"
+  ],
+  "properties": [],
+  "deadlock": false,
+  "note": "A tagged session that keeps its worker skips the capacity request.",
+  "batch": "latest-1084",
+  "tlc": {
+   "comment": "fault.ch-skip-request (latest-1084; expected safety): A tagged session that keeps its worker skips the capacity request.",
+   "spec": "Spec",
+   "constants": {
+    "Tagged": "TRUE",
+    "Fast": "FALSE",
+    "HasWorkspace": "FALSE",
+    "StepRule": "\"flat\"",
+    "ResetRule": "\"flagged\"",
+    "Answers": "{\"ok\", \"deny\", \"busyWB\", \"busyOther\", \"busyCU\", \"unanswered\"}",
+    "Results": "{\"pass\", \"gateWB\", \"gateOther\"}",
+    "BusyRetry": "0",
+    "HoldWindow": "1800",
+    "MaxPrompts": "2",
+    "MaxRefusals": "4",
+    "Fault": "\"skip-request-when-held\""
+   },
+   "invariants": [
+    "Inv_RequestBeforeTurn"
+   ],
+   "properties": [],
+   "deadlock": false
+  }
+ },
+ {
+  "id": "fault.ch-count-unanswered",
+  "module": "CapacityHold",
+  "config": "fault.ch-count-unanswered.cfg",
+  "mode": "deliberate",
+  "meaning": "deliberate",
+  "spec": "Spec",
+  "expected": "safety",
+  "invariants": [
+   "Inv_UncountedReleasesNothing"
+  ],
+  "properties": [],
+  "deadlock": false,
+  "note": "An unanswered request counts as a failure.",
+  "batch": "latest-1084",
+  "tlc": {
+   "comment": "fault.ch-count-unanswered (latest-1084; expected safety): An unanswered request counts as a failure.",
+   "spec": "Spec",
+   "constants": {
+    "Tagged": "TRUE",
+    "Fast": "FALSE",
+    "HasWorkspace": "FALSE",
+    "StepRule": "\"flat\"",
+    "ResetRule": "\"flagged\"",
+    "Answers": "{\"ok\", \"unanswered\"}",
+    "Results": "{\"pass\", \"gateWB\"}",
+    "BusyRetry": "0",
+    "HoldWindow": "1800",
+    "MaxPrompts": "2",
+    "MaxRefusals": "4",
+    "Fault": "\"count-unanswered\""
+   },
+   "invariants": [
+    "Inv_UncountedReleasesNothing"
+   ],
+   "properties": [],
+   "deadlock": false
+  }
+ },
+ {
+  "id": "fault.ch-no-timer",
+  "module": "CapacityHold",
+  "config": "fault.ch-no-timer.cfg",
+  "mode": "deliberate",
+  "meaning": "deliberate",
+  "spec": "LiveSpec",
+  "expected": "liveness",
+  "invariants": [],
+  "properties": [
+   "Prop_HeldDelivered"
+  ],
+  "deadlock": false,
+  "note": "An unanswered request's hold arms no timer.",
+  "batch": "latest-1084",
+  "tlc": {
+   "comment": "fault.ch-no-timer (latest-1084; expected liveness): An unanswered request's hold arms no timer.",
+   "spec": "LiveSpec",
+   "constants": {
+    "Tagged": "TRUE",
+    "Fast": "FALSE",
+    "HasWorkspace": "FALSE",
+    "StepRule": "\"flat\"",
+    "ResetRule": "\"flagged\"",
+    "Answers": "{\"ok\", \"unanswered\"}",
+    "Results": "{\"pass\"}",
+    "BusyRetry": "0",
+    "HoldWindow": "1800",
+    "MaxPrompts": "2",
+    "MaxRefusals": "2",
+    "Fault": "\"no-timer\""
+   },
+   "invariants": [],
+   "properties": [
+    "Prop_HeldDelivered"
+   ],
+   "deadlock": false
+  }
+ },
+ {
+  "id": "fault.ch-reset-both",
+  "module": "CapacityHold",
+  "config": "fault.ch-reset-both.cfg",
+  "mode": "deliberate",
+  "meaning": "deliberate",
+  "spec": "Spec",
+  "expected": "safety",
+  "invariants": [
+   "Inv_HoldEndsAfterTurn"
+  ],
+  "properties": [],
+  "deadlock": false,
+  "note": "A mutation of e94c62e4's gate: the hold ends after a turn only with a tag and the fast flag (and instead of or).",
+  "batch": "latest-1084",
+  "tlc": {
+   "comment": "fault.ch-reset-both (latest-1084; expected safety): A mutation of e94c62e4's gate: the hold ends after a turn only with a tag and the fast flag (and instead of or).",
+   "spec": "Spec",
+   "constants": {
+    "Tagged": "TRUE",
+    "Fast": "FALSE",
+    "HasWorkspace": "FALSE",
+    "StepRule": "\"flat\"",
+    "ResetRule": "\"both\"",
+    "Answers": "{\"ok\", \"deny\", \"busyWB\", \"busyOther\", \"busyCU\", \"unanswered\"}",
+    "Results": "{\"pass\", \"gateWB\", \"gateOther\"}",
+    "BusyRetry": "0",
+    "HoldWindow": "1800",
+    "MaxPrompts": "2",
+    "MaxRefusals": "4",
+    "Fault": "\"none\""
+   },
+   "invariants": [
+    "Inv_HoldEndsAfterTurn"
+   ],
+   "properties": [],
+   "deadlock": false
+  }
+ },
+ {
+  "id": "wit.ch-fast-release",
+  "module": "CapacityHold",
+  "config": "wit.ch-fast-release.cfg",
+  "mode": "impl",
+  "meaning": "witness",
+  "spec": "Spec",
+  "expected": "safety",
+  "invariants": [
+   "W_FastRelease"
+  ],
+  "properties": [],
+  "deadlock": true,
+  "note": "34e73cb1: the fast policy releases affinity at the first WORKSPACE_BUSY refusal.",
+  "batch": "latest-1084",
+  "tlc": {
+   "comment": "wit.ch-fast-release (latest-1084; expected safety): 34e73cb1: the fast policy releases affinity at the first WORKSPACE_BUSY refusal.",
+   "spec": "Spec",
+   "constants": {
+    "Tagged": "TRUE",
+    "Fast": "TRUE",
+    "HasWorkspace": "FALSE",
+    "StepRule": "\"flat\"",
+    "ResetRule": "\"flagged\"",
+    "Answers": "{\"ok\", \"deny\", \"busyWB\", \"busyOther\", \"busyCU\", \"unanswered\"}",
+    "Results": "{\"pass\", \"gateWB\", \"gateOther\"}",
+    "BusyRetry": "0",
+    "HoldWindow": "1800",
+    "MaxPrompts": "2",
+    "MaxRefusals": "4",
+    "Fault": "\"none\""
+   },
+   "invariants": [
+    "W_FastRelease"
+   ],
+   "properties": [],
+   "deadlock": true
+  }
+ },
+ {
+  "id": "wit.ch-deny-keeps-held",
+  "module": "CapacityHold",
+  "config": "wit.ch-deny-keeps-held.cfg",
+  "mode": "impl",
+  "meaning": "witness",
+  "spec": "Spec",
+  "expected": "safety",
+  "invariants": [
+   "W_DenyLeavesHeld"
+  ],
+  "properties": [],
+  "deadlock": true,
+  "note": "34e73cb1: a deny drops its own prompt; prompts held by earlier busy answers stay held until a later turn runs.",
+  "batch": "latest-1084",
+  "tlc": {
+   "comment": "wit.ch-deny-keeps-held (latest-1084; expected safety): 34e73cb1: a deny drops its own prompt; prompts held by earlier busy answers stay held until a later turn runs.",
+   "spec": "Spec",
+   "constants": {
+    "Tagged": "TRUE",
+    "Fast": "FALSE",
+    "HasWorkspace": "FALSE",
+    "StepRule": "\"flat\"",
+    "ResetRule": "\"flagged\"",
+    "Answers": "{\"ok\", \"deny\", \"busyWB\"}",
+    "Results": "{\"pass\"}",
+    "BusyRetry": "0",
+    "HoldWindow": "1800",
+    "MaxPrompts": "2",
+    "MaxRefusals": "4",
+    "Fault": "\"none\""
+   },
+   "invariants": [
+    "W_DenyLeavesHeld"
+   ],
+   "properties": [],
+   "deadlock": true
+  }
+ },
+ {
+  "id": "wit.ch-uncounted-no-floor",
+  "module": "CapacityHold",
+  "config": "wit.ch-uncounted-no-floor.cfg",
+  "mode": "impl",
+  "meaning": "witness",
+  "spec": "Spec",
+  "expected": "safety",
+  "invariants": [
+   "W_UncountedBelowSchedule"
+  ],
+  "properties": [],
+  "deadlock": true,
+  "note": "34e73cb1: no floor: a requester's own busy answer with CAPACITY_UNAVAILABLE and a retryAfterMs of 1 s is waited as given, below the schedule's 30 s first step.",
+  "batch": "latest-1084",
+  "tlc": {
+   "comment": "wit.ch-uncounted-no-floor (latest-1084; expected safety): 34e73cb1: no floor: a requester's own busy answer with CAPACITY_UNAVAILABLE and a retryAfterMs of 1 s is waited as given, below the schedule's 30 s first step.",
+   "spec": "Spec",
+   "constants": {
+    "Tagged": "TRUE",
+    "Fast": "FALSE",
+    "HasWorkspace": "FALSE",
+    "StepRule": "\"flat\"",
+    "ResetRule": "\"flagged\"",
+    "Answers": "{\"ok\", \"busyCU\"}",
+    "Results": "{\"pass\"}",
+    "BusyRetry": "1",
+    "HoldWindow": "1800",
+    "MaxPrompts": "2",
+    "MaxRefusals": "4",
+    "Fault": "\"none\""
+   },
+   "invariants": [
+    "W_UncountedBelowSchedule"
+   ],
+   "properties": [],
+   "deadlock": true
+  }
+ },
+ {
+  "id": "oc.no-owner",
+  "module": "OwnerCapped",
+  "config": "oc.no-owner.cfg",
+  "mode": "impl",
+  "meaning": "confirmed",
+  "spec": "LiveSpec",
+  "expected": "PASS",
+  "invariants": [
+   "TypeOK",
+   "Inv_DestroyOnce",
+   "Inv_RecordOnTimelyOk",
+   "Inv_RefusalKeepsWorkspace"
+  ],
+  "properties": [
+   "Prop_AllAnswered",
+   "Prop_MemoryFreed",
+   "Prop_StrayReleased"
+  ],
+  "deadlock": true,
+  "note": "34e73cb1: no worker of the owner ever runs: the set-workspace command is answered (a capacity refusal, or the 20-minute cap: WORKSPACE_BUSY) and keeps the workspace; the end command's destroy loses to the 10 s cap and never starts, and the session ends.",
+  "batch": "latest-1084",
+  "tlc": {
+   "comment": "oc.no-owner (latest-1084; expected PASS): 34e73cb1: no worker of the owner ever runs: the set-workspace command is answered (a capacity refusal, or the 20-minute cap: WORKSPACE_BUSY) and keeps the workspace; the end command's destroy loses to the 10 s cap and never starts, and the session ends.",
+   "spec": "LiveSpec",
+   "constants": {
+    "Tagged": "TRUE",
+    "Capped": "TRUE",
+    "Owner": "\"never\"",
+    "MayStop": "FALSE",
+    "Host": "\"up\"",
+    "Cmds": "\"set-end\"",
+    "TurnFirst": "FALSE",
+    "Fault": "\"none\""
+   },
+   "invariants": [
+    "TypeOK",
+    "Inv_DestroyOnce",
+    "Inv_RecordOnTimelyOk",
+    "Inv_RefusalKeepsWorkspace"
+   ],
+   "properties": [
+    "Prop_AllAnswered",
+    "Prop_MemoryFreed",
+    "Prop_StrayReleased"
+   ],
+   "deadlock": true
+  }
+ },
+ {
+  "id": "oc.late-owner",
+  "module": "OwnerCapped",
+  "config": "oc.late-owner.cfg",
+  "mode": "impl",
+  "meaning": "confirmed",
+  "spec": "LiveSpec",
+  "expected": "PASS",
+  "invariants": [
+   "TypeOK",
+   "Inv_DestroyOnce",
+   "Inv_RecordOnTimelyOk",
+   "Inv_RefusalKeepsWorkspace"
+  ],
+  "properties": [
+   "Prop_AllAnswered",
+   "Prop_MemoryFreed",
+   "Prop_StrayReleased"
+  ],
+  "deadlock": true,
+  "note": "34e73cb1: the owner's worker and the host start late, and the worker may stop: a check or destroy may lose its race while running and finish after the command was answered; the record never takes a late result; what a late check attached is released.",
+  "batch": "latest-1084",
+  "tlc": {
+   "comment": "oc.late-owner (latest-1084; expected PASS): 34e73cb1: the owner's worker and the host start late, and the worker may stop: a check or destroy may lose its race while running and finish after the command was answered; the record never takes a late result; what a late check attached is released.",
+   "spec": "LiveSpec",
+   "constants": {
+    "Tagged": "TRUE",
+    "Capped": "TRUE",
+    "Owner": "\"late\"",
+    "MayStop": "TRUE",
+    "Host": "\"late\"",
+    "Cmds": "\"set-end\"",
+    "TurnFirst": "FALSE",
+    "Fault": "\"none\""
+   },
+   "invariants": [
+    "TypeOK",
+    "Inv_DestroyOnce",
+    "Inv_RecordOnTimelyOk",
+    "Inv_RefusalKeepsWorkspace"
+   ],
+   "properties": [
+    "Prop_AllAnswered",
+    "Prop_MemoryFreed",
+    "Prop_StrayReleased"
+   ],
+   "deadlock": true
+  }
+ },
+ {
+  "id": "oc.owner-up",
+  "module": "OwnerCapped",
+  "config": "oc.owner-up.cfg",
+  "mode": "impl",
+  "meaning": "confirmed",
+  "spec": "LiveSpec",
+  "expected": "PASS",
+  "invariants": [
+   "TypeOK",
+   "Inv_DestroyOnce",
+   "Inv_RecordOnTimelyOk",
+   "Inv_RefusalKeepsWorkspace"
+  ],
+  "properties": [
+   "Prop_AllAnswered",
+   "Prop_MemoryFreed",
+   "Prop_StrayReleased"
+  ],
+  "deadlock": true,
+  "note": "34e73cb1: the owner's worker holds the session warm and may be deleted mid-way: every command is answered, the memory is freed by the destroy or by the idle eviction.",
+  "batch": "latest-1084",
+  "tlc": {
+   "comment": "oc.owner-up (latest-1084; expected PASS): 34e73cb1: the owner's worker holds the session warm and may be deleted mid-way: every command is answered, the memory is freed by the destroy or by the idle eviction.",
+   "spec": "LiveSpec",
+   "constants": {
+    "Tagged": "TRUE",
+    "Capped": "TRUE",
+    "Owner": "\"up\"",
+    "MayStop": "TRUE",
+    "Host": "\"up\"",
+    "Cmds": "\"set-end\"",
+    "TurnFirst": "FALSE",
+    "Fault": "\"none\""
+   },
+   "invariants": [
+    "TypeOK",
+    "Inv_DestroyOnce",
+    "Inv_RecordOnTimelyOk",
+    "Inv_RefusalKeepsWorkspace"
+   ],
+   "properties": [
+    "Prop_AllAnswered",
+    "Prop_MemoryFreed",
+    "Prop_StrayReleased"
+   ],
+   "deadlock": true
+  }
+ },
+ {
+  "id": "oc.turn",
+  "module": "OwnerCapped",
+  "config": "oc.turn.cfg",
+  "mode": "impl",
+  "meaning": "confirmed",
+  "spec": "LiveSpec",
+  "expected": "PASS",
+  "invariants": [
+   "TypeOK",
+   "Inv_DestroyOnce",
+   "Inv_RecordOnTimelyOk",
+   "Inv_RefusalKeepsWorkspace"
+  ],
+  "properties": [
+   "Prop_AllAnswered",
+   "Prop_MemoryFreed",
+   "Prop_StrayReleased"
+  ],
+  "deadlock": true,
+  "note": "34e73cb1: a turn attempt before the commands: the capacity request, then the turn on the owner's worker; the commands follow.",
+  "batch": "latest-1084",
+  "tlc": {
+   "comment": "oc.turn (latest-1084; expected PASS): 34e73cb1: a turn attempt before the commands: the capacity request, then the turn on the owner's worker; the commands follow.",
+   "spec": "LiveSpec",
+   "constants": {
+    "Tagged": "TRUE",
+    "Capped": "TRUE",
+    "Owner": "\"up\"",
+    "MayStop": "FALSE",
+    "Host": "\"up\"",
+    "Cmds": "\"set-end\"",
+    "TurnFirst": "TRUE",
+    "Fault": "\"none\""
+   },
+   "invariants": [
+    "TypeOK",
+    "Inv_DestroyOnce",
+    "Inv_RecordOnTimelyOk",
+    "Inv_RefusalKeepsWorkspace"
+   ],
+   "properties": [
+    "Prop_AllAnswered",
+    "Prop_MemoryFreed",
+    "Prop_StrayReleased"
+   ],
+   "deadlock": true
+  }
+ },
+ {
+  "id": "oc.untagged",
+  "module": "OwnerCapped",
+  "config": "oc.untagged.cfg",
+  "mode": "impl",
+  "meaning": "confirmed",
+  "spec": "LiveSpec",
+  "expected": "PASS",
+  "invariants": [
+   "TypeOK",
+   "Inv_DestroyOnce",
+   "Inv_RecordOnTimelyOk",
+   "Inv_RefusalKeepsWorkspace"
+  ],
+  "properties": [
+   "Prop_AllAnswered",
+   "Prop_MemoryFreed",
+   "Prop_StrayReleased"
+  ],
+  "deadlock": true,
+  "note": "34e73cb1: an untagged session yields its turn, check and destroy as 1.0.83; the default workers run them.",
+  "batch": "latest-1084",
+  "tlc": {
+   "comment": "oc.untagged (latest-1084; expected PASS): 34e73cb1: an untagged session yields its turn, check and destroy as 1.0.83; the default workers run them.",
+   "spec": "LiveSpec",
+   "constants": {
+    "Tagged": "FALSE",
+    "Capped": "TRUE",
+    "Owner": "\"never\"",
+    "MayStop": "FALSE",
+    "Host": "\"never\"",
+    "Cmds": "\"set-end\"",
+    "TurnFirst": "TRUE",
+    "Fault": "\"none\""
+   },
+   "invariants": [
+    "TypeOK",
+    "Inv_DestroyOnce",
+    "Inv_RecordOnTimelyOk",
+    "Inv_RefusalKeepsWorkspace"
+   ],
+   "properties": [
+    "Prop_AllAnswered",
+    "Prop_MemoryFreed",
+    "Prop_StrayReleased"
+   ],
+   "deadlock": true
+  }
+ },
+ {
+  "id": "comparison.oc-uncapped",
+  "module": "OwnerCapped",
+  "config": "comparison.oc-uncapped.cfg",
+  "mode": "comparison",
+  "meaning": "code-1.0.83",
+  "spec": "LiveSpec",
+  "expected": "liveness",
+  "invariants": [],
+  "properties": [
+   "Prop_AllAnswered"
+  ],
+  "deadlock": false,
+  "note": "1.0.83's plain yields of the check and the destroy for a tagged session: with no owner worker, the set-workspace command and the end wait for good.",
+  "batch": "latest-1084",
+  "tlc": {
+   "comment": "comparison.oc-uncapped (latest-1084; expected liveness): 1.0.83's plain yields of the check and the destroy for a tagged session: with no owner worker, the set-workspace command and the end wait for good.",
+   "spec": "LiveSpec",
+   "constants": {
+    "Tagged": "TRUE",
+    "Capped": "FALSE",
+    "Owner": "\"never\"",
+    "MayStop": "FALSE",
+    "Host": "\"up\"",
+    "Cmds": "\"set-end\"",
+    "TurnFirst": "FALSE",
+    "Fault": "\"none\""
+   },
+   "invariants": [],
+   "properties": [
+    "Prop_AllAnswered"
+   ],
+   "deadlock": false
+  }
+ },
+ {
+  "id": "oc.no-host",
+  "module": "OwnerCapped",
+  "config": "oc.no-host.cfg",
+  "mode": "impl",
+  "meaning": "design-limit",
+  "spec": "LiveSpec",
+  "expected": "liveness",
+  "invariants": [],
+  "properties": [
+   "Prop_AllAnswered"
+  ],
+  "deadlock": false,
+  "note": "34e73cb1: the capacity request is not capped: with no worker that has a capacity requester, the set-workspace command, and the end queued behind it, wait (deploy the coordination host before turning owner routing on).",
+  "batch": "latest-1084",
+  "tlc": {
+   "comment": "oc.no-host (latest-1084; expected liveness): 34e73cb1: the capacity request is not capped: with no worker that has a capacity requester, the set-workspace command, and the end queued behind it, wait (deploy the coordination host before turning owner routing on).",
+   "spec": "LiveSpec",
+   "constants": {
+    "Tagged": "TRUE",
+    "Capped": "TRUE",
+    "Owner": "\"up\"",
+    "MayStop": "FALSE",
+    "Host": "\"never\"",
+    "Cmds": "\"set-end\"",
+    "TurnFirst": "FALSE",
+    "Fault": "\"none\""
+   },
+   "invariants": [],
+   "properties": [
+    "Prop_AllAnswered"
+   ],
+   "deadlock": false
+  }
+ },
+ {
+  "id": "oc.turn-vm-lost",
+  "module": "OwnerCapped",
+  "config": "oc.turn-vm-lost.cfg",
+  "mode": "impl",
+  "meaning": "design-limit",
+  "spec": "LiveSpec",
+  "expected": "liveness",
+  "invariants": [],
+  "properties": [
+   "Prop_AllAnswered"
+  ],
+  "deadlock": false,
+  "note": "34e73cb1: a turn's activity is never raced: when the owner's worker goes after the capacity request answered ok and none comes back, the end command waits behind the turn.",
+  "batch": "latest-1084",
+  "tlc": {
+   "comment": "oc.turn-vm-lost (latest-1084; expected liveness): 34e73cb1: a turn's activity is never raced: when the owner's worker goes after the capacity request answered ok and none comes back, the end command waits behind the turn.",
+   "spec": "LiveSpec",
+   "constants": {
+    "Tagged": "TRUE",
+    "Capped": "TRUE",
+    "Owner": "\"up\"",
+    "MayStop": "TRUE",
+    "Host": "\"up\"",
+    "Cmds": "\"end\"",
+    "TurnFirst": "TRUE",
+    "Fault": "\"none\""
+   },
+   "invariants": [],
+   "properties": [
+    "Prop_AllAnswered"
+   ],
+   "deadlock": false
+  }
+ },
+ {
+  "id": "fault.oc-adopt-late",
+  "module": "OwnerCapped",
+  "config": "fault.oc-adopt-late.cfg",
+  "mode": "deliberate",
+  "meaning": "deliberate",
+  "spec": "Spec",
+  "expected": "safety",
+  "invariants": [
+   "Inv_RecordOnTimelyOk"
+  ],
+  "properties": [],
+  "deadlock": false,
+  "note": "The orchestration takes a check's ok result that came after its cap.",
+  "batch": "latest-1084",
+  "tlc": {
+   "comment": "fault.oc-adopt-late (latest-1084; expected safety): The orchestration takes a check's ok result that came after its cap.",
+   "spec": "Spec",
+   "constants": {
+    "Tagged": "TRUE",
+    "Capped": "TRUE",
+    "Owner": "\"up\"",
+    "MayStop": "FALSE",
+    "Host": "\"up\"",
+    "Cmds": "\"set-end\"",
+    "TurnFirst": "FALSE",
+    "Fault": "\"adopt-late\""
+   },
+   "invariants": [
+    "Inv_RecordOnTimelyOk"
+   ],
+   "properties": [],
+   "deadlock": false
+  }
+ },
+ {
+  "id": "wit.oc-late-check",
+  "module": "OwnerCapped",
+  "config": "wit.oc-late-check.cfg",
+  "mode": "impl",
+  "meaning": "witness",
+  "spec": "Spec",
+  "expected": "safety",
+  "invariants": [
+   "W_NoLateCheck"
+  ],
+  "properties": [],
+  "deadlock": true,
+  "note": "34e73cb1: a check finishes after its cap answered the command.",
+  "batch": "latest-1084",
+  "tlc": {
+   "comment": "wit.oc-late-check (latest-1084; expected safety): 34e73cb1: a check finishes after its cap answered the command.",
+   "spec": "Spec",
+   "constants": {
+    "Tagged": "TRUE",
+    "Capped": "TRUE",
+    "Owner": "\"up\"",
+    "MayStop": "FALSE",
+    "Host": "\"up\"",
+    "Cmds": "\"set-end\"",
+    "TurnFirst": "FALSE",
+    "Fault": "\"none\""
+   },
+   "invariants": [
+    "W_NoLateCheck"
+   ],
+   "properties": [],
+   "deadlock": true
+  }
+ },
+ {
+  "id": "wit.oc-destroy-after-end",
+  "module": "OwnerCapped",
+  "config": "wit.oc-destroy-after-end.cfg",
+  "mode": "impl",
+  "meaning": "witness",
+  "spec": "Spec",
+  "expected": "safety",
+  "invariants": [
+   "W_NoDestroyAfterEnd"
+  ],
+  "properties": [],
+  "deadlock": true,
+  "note": "34e73cb1: a destroy that was running when its cap fired finishes after the session ended.",
+  "batch": "latest-1084",
+  "tlc": {
+   "comment": "wit.oc-destroy-after-end (latest-1084; expected safety): 34e73cb1: a destroy that was running when its cap fired finishes after the session ended.",
+   "spec": "Spec",
+   "constants": {
+    "Tagged": "TRUE",
+    "Capped": "TRUE",
+    "Owner": "\"up\"",
+    "MayStop": "FALSE",
+    "Host": "\"up\"",
+    "Cmds": "\"set-end\"",
+    "TurnFirst": "FALSE",
+    "Fault": "\"none\""
+   },
+   "invariants": [
+    "W_NoDestroyAfterEnd"
+   ],
+   "properties": [],
+   "deadlock": true
+  }
+ },
+ {
+  "id": "ot.tagged",
+  "module": "OwnerTagCarry",
+  "config": "ot.tagged.cfg",
+  "mode": "impl",
+  "meaning": "confirmed",
+  "spec": "Spec",
+  "expected": "PASS",
+  "invariants": [
+   "TypeOK",
+   "Inv_TagKept",
+   "Inv_FastKept",
+   "Inv_TreeTagged",
+   "Inv_TreeFast",
+   "Inv_SystemUntagged",
+   "Inv_NothingFromNowhere",
+   "Inv_83Untagged"
+  ],
+  "properties": [],
+  "deadlock": true,
+  "note": "34e73cb1: the root's tag rides every continue-as-new and reaches its sub-agent, the sub-agent's sub-agent and the distiller, but not a system sub-agent.",
+  "batch": "latest-1084",
+  "tlc": {
+   "comment": "ot.tagged (latest-1084; expected PASS): 34e73cb1: the root's tag rides every continue-as-new and reaches its sub-agent, the sub-agent's sub-agent and the distiller, but not a system sub-agent.",
+   "spec": "Spec",
+   "constants": {
+    "RootTag": "TRUE",
+    "RootFast": "FALSE",
+    "RootOn83": "FALSE",
+    "MaxCan": "2",
+    "Fault": "\"none\""
+   },
+   "invariants": [
+    "TypeOK",
+    "Inv_TagKept",
+    "Inv_FastKept",
+    "Inv_TreeTagged",
+    "Inv_TreeFast",
+    "Inv_SystemUntagged",
+    "Inv_NothingFromNowhere",
+    "Inv_83Untagged"
+   ],
+   "properties": [],
+   "deadlock": true
+  }
+ },
+ {
+  "id": "ot.tagged-fast",
+  "module": "OwnerTagCarry",
+  "config": "ot.tagged-fast.cfg",
+  "mode": "impl",
+  "meaning": "confirmed",
+  "spec": "Spec",
+  "expected": "PASS",
+  "invariants": [
+   "TypeOK",
+   "Inv_TagKept",
+   "Inv_FastKept",
+   "Inv_TreeTagged",
+   "Inv_TreeFast",
+   "Inv_SystemUntagged",
+   "Inv_NothingFromNowhere",
+   "Inv_83Untagged"
+  ],
+  "properties": [],
+  "deadlock": true,
+  "note": "34e73cb1: the tag and the fast flag together.",
+  "batch": "latest-1084",
+  "tlc": {
+   "comment": "ot.tagged-fast (latest-1084; expected PASS): 34e73cb1: the tag and the fast flag together.",
+   "spec": "Spec",
+   "constants": {
+    "RootTag": "TRUE",
+    "RootFast": "TRUE",
+    "RootOn83": "FALSE",
+    "MaxCan": "2",
+    "Fault": "\"none\""
+   },
+   "invariants": [
+    "TypeOK",
+    "Inv_TagKept",
+    "Inv_FastKept",
+    "Inv_TreeTagged",
+    "Inv_TreeFast",
+    "Inv_SystemUntagged",
+    "Inv_NothingFromNowhere",
+    "Inv_83Untagged"
+   ],
+   "properties": [],
+   "deadlock": true
+  }
+ },
+ {
+  "id": "ot.fast-only",
+  "module": "OwnerTagCarry",
+  "config": "ot.fast-only.cfg",
+  "mode": "impl",
+  "meaning": "confirmed",
+  "spec": "Spec",
+  "expected": "PASS",
+  "invariants": [
+   "TypeOK",
+   "Inv_TagKept",
+   "Inv_FastKept",
+   "Inv_TreeTagged",
+   "Inv_TreeFast",
+   "Inv_SystemUntagged",
+   "Inv_NothingFromNowhere",
+   "Inv_83Untagged"
+  ],
+  "properties": [],
+  "deadlock": true,
+  "note": "34e73cb1: the fast flag alone.",
+  "batch": "latest-1084",
+  "tlc": {
+   "comment": "ot.fast-only (latest-1084; expected PASS): 34e73cb1: the fast flag alone.",
+   "spec": "Spec",
+   "constants": {
+    "RootTag": "FALSE",
+    "RootFast": "TRUE",
+    "RootOn83": "FALSE",
+    "MaxCan": "2",
+    "Fault": "\"none\""
+   },
+   "invariants": [
+    "TypeOK",
+    "Inv_TagKept",
+    "Inv_FastKept",
+    "Inv_TreeTagged",
+    "Inv_TreeFast",
+    "Inv_SystemUntagged",
+    "Inv_NothingFromNowhere",
+    "Inv_83Untagged"
+   ],
+   "properties": [],
+   "deadlock": true
+  }
+ },
+ {
+  "id": "ot.untagged",
+  "module": "OwnerTagCarry",
+  "config": "ot.untagged.cfg",
+  "mode": "impl",
+  "meaning": "confirmed",
+  "spec": "Spec",
+  "expected": "PASS",
+  "invariants": [
+   "TypeOK",
+   "Inv_TagKept",
+   "Inv_FastKept",
+   "Inv_TreeTagged",
+   "Inv_TreeFast",
+   "Inv_SystemUntagged",
+   "Inv_NothingFromNowhere",
+   "Inv_83Untagged"
+  ],
+  "properties": [],
+  "deadlock": true,
+  "note": "34e73cb1: no tag, no flag: nothing appears anywhere in the tree.",
+  "batch": "latest-1084",
+  "tlc": {
+   "comment": "ot.untagged (latest-1084; expected PASS): 34e73cb1: no tag, no flag: nothing appears anywhere in the tree.",
+   "spec": "Spec",
+   "constants": {
+    "RootTag": "FALSE",
+    "RootFast": "FALSE",
+    "RootOn83": "FALSE",
+    "MaxCan": "2",
+    "Fault": "\"none\""
+   },
+   "invariants": [
+    "TypeOK",
+    "Inv_TagKept",
+    "Inv_FastKept",
+    "Inv_TreeTagged",
+    "Inv_TreeFast",
+    "Inv_SystemUntagged",
+    "Inv_NothingFromNowhere",
+    "Inv_83Untagged"
+   ],
+   "properties": [],
+   "deadlock": true
+  }
+ },
+ {
+  "id": "ot.from-1083",
+  "module": "OwnerTagCarry",
+  "config": "ot.from-1083.cfg",
+  "mode": "impl",
+  "meaning": "confirmed",
+  "spec": "Spec",
+  "expected": "PASS",
+  "invariants": [
+   "TypeOK",
+   "Inv_TagKept",
+   "Inv_FastKept",
+   "Inv_TreeTagged",
+   "Inv_TreeFast",
+   "Inv_SystemUntagged",
+   "Inv_NothingFromNowhere",
+   "Inv_83Untagged"
+  ],
+  "properties": [],
+  "deadlock": true,
+  "note": "34e73cb1: a root started on 1.0.83 (even with the fields in its input) moves to 1.0.84 untagged and unflagged, and so does its tree.",
+  "batch": "latest-1084",
+  "tlc": {
+   "comment": "ot.from-1083 (latest-1084; expected PASS): 34e73cb1: a root started on 1.0.83 (even with the fields in its input) moves to 1.0.84 untagged and unflagged, and so does its tree.",
+   "spec": "Spec",
+   "constants": {
+    "RootTag": "TRUE",
+    "RootFast": "TRUE",
+    "RootOn83": "TRUE",
+    "MaxCan": "2",
+    "Fault": "\"none\""
+   },
+   "invariants": [
+    "TypeOK",
+    "Inv_TagKept",
+    "Inv_FastKept",
+    "Inv_TreeTagged",
+    "Inv_TreeFast",
+    "Inv_SystemUntagged",
+    "Inv_NothingFromNowhere",
+    "Inv_83Untagged"
+   ],
+   "properties": [],
+   "deadlock": true
+  }
+ },
+ {
+  "id": "fault.ot-drop-at-can",
+  "module": "OwnerTagCarry",
+  "config": "fault.ot-drop-at-can.cfg",
+  "mode": "deliberate",
+  "meaning": "deliberate",
+  "spec": "Spec",
+  "expected": "safety",
+  "invariants": [
+   "Inv_TagKept"
+  ],
+  "properties": [],
+  "deadlock": false,
+  "note": "1.0.84's continue-as-new does not carry the tag.",
+  "batch": "latest-1084",
+  "tlc": {
+   "comment": "fault.ot-drop-at-can (latest-1084; expected safety): 1.0.84's continue-as-new does not carry the tag.",
+   "spec": "Spec",
+   "constants": {
+    "RootTag": "TRUE",
+    "RootFast": "FALSE",
+    "RootOn83": "FALSE",
+    "MaxCan": "2",
+    "Fault": "\"drop-at-can\""
+   },
+   "invariants": [
+    "Inv_TagKept"
+   ],
+   "properties": [],
+   "deadlock": false
+  }
+ },
+ {
+  "id": "fault.ot-child-untagged",
+  "module": "OwnerTagCarry",
+  "config": "fault.ot-child-untagged.cfg",
+  "mode": "deliberate",
+  "meaning": "deliberate",
+  "spec": "Spec",
+  "expected": "safety",
+  "invariants": [
+   "Inv_TreeTagged"
+  ],
+  "properties": [],
+  "deadlock": false,
+  "note": "A session created in a tagged session's turn gets no routing.",
+  "batch": "latest-1084",
+  "tlc": {
+   "comment": "fault.ot-child-untagged (latest-1084; expected safety): A session created in a tagged session's turn gets no routing.",
+   "spec": "Spec",
+   "constants": {
+    "RootTag": "TRUE",
+    "RootFast": "FALSE",
+    "RootOn83": "FALSE",
+    "MaxCan": "2",
+    "Fault": "\"child-untagged\""
+   },
+   "invariants": [
+    "Inv_TreeTagged"
+   ],
+   "properties": [],
+   "deadlock": false
+  }
+ },
+ {
+  "id": "fault.ot-system-child-tagged",
+  "module": "OwnerTagCarry",
+  "config": "fault.ot-system-child-tagged.cfg",
+  "mode": "deliberate",
+  "meaning": "deliberate",
+  "spec": "Spec",
+  "expected": "safety",
+  "invariants": [
+   "Inv_SystemUntagged"
+  ],
+  "properties": [],
+  "deadlock": false,
+  "note": "The orchestration's spawn passes the routing to a system child: deriveOptions drops the tag, not the fast flag.",
+  "batch": "latest-1084",
+  "tlc": {
+   "comment": "fault.ot-system-child-tagged (latest-1084; expected safety): The orchestration's spawn passes the routing to a system child: deriveOptions drops the tag, not the fast flag.",
+   "spec": "Spec",
+   "constants": {
+    "RootTag": "TRUE",
+    "RootFast": "TRUE",
+    "RootOn83": "FALSE",
+    "MaxCan": "2",
+    "Fault": "\"system-child-tagged\""
+   },
+   "invariants": [
+    "Inv_SystemUntagged"
+   ],
+   "properties": [],
+   "deadlock": false
+  }
+ },
+ {
+  "id": "wit.ot-grandchild-tagged",
+  "module": "OwnerTagCarry",
+  "config": "wit.ot-grandchild-tagged.cfg",
+  "mode": "impl",
+  "meaning": "witness",
+  "spec": "Spec",
+  "expected": "safety",
+  "invariants": [
+   "W_NoGrandchildTagged"
+  ],
+  "properties": [],
+  "deadlock": true,
+  "note": "34e73cb1: a sub-agent's sub-agent runs tagged after its own continue-as-new.",
+  "batch": "latest-1084",
+  "tlc": {
+   "comment": "wit.ot-grandchild-tagged (latest-1084; expected safety): 34e73cb1: a sub-agent's sub-agent runs tagged after its own continue-as-new.",
+   "spec": "Spec",
+   "constants": {
+    "RootTag": "TRUE",
+    "RootFast": "FALSE",
+    "RootOn83": "FALSE",
+    "MaxCan": "2",
+    "Fault": "\"none\""
+   },
+   "invariants": [
+    "W_NoGrandchildTagged"
+   ],
+   "properties": [],
+   "deadlock": true
+  }
+ },
+ {
+  "id": "vh.1084-safety",
+  "module": "VersionHandoff",
+  "config": "vh.1084-safety.cfg",
+  "mode": "impl",
+  "meaning": "confirmed",
+  "spec": "Spec",
+  "expected": "PASS",
+  "invariants": [
+   "TypeOK",
+   "Inv_NothingLost",
+   "Inv_ModelOnce",
+   "Inv_NoFailure"
+  ],
+  "properties": [],
+  "deadlock": true,
+  "note": "34e73cb1: a 1.0.83 session moves to 1.0.84 with an owed thrown-turn retry (ownedRetry), a queued prompt with the digest in its text, an unread prompt and set_model, a cron schedule, a workspace hold, intake state and an owed report: nothing lost, one model call, the 1.0.83 history replays on the frozen copy.",
+  "batch": "latest-1084",
+  "tlc": {
+   "comment": "vh.1084-safety (latest-1084; expected PASS): 34e73cb1: a 1.0.83 session moves to 1.0.84 with an owed thrown-turn retry (ownedRetry), a queued prompt with the digest in its text, an unread prompt and set_model, a cron schedule, a workspace hold, intake state and an owed report: nothing lost, one model call, the 1.0.83 history replays on the frozen copy.",
+   "spec": "Spec",
+   "constants": {
+    "From": "\"83\"",
+    "PendKind": "\"thrown\"",
+    "SourceStamp": "\"83\"",
+    "RegistryOK": "TRUE",
+    "NU": "1",
+    "SetModel": "TRUE",
+    "Cap": "3",
+    "FifoTookDigest": "TRUE",
+    "AllowLateCancel": "FALSE",
+    "AllowSweepSetModel": "FALSE",
+    "Extra": "{\"hold\", \"intake\", \"report\"}",
+    "FieldFault": "\"none\""
+   },
+   "invariants": [
+    "TypeOK",
+    "Inv_NothingLost",
+    "Inv_ModelOnce",
+    "Inv_NoFailure"
+   ],
+   "properties": [],
+   "deadlock": true
+  }
+ },
+ {
+  "id": "vh.1084-live",
+  "module": "VersionHandoff",
+  "config": "vh.1084-live.cfg",
+  "mode": "impl",
+  "meaning": "confirmed",
+  "spec": "LiveSpec",
+  "expected": "PASS",
+  "invariants": [
+   "TypeOK",
+   "Inv_NothingLost",
+   "Inv_ModelOnce",
+   "Inv_NoFailure"
+  ],
+  "properties": [
+   "Prop_AllProcessed"
+  ],
+  "deadlock": true,
+  "note": "34e73cb1: everything is processed on 1.0.84.",
+  "batch": "latest-1084",
+  "tlc": {
+   "comment": "vh.1084-live (latest-1084; expected PASS): 34e73cb1: everything is processed on 1.0.84.",
+   "spec": "LiveSpec",
+   "constants": {
+    "From": "\"83\"",
+    "PendKind": "\"thrown\"",
+    "SourceStamp": "\"83\"",
+    "RegistryOK": "TRUE",
+    "NU": "1",
+    "SetModel": "TRUE",
+    "Cap": "3",
+    "FifoTookDigest": "TRUE",
+    "AllowLateCancel": "FALSE",
+    "AllowSweepSetModel": "FALSE",
+    "Extra": "{\"hold\", \"intake\", \"report\"}",
+    "FieldFault": "\"none\""
+   },
+   "invariants": [
+    "TypeOK",
+    "Inv_NothingLost",
+    "Inv_ModelOnce",
+    "Inv_NoFailure"
+   ],
+   "properties": [
+    "Prop_AllProcessed"
+   ],
+   "deadlock": true
+  }
+ },
+ {
+  "id": "vh.1084-plain",
+  "module": "VersionHandoff",
+  "config": "vh.1084-plain.cfg",
+  "mode": "impl",
+  "meaning": "confirmed",
+  "spec": "LiveSpec",
+  "expected": "PASS",
+  "invariants": [
+   "TypeOK",
+   "Inv_NothingLost",
+   "Inv_ModelOnce",
+   "Inv_NoFailure"
+  ],
+  "properties": [
+   "Prop_AllProcessed"
+  ],
+  "deadlock": true,
+  "note": "34e73cb1: a plain pending prompt.",
+  "batch": "latest-1084",
+  "tlc": {
+   "comment": "vh.1084-plain (latest-1084; expected PASS): 34e73cb1: a plain pending prompt.",
+   "spec": "LiveSpec",
+   "constants": {
+    "From": "\"83\"",
+    "PendKind": "\"plain\"",
+    "SourceStamp": "\"83\"",
+    "RegistryOK": "TRUE",
+    "NU": "1",
+    "SetModel": "TRUE",
+    "Cap": "3",
+    "FifoTookDigest": "TRUE",
+    "AllowLateCancel": "FALSE",
+    "AllowSweepSetModel": "FALSE",
+    "Extra": "{\"hold\", \"intake\", \"report\"}",
+    "FieldFault": "\"none\""
+   },
+   "invariants": [
+    "TypeOK",
+    "Inv_NothingLost",
+    "Inv_ModelOnce",
+    "Inv_NoFailure"
+   ],
+   "properties": [
+    "Prop_AllProcessed"
+   ],
+   "deadlock": true
+  }
+ },
+ {
+  "id": "vh.1084-returned-error",
+  "module": "VersionHandoff",
+  "config": "vh.1084-returned-error.cfg",
+  "mode": "impl",
+  "meaning": "confirmed",
+  "spec": "LiveSpec",
+  "expected": "PASS",
+  "invariants": [
+   "TypeOK",
+   "Inv_NothingLost",
+   "Inv_ModelOnce",
+   "Inv_NoFailure"
+  ],
+  "properties": [
+   "Prop_AllProcessed"
+  ],
+  "deadlock": true,
+  "note": "34e73cb1: a returned error's retry stays the pending prompt and runs once.",
+  "batch": "latest-1084",
+  "tlc": {
+   "comment": "vh.1084-returned-error (latest-1084; expected PASS): 34e73cb1: a returned error's retry stays the pending prompt and runs once.",
+   "spec": "LiveSpec",
+   "constants": {
+    "From": "\"83\"",
+    "PendKind": "\"retErr\"",
+    "SourceStamp": "\"83\"",
+    "RegistryOK": "TRUE",
+    "NU": "1",
+    "SetModel": "TRUE",
+    "Cap": "3",
+    "FifoTookDigest": "TRUE",
+    "AllowLateCancel": "FALSE",
+    "AllowSweepSetModel": "FALSE",
+    "Extra": "{\"hold\", \"intake\", \"report\"}",
+    "FieldFault": "\"none\""
+   },
+   "invariants": [
+    "TypeOK",
+    "Inv_NothingLost",
+    "Inv_ModelOnce",
+    "Inv_NoFailure"
+   ],
+   "properties": [
+    "Prop_AllProcessed"
+   ],
+   "deadlock": true
+  }
+ },
+ {
+  "id": "vh.1084-lossy",
+  "module": "VersionHandoff",
+  "config": "vh.1084-lossy.cfg",
+  "mode": "impl",
+  "meaning": "confirmed",
+  "spec": "LiveSpec",
+  "expected": "PASS",
+  "invariants": [
+   "TypeOK",
+   "Inv_NothingLost",
+   "Inv_ModelOnce",
+   "Inv_NoFailure"
+  ],
+  "properties": [
+   "Prop_AllProcessed"
+  ],
+  "deadlock": true,
+  "note": "34e73cb1: a lossy hand-off with its rehydration notice.",
+  "batch": "latest-1084",
+  "tlc": {
+   "comment": "vh.1084-lossy (latest-1084; expected PASS): 34e73cb1: a lossy hand-off with its rehydration notice.",
+   "spec": "LiveSpec",
+   "constants": {
+    "From": "\"83\"",
+    "PendKind": "\"lossy\"",
+    "SourceStamp": "\"83\"",
+    "RegistryOK": "TRUE",
+    "NU": "1",
+    "SetModel": "TRUE",
+    "Cap": "3",
+    "FifoTookDigest": "TRUE",
+    "AllowLateCancel": "FALSE",
+    "AllowSweepSetModel": "FALSE",
+    "Extra": "{\"hold\", \"intake\", \"report\"}",
+    "FieldFault": "\"none\""
+   },
+   "invariants": [
+    "TypeOK",
+    "Inv_NothingLost",
+    "Inv_ModelOnce",
+    "Inv_NoFailure"
+   ],
+   "properties": [
+    "Prop_AllProcessed"
+   ],
+   "deadlock": true
+  }
+ },
+ {
+  "id": "vh.1084-late-cancel",
+  "module": "VersionHandoff",
+  "config": "vh.1084-late-cancel.cfg",
+  "mode": "impl",
+  "meaning": "confirmed",
+  "spec": "LiveSpec",
+  "expected": "PASS",
+  "invariants": [
+   "TypeOK",
+   "Inv_NothingLost",
+   "Inv_ModelOnce",
+   "Inv_NoFailure"
+  ],
+  "properties": [
+   "Prop_AllProcessed"
+  ],
+  "deadlock": true,
+  "note": "34e73cb1: a 1.0.83-queued prompt cancelled at its dispatch on 1.0.84 gives its digest back (its markers; queue.ts is identical), unlike a 1.0.82-queued one (vh.legacy-late-cancel).",
+  "batch": "latest-1084",
+  "tlc": {
+   "comment": "vh.1084-late-cancel (latest-1084; expected PASS): 34e73cb1: a 1.0.83-queued prompt cancelled at its dispatch on 1.0.84 gives its digest back (its markers; queue.ts is identical), unlike a 1.0.82-queued one (vh.legacy-late-cancel).",
+   "spec": "LiveSpec",
+   "constants": {
+    "From": "\"83\"",
+    "PendKind": "\"thrown\"",
+    "SourceStamp": "\"83\"",
+    "RegistryOK": "TRUE",
+    "NU": "1",
+    "SetModel": "TRUE",
+    "Cap": "3",
+    "FifoTookDigest": "TRUE",
+    "AllowLateCancel": "TRUE",
+    "AllowSweepSetModel": "FALSE",
+    "Extra": "{\"hold\", \"intake\", \"report\"}",
+    "FieldFault": "\"none\""
+   },
+   "invariants": [
+    "TypeOK",
+    "Inv_NothingLost",
+    "Inv_ModelOnce",
+    "Inv_NoFailure"
+   ],
+   "properties": [
+    "Prop_AllProcessed"
+   ],
+   "deadlock": true
+  }
+ },
+ {
+  "id": "vh.1084-carry-cap",
+  "module": "VersionHandoff",
+  "config": "vh.1084-carry-cap.cfg",
+  "mode": "impl",
+  "meaning": "design-limit",
+  "spec": "Spec",
+  "expected": "safety",
+  "invariants": [
+   "Inv_NothingLost"
+  ],
+  "properties": [],
+  "deadlock": false,
+  "note": "Duroxide carries at most 100 unread messages (Cap here), as for every hand-off.",
+  "batch": "latest-1084",
+  "tlc": {
+   "comment": "vh.1084-carry-cap (latest-1084; expected safety): Duroxide carries at most 100 unread messages (Cap here), as for every hand-off.",
+   "spec": "Spec",
+   "constants": {
+    "From": "\"83\"",
+    "PendKind": "\"thrown\"",
+    "SourceStamp": "\"83\"",
+    "RegistryOK": "TRUE",
+    "NU": "2",
+    "SetModel": "TRUE",
+    "Cap": "2",
+    "FifoTookDigest": "TRUE",
+    "AllowLateCancel": "FALSE",
+    "AllowSweepSetModel": "FALSE",
+    "Extra": "{\"hold\", \"intake\", \"report\"}",
+    "FieldFault": "\"none\""
+   },
+   "invariants": [
+    "Inv_NothingLost"
+   ],
+   "properties": [],
+   "deadlock": false
+  }
+ },
+ {
+  "id": "fault.vh-1084-registry-unfrozen",
+  "module": "VersionHandoff",
+  "config": "fault.vh-1084-registry-unfrozen.cfg",
+  "mode": "deliberate",
+  "meaning": "deliberate",
+  "spec": "Spec",
+  "expected": "safety",
+  "invariants": [
+   "Inv_NoFailure"
+  ],
+  "properties": [],
+  "deadlock": false,
+  "note": "The 1.0.83 entry follows LATEST: 1.0.83 is unregistered and its in-flight history cannot replay.",
+  "batch": "latest-1084",
+  "tlc": {
+   "comment": "fault.vh-1084-registry-unfrozen (latest-1084; expected safety): The 1.0.83 entry follows LATEST: 1.0.83 is unregistered and its in-flight history cannot replay.",
+   "spec": "Spec",
+   "constants": {
+    "From": "\"83\"",
+    "PendKind": "\"thrown\"",
+    "SourceStamp": "\"83\"",
+    "RegistryOK": "FALSE",
+    "NU": "1",
+    "SetModel": "TRUE",
+    "Cap": "3",
+    "FifoTookDigest": "TRUE",
+    "AllowLateCancel": "FALSE",
+    "AllowSweepSetModel": "FALSE",
+    "Extra": "{\"hold\", \"intake\", \"report\"}",
+    "FieldFault": "\"none\""
+   },
+   "invariants": [
+    "Inv_NoFailure"
+   ],
+   "properties": [],
+   "deadlock": false
+  }
+ },
+ {
+  "id": "fault.vh-1084-drop-retry",
+  "module": "VersionHandoff",
+  "config": "fault.vh-1084-drop-retry.cfg",
+  "mode": "deliberate",
+  "meaning": "deliberate",
+  "spec": "Spec",
+  "expected": "safety",
+  "invariants": [
+   "Inv_NothingLost"
+  ],
+  "properties": [],
+  "deadlock": false,
+  "note": "1.0.84 does not restore the carried ownedRetry.",
+  "batch": "latest-1084",
+  "tlc": {
+   "comment": "fault.vh-1084-drop-retry (latest-1084; expected safety): 1.0.84 does not restore the carried ownedRetry.",
+   "spec": "Spec",
+   "constants": {
+    "From": "\"83\"",
+    "PendKind": "\"thrown\"",
+    "SourceStamp": "\"83\"",
+    "RegistryOK": "TRUE",
+    "NU": "1",
+    "SetModel": "TRUE",
+    "Cap": "3",
+    "FifoTookDigest": "TRUE",
+    "AllowLateCancel": "FALSE",
+    "AllowSweepSetModel": "FALSE",
+    "Extra": "{\"hold\", \"intake\", \"report\"}",
+    "FieldFault": "\"pend\""
+   },
+   "invariants": [
+    "Inv_NothingLost"
+   ],
+   "properties": [],
+   "deadlock": false
+  }
+ },
+ {
+  "id": "fault.vh-1084-drop-hold",
+  "module": "VersionHandoff",
+  "config": "fault.vh-1084-drop-hold.cfg",
+  "mode": "deliberate",
+  "meaning": "deliberate",
+  "spec": "Spec",
+  "expected": "safety",
+  "invariants": [
+   "Inv_NothingLost"
+  ],
+  "properties": [],
+  "deadlock": false,
+  "note": "1.0.84 does not read the carried workspace hold.",
+  "batch": "latest-1084",
+  "tlc": {
+   "comment": "fault.vh-1084-drop-hold (latest-1084; expected safety): 1.0.84 does not read the carried workspace hold.",
+   "spec": "Spec",
+   "constants": {
+    "From": "\"83\"",
+    "PendKind": "\"thrown\"",
+    "SourceStamp": "\"83\"",
+    "RegistryOK": "TRUE",
+    "NU": "1",
+    "SetModel": "TRUE",
+    "Cap": "3",
+    "FifoTookDigest": "TRUE",
+    "AllowLateCancel": "FALSE",
+    "AllowSweepSetModel": "FALSE",
+    "Extra": "{\"hold\", \"intake\", \"report\"}",
+    "FieldFault": "\"hold\""
+   },
+   "invariants": [
+    "Inv_NothingLost"
+   ],
+   "properties": [],
+   "deadlock": false
+  }
+ },
+ {
+  "id": "fault.vh-1084-drop-intake",
+  "module": "VersionHandoff",
+  "config": "fault.vh-1084-drop-intake.cfg",
+  "mode": "deliberate",
+  "meaning": "deliberate",
+  "spec": "Spec",
+  "expected": "safety",
+  "invariants": [
+   "Inv_NothingLost"
+  ],
+  "properties": [],
+  "deadlock": false,
+  "note": "1.0.84 does not read the carried intake state.",
+  "batch": "latest-1084",
+  "tlc": {
+   "comment": "fault.vh-1084-drop-intake (latest-1084; expected safety): 1.0.84 does not read the carried intake state.",
+   "spec": "Spec",
+   "constants": {
+    "From": "\"83\"",
+    "PendKind": "\"thrown\"",
+    "SourceStamp": "\"83\"",
+    "RegistryOK": "TRUE",
+    "NU": "1",
+    "SetModel": "TRUE",
+    "Cap": "3",
+    "FifoTookDigest": "TRUE",
+    "AllowLateCancel": "FALSE",
+    "AllowSweepSetModel": "FALSE",
+    "Extra": "{\"hold\", \"intake\", \"report\"}",
+    "FieldFault": "\"intake\""
+   },
+   "invariants": [
+    "Inv_NothingLost"
+   ],
+   "properties": [],
+   "deadlock": false
+  }
+ },
+ {
+  "id": "wit.vh-1084-adopted",
+  "module": "VersionHandoff",
+  "config": "wit.vh-1084-adopted.cfg",
+  "mode": "impl",
+  "meaning": "witness",
+  "spec": "Spec",
+  "expected": "safety",
+  "invariants": [
+   "W_NoAdoption"
+  ],
+  "properties": [],
+  "deadlock": true,
+  "note": "34e73cb1: the carried owed retry adopts the thrown attempt's saved turn.",
+  "batch": "latest-1084",
+  "tlc": {
+   "comment": "wit.vh-1084-adopted (latest-1084; expected safety): 34e73cb1: the carried owed retry adopts the thrown attempt's saved turn.",
+   "spec": "Spec",
+   "constants": {
+    "From": "\"83\"",
+    "PendKind": "\"thrown\"",
+    "SourceStamp": "\"83\"",
+    "RegistryOK": "TRUE",
+    "NU": "1",
+    "SetModel": "TRUE",
+    "Cap": "3",
+    "FifoTookDigest": "TRUE",
+    "AllowLateCancel": "FALSE",
+    "AllowSweepSetModel": "FALSE",
+    "Extra": "{\"hold\", \"intake\", \"report\"}",
+    "FieldFault": "\"none\""
+   },
+   "invariants": [
+    "W_NoAdoption"
    ],
    "properties": [],
    "deadlock": true
