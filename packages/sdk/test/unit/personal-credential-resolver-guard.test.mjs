@@ -10,14 +10,16 @@
  * The program and its unpacked copy are built in a temporary folder, as in
  * cli-program-guard.test.mjs. A copy the worker can neither write nor make
  * writable needs another owner on Linux and macOS, so the case that passes
- * the check runs on Windows only; the redaction itself runs everywhere.
+ * the check runs on Windows only, and skips there for an account whose
+ * backup and restore privileges are enabled (it writes through any deny
+ * rule); the redaction itself runs everywhere.
  *
  * Run: node --test test/unit/personal-credential-resolver-guard.test.mjs
  */
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, mkdirSync, mkdtempSync, openSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -78,6 +80,18 @@ function programFixture(t) {
 
 const worker = (root) => new PilotSwarmWorker({ sessionStateDir: join(root, "sessions"), disableManagementAgents: true });
 const resolver = async () => ({ status: "ok", token: "made-up" });
+
+/** Whether this account still adds a file to `dir` after a deny rule took that right away. */
+function writesThroughDeny(dir) {
+    const probe = join(dir, `.deny-probe-${process.pid}`);
+    try {
+        closeSync(openSync(probe, "wx"));
+    } catch {
+        return false;
+    }
+    rmSync(probe, { force: true });
+    return true;
+}
 
 test("without a resolver a worker starts as before and redacts no GitHub token; removing one changes nothing", (t) => {
     withSettings(t);
@@ -142,6 +156,10 @@ test("in database mode a worker passes the check with a protected copy, takes th
     const { root, home, settings } = programFixture(t);
     // Inherited by everything below: no file may be added, written or have its attributes changed.
     execFileSync("icacls", [home, "/deny", `${process.env.USERNAME}:(OI)(CI)(WD,AD,WA)`, "/Q"], { stdio: "ignore" });
+    if (writesThroughDeny(home)) {
+        t.skip("this account writes through the deny rule: its backup or restore privileges are enabled");
+        return;
+    }
     const run = inChild([
         `const worker = new PilotSwarmWorker({ sessionStateDir: ${JSON.stringify(join(root, "sessions"))}, disableManagementAgents: true });`,
         // As once start() was called, so the resolver is checked when it is set, without a database.

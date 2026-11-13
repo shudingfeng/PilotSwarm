@@ -11,14 +11,17 @@
  * checks run against it. Write access is taken away with icacls on Windows
  * and chmod elsewhere. On Linux and macOS the account that owns a folder can
  * always give itself write access back, so a copy that passes needs another
- * owner, and that case runs on Windows only.
+ * owner, and that case runs on Windows only. On Windows an account whose
+ * backup and restore privileges are enabled, as on some CI runners, writes
+ * through any deny rule, because Node opens files with backup semantics;
+ * the cases that need a protected copy skip there.
  *
  * Run: node --test test/unit/cli-program-guard.test.mjs
  */
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, mkdirSync, mkdtempSync, openSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -72,6 +75,10 @@ function makeReadOnly(dir, { permissions = false } = {}) {
             // and with WA no attribute, such as read-only, may be changed.
             const rights = permissions ? "(WD,AD,WA)" : "(WD,AD)";
             execFileSync("icacls", [dir, "/deny", `${process.env.USERNAME}:(OI)(CI)${rights}`, "/Q"], { stdio: "ignore" });
+            if (writesThroughDeny(dir)) {
+                makeWritable(dir);
+                return false;
+            }
             return true;
         }
         if (permissions || process.getuid?.() === 0) return false;
@@ -88,6 +95,18 @@ function makeReadOnly(dir, { permissions = false } = {}) {
     } catch {
         return false;
     }
+}
+
+/** Whether this account still adds a file to `dir` after a deny rule took that right away. */
+function writesThroughDeny(dir) {
+    const probe = join(dir, `.deny-probe-${process.pid}`);
+    try {
+        closeSync(openSync(probe, "wx"));
+    } catch {
+        return false;
+    }
+    rmSync(probe, { force: true });
+    return true;
 }
 
 function makeWritable(dir) {
@@ -202,7 +221,7 @@ test("a complete copy of the pinned version that the worker can neither write no
     const { settings, home } = fixture(t);
     assert.doesNotThrow(() => assertCliProgramForExternalSecrets(settings, { writableProblem: NOT_WRITABLE }));
     if (!makeReadOnly(home, { permissions: true })) {
-        t.skip("only another account can own a copy this account cannot make writable");
+        t.skip("this account can always write the copy or make it writable again: as its owner on Linux and macOS, with backup or restore privileges on Windows");
         return;
     }
     assert.equal(writableProblem(home, "directory"), null);
