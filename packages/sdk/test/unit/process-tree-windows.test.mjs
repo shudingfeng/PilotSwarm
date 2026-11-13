@@ -89,7 +89,19 @@ test("Windows tree cleanup uses taskkill only for the validated root PID", () =>
         assert.ok(taskkill);
         assert.deepEqual(taskkill.args, ["/F", "/T", "/PID", String(ROOT)]);
         assert.equal(taskkill.options.windowsHide, true);
-        assert.equal(taskkill.options.timeout, 5_000);
+        assert.deepEqual(calls.map(call => call.options.timeout), [5_000, 5_000], "the snapshot and taskkill");
+    });
+});
+
+test("a caller may give the Windows commands longer than the default 5 s", () => {
+    withWindows(command => command.endsWith("taskkill.exe") ? "" : printed(snapshot()), calls => {
+        assert.equal(killProcessTree(ROOT, { timeoutMs: 60_000 }), true);
+        assert.deepEqual(calls.map(call => call.options.timeout), [60_000, 60_000]);
+    });
+    const started = 1_700_000_000_000;
+    withWindows(() => wmiTime(started), calls => {
+        assert.equal(taskProcessAlive(ROOT, started, { timeoutMs: 60_000 }), true);
+        assert.deepEqual(calls.map(call => call.options.timeout), [60_000]);
     });
 });
 
