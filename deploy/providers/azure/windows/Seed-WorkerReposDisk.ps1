@@ -111,7 +111,7 @@ function Test-SeedManifest {
         }
         $submodules = $true
         if (Test-JsonProperty $repo 'submodules') { $submodules = [bool]$repo.submodules }
-        $path = Join-Path $reposRoot $repo.name
+        $path = [System.IO.Path]::Combine($reposRoot, [string]$repo.name)
         if (-not ($modify | Where-Object { ($_ -ieq $path) -or (& $inside $path $_) })) { throw ('seed manifest: no modify folder covers ' + $path + '; the worker could not change the repository') }
         $repositories += [pscustomobject]@{ Name = $repo.name; Url = $repo.url; Branch = $repo.branch; Submodules = $submodules; Lfs = $lfs; Path = $path }
     }
