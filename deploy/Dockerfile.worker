@@ -47,6 +47,12 @@ RUN rm -rf packages/sdk/dist packages/horizon-store/dist \
     && npm run build --workspace=pilotswarm-horizon-store \
     && npm prune --omit=dev --force
 
+# The coordination host's extension module is a package of its own, with its
+# own lockfile, so the Azure SDK it needs comes from that lockfile and not from
+# the workspace install (deploy/providers/azure/linux-worker/README.md).
+COPY deploy/providers/azure/linux-worker/package.json deploy/providers/azure/linux-worker/package-lock.json ./deploy/providers/azure/linux-worker/
+RUN npm ci --omit=dev --prefix deploy/providers/azure/linux-worker
+
 FROM node:24.22.1-trixie-slim
 
 RUN apt-get update \
@@ -94,6 +100,8 @@ COPY deploy/config/model_providers.ghcp.json ./.model_providers.json
 # Windows workers. Nothing loads it unless PILOTSWARM_EXTENSION_MODULES names
 # it; see deploy/providers/azure/linux-worker/README.md.
 COPY deploy/providers/azure/linux-worker/*.mjs ./deploy/providers/azure/linux-worker/
+# Its dependencies, installed from its own lockfile in the build stage.
+COPY --from=build /app/deploy/providers/azure/linux-worker/node_modules/ ./deploy/providers/azure/linux-worker/node_modules/
 
 # Optional: the Copilot CLI program unpacked once, as root, into a folder the
 # worker's account can only read. With PILOTSWARM_PERSONAL_SECRETS=external a

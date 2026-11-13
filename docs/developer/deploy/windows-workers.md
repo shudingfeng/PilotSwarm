@@ -21,10 +21,10 @@ the design and the reasons behind it; this page describes what the code does.
 | Windows image, services and scripts | `deploy/providers/azure/windows/` | [README](../../../deploy/providers/azure/windows/README.md) |
 | Disk controller and credential broker | `deploy/providers/azure/disk-controller/` | [README](../../../deploy/providers/azure/disk-controller/README.md) |
 | Key Vault personal secret store | `deploy/providers/azure/secret-store/` | [README](../../../deploy/providers/azure/secret-store/README.md) |
-| Coordination host module and manifests | `deploy/providers/azure/linux-worker/`, `deploy/providers/azure/gitops/worker/components/coordination-host*/`, `deploy/scripts/lib/coordination-host.mjs` | [README](../../../deploy/providers/azure/linux-worker/README.md), [orchestrator reference](../../../deploy/scripts/README.md#the-coordination-host) |
-| Settings, Bicep and the deploy step | `deploy/providers/azure/envs/template.env`, `deploy/providers/azure/services/base-infra/bicep/`, `deploy/providers/azure/deploy-steps/win-workers.mjs` | [Orchestrator reference](../../../deploy/scripts/README.md#optional-windows-worker-pool) |
+| Coordination host module and manifests | `deploy/providers/azure/linux-worker/`, `deploy/providers/azure/gitops/worker/components/coordination-host*/`, `deploy/providers/azure/lib/coordination-host.mjs` | [README](../../../deploy/providers/azure/linux-worker/README.md), [orchestrator reference](../../../deploy/scripts/README.md#the-coordination-host) |
+| Settings, Bicep and the deploy step | `deploy/providers/azure/envs/template.env`, `deploy/providers/azure/services/base-infra/bicep/`, `deploy/providers/azure/lib/`, `deploy/providers/azure/deploy-steps/win-workers.mjs` | [Orchestrator reference](../../../deploy/scripts/README.md#optional-windows-worker-pool) |
 | Database role Job | `deploy/providers/azure/deploy-steps/Setup-WinWorkerDbRole.mjs`, `deploy/providers/azure/deploy-steps/db-role-job.mjs` | [Orchestrator reference](../../../deploy/scripts/README.md#the-database-role-job) |
-| Entra app roles for applications | `deploy/scripts/auth/` | [Portal Entra app roles](./entra-app-roles.md#roles-for-application-identities) |
+| Entra app roles for applications | `deploy/scripts/auth/`, `deploy/providers/azure/entra/` | [Portal Entra app roles](./entra-app-roles.md#roles-for-application-identities) |
 | SDK settings and hooks | `packages/sdk/` | [Configuration](../reference/configuration.md#windows-worker-pool-azure) |
 
 ## Contents
@@ -2049,9 +2049,10 @@ fails the build instead of every worker.
 
 ### Values the deploy fills in
 
-- **The VMs' `userData`,** which `render-params.mjs` renders and the launcher and
-  attacher read at every service start: `DATABASE_URL` and
-  `PILOTSWARM_CMS_FACTS_DATABASE_URL` (passwordless), `PILOTSWARM_DB_AAD_USER`,
+- **The VMs' `userData`,** which `deploy/providers/azure/lib/bicep-parameters.mjs`
+  renders and the launcher and attacher read at every service start:
+  `DATABASE_URL` and `PILOTSWARM_CMS_FACTS_DATABASE_URL` (passwordless),
+  `PILOTSWARM_DB_AAD_USER`,
   `AZURE_STORAGE_ACCOUNT_URL`, `PS_DISK_POOL_CONTROLLER_URL`
   (`https://10.20.15.250:3003`), `PS_DISK_CONTROLLER_TOKEN_SCOPE`,
   `AZURE_CLIENT_ID`, `EXPECTED_WIN_WORKER_OID`,

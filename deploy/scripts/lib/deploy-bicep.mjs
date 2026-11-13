@@ -8,8 +8,7 @@
 //
 // Subsequent stages (manifests, rollout) see the merged env map in-process.
 
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join, isAbsolute } from "node:path";
 import { run, runJson, log, REPO_ROOT } from "./common.mjs";
 import { renderParams } from "./render-params.mjs";
@@ -24,6 +23,7 @@ import {
 import { assertFoundryDeploymentsValid } from "./validate-foundry-deployments.mjs";
 import { resolveAppgwWafCustomRulesFile } from "./appgw-waf-rules.mjs";
 import { prepareHorizonDbEnvForRender, ensureHorizonDbParameterGroup } from "./horizondb.mjs";
+import { writeSecureParameters } from "../../providers/azure/lib/bicep-parameters.mjs";
 
 // Bicep main.bicep paths and params templates are derived by convention from
 // the module name: deploy/providers/azure/services/<Module>/bicep/{main.bicep,<Module>.params.template.json}.
@@ -125,23 +125,6 @@ export async function deployBicep({ service, envName, env, region, stagingDir, m
     if (moduleName === "horizondb") await ensureHorizonDbParameterGroup(env);
   }
   return env;
-}
-
-// Secure parameters (`@secure()` in Bicep) never go into the rendered
-// parameters file, onto a command line or into a log: they pass to az through
-// a file in a private temporary folder that is removed right after the
-// deployment.
-function writeSecureParameters(parameters) {
-  const dir = mkdtempSync(join(tmpdir(), "pilotswarm-bicep-"));
-  chmodSync(dir, 0o700);
-  const path = join(dir, "secure.parameters.json");
-  const body = Object.fromEntries(Object.entries(parameters).map(([name, value]) => [name, { value }]));
-  writeFileSync(path, JSON.stringify({
-    $schema: "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
-    contentVersion: "1.0.0.0",
-    parameters: body,
-  }), { mode: 0o600 });
-  return { dir, path };
 }
 
 async function deployOne({ moduleName, service, envName, env, region, stagingDir, force, forceSet, secureParameters }) {

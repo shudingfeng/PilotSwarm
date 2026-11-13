@@ -10,6 +10,10 @@ A multi-platform Node.js deploy driver for PilotSwarm on AKS that
 | **`deploy/scripts/deploy.mjs`** *(this README)* | OSS-friendly equivalent of the enterprise path, runnable from any contributor's box without the enterprise path. | Reproducing the GitOps deploy locally; future GitHub Actions wrapper. |
 
 The reusable Azure templates live under [`deploy/providers/azure/`](../providers/azure/README.md).
+The logic of its optional profiles, `AZURE_POLICY_RESTRICTED` and the Windows
+worker pool, lives there too, in `deploy/providers/azure/lib/`,
+`deploy-steps/` and `entra/`; the scripts here only call it, behind those
+settings.
 Each local stamp is scaffolded from that provider's env template and records
 `DEPLOY_PROVIDER=azure` in its ignored configuration.
 Set `MODEL_PROVIDERS_FILE` to an ignored, per-stamp JSON catalog when the
@@ -303,8 +307,9 @@ runs the rotation between deploys ("Rotating the CA" in
 Every trust store gets them as one PEM bundle, the current CA first; a stamp
 that never rotates has one CA, as before.
 
-`render-params.mjs` renders the VMs' `userData`: the stamp's database,
-storage, controller and identity values, the controller's trusted CA
+`render-params.mjs` adds the VMs' `userData` to base-infra's parameters, as
+`deploy/providers/azure/lib/bicep-parameters.mjs` renders it: the stamp's
+database, storage, controller and identity values, the controller's trusted CA
 certificates (one, or two during a rotation),
 `PILOTSWARM_WORKER_OWNER_ONLY=1` (a pool always has the coordination host)
 and the `WIN_WORKER_EXTRA_ENV` pairs. It holds no secret, and the renderer
@@ -466,8 +471,8 @@ time, deploy `portal` before `worker` the first time you deploy the pool:
 until the Job has run, the host's pods can't use the database, and the
 worker's rollout fails.
 
-`stage-manifests.mjs` (`deploy/scripts/lib/coordination-host.mjs`) stages the
-worker with:
+`stage-manifests.mjs` (with `deploy/providers/azure/lib/coordination-host.mjs`)
+stages the worker with:
 
 - the host's identity as the overlay's `WORKLOAD_IDENTITY_CLIENT_ID` (its
   service account's workload identity) and `PILOTSWARM_DB_AAD_USER`, for that
@@ -580,6 +585,7 @@ with the built-in Node test runner (no new dependencies). The suite is gated
 on PRs and pushes to `main` by `.github/workflows/deploy-scripts-tests.yml`
 whenever `deploy/scripts/**`, `deploy/providers/azure/services/**/deploy.json`,
 `deploy/providers/azure/services/**/bicep/**`, `deploy/providers/azure/deploy-steps/**`,
+`deploy/providers/azure/lib/**`, `deploy/providers/azure/entra/**`,
 `deploy/providers/azure/secret-store/**`, `deploy/providers/azure/disk-controller/**`,
 the worker/portal/disk-controller Dockerfiles, the root package
 manifest/lockfile, or that workflow itself changes.

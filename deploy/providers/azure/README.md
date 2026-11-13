@@ -12,12 +12,12 @@ This directory holds the reusable Azure deployment templates for PilotSwarm:
   Windows worker pool, with its image, manifests and TLS deploy step. The
   `disk-controller` service deploys it only with `WIN_WORKERS_ENABLED=true`;
   see its [README](disk-controller/README.md).
-- `linux-worker/` is the coordination host's extension module, which the
-  worker image carries and loads only when `PILOTSWARM_EXTENSION_MODULES`
-  names it: the Linux worker beside a pool of owner-only Windows workers sends
-  their owners' capacity requests to the disk controller, and runs everything
-  but the owners' work, the portal's sessions included; see its
-  [README](linux-worker/README.md).
+- `linux-worker/` is the coordination host's extension module, a package with
+  its own lockfile, which the worker image carries and loads only when
+  `PILOTSWARM_EXTENSION_MODULES` names it: the Linux worker beside a pool of
+  owner-only Windows workers sends their owners' capacity requests to the disk
+  controller, and runs everything but the owners' work, the portal's sessions
+  included; see its [README](linux-worker/README.md).
 - `windows/` builds the Windows worker image and holds the services, scripts
   and upgrade steps of a Windows worker pool; nothing uses it unless a
   deployment builds that image. See its [README](windows/README.md).
@@ -27,6 +27,14 @@ This directory holds the reusable Azure deployment templates for PilotSwarm:
   [deploy/scripts/README.md](../../scripts/README.md)) `win-workers.mjs` and
   the database role Job (`Setup-WinWorkerDbRole.mjs`, staged and run by
   `db-role-job.mjs`).
+- `lib/` holds the rest of those two profiles' logic that the shared scripts
+  in `deploy/scripts/` use: their settings, Bicep parameters (the Windows
+  workers' `userData` among them), combination checks, overlay values and the
+  coordination host's staging. The scripts only call it; see its
+  [README](lib/README.md).
+- `entra/` holds the portal Entra app's roles for application identities,
+  which `deploy/scripts/auth/Setup-PortalAuth.ps1 -WorkerRoles` and
+  `Set-PortalAuthAssignments.ps1` dot-source; see its [README](entra/README.md).
 
 The entry points remain `deploy/scripts/new-env.mjs` and
 `deploy/scripts/deploy.mjs`. They currently support `DEPLOY_PROVIDER=azure`.

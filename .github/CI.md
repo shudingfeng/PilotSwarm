@@ -308,8 +308,8 @@ needs no cloud credentials to test:
   superuser, and a run's own database need not allow that. Run it against
   such a PostgreSQL server when you change the Job.
 - **Deploy scripts tests** (`deploy-scripts-tests.yml`) runs the same suite
-  whenever `deploy/providers/azure/deploy-steps/`, `secret-store/`,
-  `disk-controller/`, `linux-worker/` or `windows/`,
+  whenever `deploy/providers/azure/deploy-steps/`, `lib/`, `entra/`,
+  `secret-store/`, `disk-controller/`, `linux-worker/` or `windows/`,
   `packages/sdk/examples/devdrive-workspaces/` or
   `deploy/Dockerfile.disk-controller` changes, as well as the paths it already
   watched.
