@@ -104,8 +104,8 @@ export class WebPilotSwarmManagementClient {
         await this._api.call("completeSession", { sessionId, reason });
     }
 
-    async deleteSession(sessionId: string): Promise<void> {
-        await this._api.call("deleteSession", { sessionId });
+    async deleteSession(sessionId: string, reason?: string, options: { force?: boolean; settleTimeoutMs?: number } = {}): Promise<void> {
+        await this._api.call("deleteSession", { sessionId, reason, ...options });
     }
 
     /** Same contract as the direct client. The server overwrites `opts.caller` from the authenticated request. */
@@ -523,6 +523,15 @@ export class WebPilotSwarmManagementClient {
 
     async setUserGitHubCopilotKey(_principal: unknown, key: string | null): Promise<any> {
         return this._api.call("setCurrentUserGitHubCopilotKey", { key });
+    }
+
+    /** The signed-in caller's opt-in; `dispatcherConfigured` says whether the deployment has a dispatcher. */
+    async getMyDispatcherDelegation(_principal?: unknown): Promise<any> {
+        return this.ops.getMyDispatcherDelegation();
+    }
+
+    async setMyDispatcherDelegation(enabled: boolean, _principal?: unknown): Promise<any> {
+        return this.ops.setMyDispatcherDelegation({ enabled });
     }
 
     async setSystemGitHubCopilotKey(_actor: unknown, key: string | null): Promise<any> {
@@ -1051,6 +1060,10 @@ export class WebPilotSwarmManagementClient {
 
     recordAuthzAudit(): never {
         throw webModeUnsupported("recordAuthzAudit", "the portal records authz audit server-side");
+    }
+
+    getSessionDelegation(): never {
+        throw webModeUnsupported("getSessionDelegation", "the portal applies a delegated session's sharing rule server-side");
     }
 
     recordUserRole(): never {

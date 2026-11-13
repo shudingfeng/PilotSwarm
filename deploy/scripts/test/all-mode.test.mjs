@@ -31,6 +31,9 @@ test("ALL_SEQUENCE matches the enterprise services.json infraOrder + service ord
     // WORKSPACES_ENABLED=true. After worker, which owns the namespace.
     "repo-cache",
     "portal",
+    // The Windows worker pool's disk controller; deploy.mjs skips it unless
+    // WIN_WORKERS_ENABLED=true. After portal, whose namespace and host it joins.
+    "disk-controller",
   ]);
 });
 
@@ -67,7 +70,7 @@ test("validateService accepts 'all' as a virtual aggregate", () => {
   // current set so accidental removals are caught.
   assert.deepEqual(
     [...SERVICES].sort(),
-    ["base-infra", "cert-manager", "cert-manager-issuers", "global-infra", "horizondb", "pls-anchor", "portal", "repo-cache", "worker"],
+    ["base-infra", "cert-manager", "cert-manager-issuers", "disk-controller", "global-infra", "horizondb", "pls-anchor", "portal", "repo-cache", "worker"],
   );
 });
 
@@ -115,6 +118,7 @@ test("default (no --steps) full all-mode runs full pipeline for app services, bi
     worker: ["build", "bicep", "push", "manifests", "rollout"],
     "repo-cache": ["build", "bicep", "push", "manifests", "rollout"],
     portal: ["build", "bicep", "push", "manifests", "rollout"],
+    "disk-controller": ["build", "bicep", "push", "manifests", "rollout"],
   };
   for (const svc of ALL_SEQUENCE) {
     const resolved = resolveSteps(null, svc); // no --steps → defaultPipelineFor(svc)

@@ -5,6 +5,28 @@ This directory holds the reusable Azure deployment templates for PilotSwarm:
 - `envs/template.env` supplies safe defaults and placeholders for a new stamp.
 - `services/` contains the Bicep modules and service manifest.
 - `gitops/` contains the Kustomize and Flux manifests.
+- `secret-store/` is a Key Vault store for personal keys that the portal image
+  carries and loads only when `PILOTSWARM_PERSONAL_SECRET_STORE_MODULE` names
+  it; see its [README](secret-store/README.md).
+- `disk-controller/` is the disk controller and credential broker for a
+  Windows worker pool, with its image, manifests and TLS deploy step. The
+  `disk-controller` service deploys it only with `WIN_WORKERS_ENABLED=true`;
+  see its [README](disk-controller/README.md).
+- `linux-worker/` is the coordination host's extension module, which the
+  worker image carries and loads only when `PILOTSWARM_EXTENSION_MODULES`
+  names it: the Linux worker beside a pool of owner-only Windows workers sends
+  their owners' capacity requests to the disk controller, and runs everything
+  but the owners' work, the portal's sessions included; see its
+  [README](linux-worker/README.md).
+- `windows/` builds the Windows worker image and holds the services, scripts
+  and upgrade steps of a Windows worker pool; nothing uses it unless a
+  deployment builds that image. See its [README](windows/README.md).
+- `deploy-steps/` holds what Bicep alone can't do for some settings:
+  `policy-restricted.mjs` for `AZURE_POLICY_RESTRICTED=true`, and for the Windows worker pool
+  (`WIN_WORKERS_ENABLED=true`, see "Optional: Windows worker pool" in
+  [deploy/scripts/README.md](../../scripts/README.md)) `win-workers.mjs` and
+  the database role Job (`Setup-WinWorkerDbRole.mjs`, staged and run by
+  `db-role-job.mjs`).
 
 The entry points remain `deploy/scripts/new-env.mjs` and
 `deploy/scripts/deploy.mjs`. They currently support `DEPLOY_PROVIDER=azure`.

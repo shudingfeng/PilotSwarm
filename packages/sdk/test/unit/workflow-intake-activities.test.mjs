@@ -129,12 +129,13 @@ test("only a test or the full-engine worker module registers the intake activiti
         // Their names are written once, in the shared intake definition; the inactive 1.0.83 tree schedules them by that constant.
         if (/["'`](?:claimWorkflowIntake|settleWorkflowIntake)["'`]/.test(code)) namedIn.push(path);
         // The capability that routes them is defined once. The Workflow controller routes its own activities with it
-        // (workflow/runtime.ts), and only the milestone worker module declares it for a worker; the inactive 1.0.83 tree,
-        // and the session proxy for the turns of its workflow-intake contract, route with routeWorkflowRequestActivity.
+        // (workflow/runtime.ts), and only the milestone worker module declares it for a worker; the inactive 1.0.83 tree
+        // (frozen in orchestration_1_0_83/ since 1.0.84, which keeps it in the live tree), and the session proxy for the turns
+        // of its workflow-intake contract, route with routeWorkflowRequestActivity.
         if (!["activity-routing.ts", "workflow/runtime.ts", MILESTONE].includes(path)) {
             assert.ok(!code.includes("WORKFLOW_REQUEST_CAPABILITY") && !code.includes("pilotswarm.workflow-request.v1"), `${path} names the workflow-request capability`);
         }
-        if (path !== "activity-routing.ts" && !path.startsWith("orchestration/") && path !== "session-proxy.ts") {
+        if (path !== "activity-routing.ts" && !/^orchestration(?:_1_0_\d+)?\//.test(path) && path !== "session-proxy.ts") {
             assert.ok(!code.includes("routeWorkflowRequestActivity"), `${path} routes with the workflow-request capability`);
         }
         // Only the worker loads the milestone worker module.

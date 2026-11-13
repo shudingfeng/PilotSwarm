@@ -490,6 +490,10 @@ or `./run.sh`.
 8. Select your personal provider and press `Shift+U`. Type the replacement
    credential (input is masked), then press `Enter` to update it. `Esc`
    cancels. The provider name, defaults, routing, and usage history remain.
+9. On deployments that name a dispatcher, **My Providers** also shows
+   **Dispatcher Delegation**. Press `g` to let the dispatcher start and end
+   sessions for you, or to stop it (see
+   [Access, sharing & security](security-and-sharing.md#letting-the-deployments-dispatcher-work-for-you)).
 
 **What just happened:**
 

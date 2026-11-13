@@ -19,6 +19,7 @@ const read = name => readFileSync(new URL(`../../src/${name}`, import.meta.url),
 
 test("registry freezes 1.0.81 and activates a separate later handler", () => {
     assert.equal(DURABLE_SESSION_ORCHESTRATION_REGISTRY.find(r => r.version === "1.0.81").handler.name, "durableSessionOrchestration_1_0_81");
+    assert.equal(DURABLE_SESSION_ORCHESTRATION_REGISTRY.find(r => r.version === "1.0.82").handler.name, "durableSessionOrchestration_1_0_82");
     const latest = DURABLE_SESSION_ORCHESTRATION_REGISTRY.at(-1);
     assert.notEqual(latest.version, "1.0.81");
     assert.equal(latest.handler.name, `durableSessionOrchestration_${latest.version.replaceAll(".", "_")}`);

@@ -21,7 +21,7 @@
  */
 
 import fs from "node:fs";
-import { createCopilotClient } from "./copilot-client.js";
+import { createCopilotClient, withCliProgramSessionOptions } from "./copilot-client.js";
 import type { ToolCatalogCapability } from "./model-providers.js";
 import { TEXT_ARTIFACT_MAX_BYTES } from "./session-store.js";
 import { selectTranscript } from "./transcript-selection.js";
@@ -662,11 +662,11 @@ export async function runRegenDistill(
                 env: { ...process.env, COPILOT_HOME: tempHome },
             }, resolved!.provider, resolved!.toolCatalog);
             await sdk.start();
-            const session: any = await sdk.createSession({
+            const session: any = await sdk.createSession(withCliProgramSessionOptions({
                 ...(resolved!.model ? { model: resolved!.model } : {}),
                 ...(resolved!.provider ? { provider: resolved!.provider } : {}),
                 onPermissionRequest: approvePermissionForSession,
-            });
+            }));
             ephemeralSessionId = session.id ?? null;
             return await new Promise<string>((resolve, reject) => {
                 let latest = "";

@@ -1,0 +1,30 @@
+# The coordination host with session workspaces: the workspace provider, the
+# clone tools and the credential helper of agents' Git reach the repo service
+# on port 8080, which the repo pod's own policy admits from worker pods. The
+# host's egress policy (components/coordination-host/network-policy.yaml)
+# leaves that port out. Policies add up, so this second policy opens only it.
+# The NFS mounts come from the attacher, on the node's network, not from the
+# worker's pods.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: copilot-runtime-worker-repo-cache-egress
+  labels:
+    app.kubernetes.io/name: pilotswarm
+    app.kubernetes.io/component: worker
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: pilotswarm
+      app.kubernetes.io/component: worker
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: pilotswarm
+              app.kubernetes.io/component: repo-cache
+      ports:
+        - protocol: TCP
+          port: 8080

@@ -200,6 +200,7 @@ Contract:
 - answering only in the target session's own chat transcript does not deliver a response to the sender
 - request and response protocol prompts are durable transcript items and should render as dedicated session request/reply cards in shared UI surfaces
 - ordinary sessions may send requests or replies to system sessions; the same terminal-state, self-message, orchestration-live, and rate-limit guards still apply
+- with `PILOTSWARM_SESSION_MESSAGE_SCOPE=owner`, requests and replies go only between sessions with the same owner, or between system sessions; the tools refuse any other with `policy_denied` before anything is queued
 
 Why it matters:
 

@@ -50,6 +50,9 @@ OVERLAYS=(
   "${SCRIPT_DIR}/portal/overlays/afd-akv"
   "${SCRIPT_DIR}/portal/overlays/private-akv"
   "${SCRIPT_DIR}/portal/overlays/public-letsencrypt"
+  "${SCRIPT_DIR}/disk-controller/overlays/afd-akv"
+  "${SCRIPT_DIR}/disk-controller/overlays/afd-letsencrypt"
+  "${SCRIPT_DIR}/disk-controller/overlays/private-akv"
 )
 
 have_kubeconform=0

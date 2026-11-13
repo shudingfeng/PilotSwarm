@@ -23,6 +23,7 @@ import {
 } from "./model-providers.js";
 import type { DefaultTuple, ProviderCredential, ProviderStore } from "./provider-store.js";
 import { WORKLOAD_IDENTITY_KIND } from "./provider-store.js";
+import { externalSecretRef, personalSecretsMode, type PersonalSecretsMode } from "./personal-secret-store.js";
 
 export type RuntimeModelResolutionSource =
     | "explicit"
@@ -192,14 +193,26 @@ export function buildRuntimeRegistry(
     types: ModelProviderRegistry,
     instances: ProviderCredential[],
     defaultModel?: string | null,
+    // The worker passes PILOTSWARM_PERSONAL_SECRETS, read once: it rebuilds this before every turn.
+    options: { personalSecrets?: PersonalSecretsMode } = {},
 ): ModelProviderRegistry {
     const byType = new Map(types.allProviders.map((p) => [p.id, p]));
     const providers: ModelProviderConfig[] = [];
+    let externalMode = options.personalSecrets === undefined ? undefined : options.personalSecrets === "external";
     for (const inst of instances) {
         const type = byType.get(inst.typeId);
         if (!type) continue;      // a type the file no longer describes
         const workloadIdentity = providerTypeUsesWorkloadIdentity(type.type);
         const secret = secretValue(inst.secretRef);
+        // A GitHub token kept in the deployment's secret store is present,
+        // though the row holds only its reference: the turn resolves it.
+        const externalSecret = type.type === "github" ? externalSecretRef(inst.secretRef) : null;
+        // With PILOTSWARM_PERSONAL_SECRETS=external a personal GitHub token
+        // belongs in that store. One still in the row, saved before the
+        // setting was turned on, is not used: the provider stays listed, and
+        // its turns fail until the owner updates the key, which moves it there.
+        const databaseKeyIgnored = type.type === "github" && inst.class === "personal" && !externalSecret
+            && Boolean(secret) && (externalMode ??= personalSecretsMode() === "external");
         // A provider whose own credential does not resolve is DROPPED, never
         // quietly run on the type's. Inheriting it meant a personal provider
         // created with a shape this code did not read spent the CLUSTER's key
@@ -210,7 +223,7 @@ export function buildRuntimeRegistry(
         // A workload-identity provider is exempt because it borrows nothing:
         // its credential is the worker's own identity, which is the same one
         // whatever row names it, so there is no other key to fall through to.
-        if (!secret && !workloadIdentity) continue;
+        if (!secret && !workloadIdentity && !externalSecret) continue;
         // But it is a CLUSTER credential, so it may only be a shared provider.
         // A personal one would spend the organization's own Anthropic account
         // under a name no administrator can cap, hold or even delete —
@@ -244,7 +257,9 @@ export function buildRuntimeRegistry(
             ...(inst.baseUrl && !workloadIdentity ? { baseUrl: inst.baseUrl } : {}),
             ...(workloadIdentity
                 ? {}
-                : type.type === "github" ? { githubToken: secret } : { apiKey: secret }),
+                : externalSecret ? { externalSecret }
+                    : databaseKeyIgnored ? { databaseKeyIgnored: true as const }
+                        : type.type === "github" ? { githubToken: secret } : { apiKey: secret }),
         });
     }
     // An invalid default would throw out of the constructor and take the
@@ -256,7 +271,7 @@ export function buildRuntimeRegistry(
         : firstRuntimeModel(types, instances, (instance) => instance.class === "shared")?.model;
     return new ModelProviderRegistry(
         { providers, ...(effectiveDefault ? { defaultModel: effectiveDefault } : {}) },
-        { keepUncredentialed: true });
+        { keepUncredentialed: true, externalSecrets: true });
 }
 
 export function firstRuntimeModel(
@@ -407,6 +422,12 @@ export function resolveProviderCredential(
     if (!type) return null;
 
     if (type.type === "github") {
+        // The token stays in the secret store: the provider is usable, and
+        // the turn that runs on it fetches the token (see SessionManager).
+        const externalSecret = externalSecretRef(credential.secretRef);
+        if (externalSecret) {
+            return { providerId: credential.name, type: "github", modelName, externalSecret };
+        }
         const token = secretValue(credential.secretRef);
         if (!token) return null;
         return {

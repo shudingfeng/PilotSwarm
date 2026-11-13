@@ -78,3 +78,8 @@ export function approvePermissionForSession(request?: PermissionRequestLike): Pe
         approval,
     } as PermissionRequestResult;
 }
+
+/** For a session that may only answer in text: every request is refused. */
+export function denyEveryPermission(): PermissionRequestResult {
+    return { kind: "reject", feedback: "This session cannot use tools." } as PermissionRequestResult;
+}

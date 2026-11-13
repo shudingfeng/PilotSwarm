@@ -79,8 +79,9 @@ describe("migration 0089: the owner side's session names", () => {
             expect(Object.values(before).every(n => n > 0)).toBe(true);
 
             await runMigrations(pool, upgraded, CMS_MIGRATIONS(upgraded), CMS_LOCK_SEED);
+            // 0090, the dispatcher delegation opt-in, runs after them and touches no Workflow object.
             expect((await query(`SELECT version FROM ${s}.schema_migrations WHERE version > '0087' ORDER BY version`)).rows.map(row => row.version))
-                .toEqual(["0088", "0089"]);
+                .toEqual(["0088", "0089", "0090"]);
 
             // Every row is kept under the new names; the old names are gone.
             for (const table of TABLES) {

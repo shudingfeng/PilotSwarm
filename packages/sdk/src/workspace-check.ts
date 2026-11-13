@@ -144,6 +144,15 @@ export function foldersOverlap(a: { root: string; folder?: string }, b: { root: 
 }
 
 /**
+ * `PILOTSWARM_DISABLE_CHILD_WORKSPACE_INHERITANCE=1`: a sub-agent gets no
+ * workspace, neither its parent's nor one its parent names, so only root
+ * sessions hold folders. Off by default.
+ */
+export function childWorkspacesDisabled(env: NodeJS.ProcessEnv = process.env): boolean {
+    return env.PILOTSWARM_DISABLE_CHILD_WORKSPACE_INHERITANCE === "1";
+}
+
+/**
  * The folder-text check. Accepts `{ root, folder?, extra? }` (schema
  * optional, must be 1 when given) and returns the normalized record: each
  * folder is relative, has no NUL, no `..` after normalizing, and no trailing

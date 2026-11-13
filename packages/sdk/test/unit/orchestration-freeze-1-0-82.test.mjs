@@ -6,8 +6,11 @@
  * The intake changes the session orchestration's yields, so 1.0.82 is frozen
  * in orchestration_1_0_82/ (the live code of v0.8.10 with only its version
  * literal) and in-flight 1.0.82 sessions keep replaying on it. The registry
- * registers it, and 1.0.83 (orchestration/) is the latest version: new starts
- * and every continue-as-new target it, the frozen copy's included.
+ * registers it, and a later version (orchestration/) is the latest version: new
+ * starts and every continue-as-new target it, the frozen copy's included.
+ * 1.0.83 was frozen in turn (orchestration-freeze-1-0-83.test.mjs) when 1.0.84
+ * added owner routing; the frozen 1.0.82 copy keeps 1.0.82's routing and busy
+ * policy.
  *
  * Run: node --test test/unit/orchestration-freeze-1-0-82.test.mjs
  */
@@ -40,6 +43,8 @@ function importsOf(text) {
 
 const LIVE_VERSION_LINE = "export const CURRENT_ORCHESTRATION_VERSION = DURABLE_SESSION_LATEST_VERSION;";
 const FROZEN_VERSION_LINE = 'export const CURRENT_ORCHESTRATION_VERSION = "1.0.82";';
+// The latest version's handler; orchestration-freeze-1-0-83.test.mjs pins the version itself.
+const LATEST_HANDLER = `durableSessionOrchestration_${DURABLE_SESSION_LATEST_VERSION.replaceAll(".", "_")}`;
 
 function versionNumbers(version) {
     assert.match(version, /^\d+\.\d+\.\d+$/);
@@ -52,18 +57,18 @@ function compareVersions(a, b) {
     return 0;
 }
 
-test("the registry freezes 1.0.82 on its copy and registers 1.0.83, from the live tree, as the latest version", () => {
-    assert.equal(DURABLE_SESSION_LATEST_VERSION, "1.0.83");
+test("the registry freezes 1.0.82 on its copy and registers a later version, from the live tree, as the latest version", () => {
+    assert.ok(compareVersions(DURABLE_SESSION_LATEST_VERSION, "1.0.82") > 0);
     const frozen = DURABLE_SESSION_ORCHESTRATION_REGISTRY.find(entry => entry.version === "1.0.82");
     assert.equal(frozen.handler.name, "durableSessionOrchestration_1_0_82");
     const latest = DURABLE_SESSION_ORCHESTRATION_REGISTRY.at(-1);
-    assert.deepEqual([latest.version, latest.handler.name], ["1.0.83", "durableSessionOrchestration_1_0_83"]);
+    assert.deepEqual([latest.version, latest.handler.name], [DURABLE_SESSION_LATEST_VERSION, LATEST_HANDLER]);
     assert.equal(DURABLE_SESSION_ORCHESTRATION_REGISTRY.filter(entry => entry.version === "1.0.82").length, 1);
     const registry = read("orchestration-registry.ts");
     assert.match(registry, /import \{ durableSessionOrchestration_1_0_82 \} from "\.\/orchestration_1_0_82\/index\.js";/);
-    assert.match(registry, /import \{ durableSessionOrchestration_1_0_83 \} from "\.\/orchestration\/index\.js";/);
-    assert.match(registry, /\{ version: DURABLE_SESSION_LATEST_VERSION, handler: durableSessionOrchestration_1_0_83 \}/);
-    assert.match(read("orchestration-version.ts"), /export const DURABLE_SESSION_LATEST_VERSION = "1\.0\.83";/);
+    assert.match(registry, new RegExp(`import \\{ ${LATEST_HANDLER} \\} from "\\.\\/orchestration\\/index\\.js";`));
+    assert.match(registry, new RegExp(`\\{ version: DURABLE_SESSION_LATEST_VERSION, handler: ${LATEST_HANDLER} \\}`));
+    assert.ok(read("orchestration-version.ts").includes(`export const DURABLE_SESSION_LATEST_VERSION = "${DURABLE_SESSION_LATEST_VERSION}";`));
 });
 
 test("the latest version is at or above every registered version", () => {
@@ -131,4 +136,14 @@ test("only the registry imports the frozen 1.0.82 copy", () => {
             if (specifier.includes("orchestration_1_0_82")) assert.equal(path, "orchestration-registry.ts", `${path} imports ${specifier}`);
         }
     }
+});
+
+test("frozen 1.0.82 keeps the 1.0.82 routing and busy policy", () => {
+    for (const name of Object.keys(frozenHashes)) {
+        assert.doesNotMatch(read(`orchestration_1_0_82/${name}`), /ownerTag|requestOwnerCapacity|workspaceBusyFastRelease/, name);
+    }
+    const agents = read("orchestration_1_0_82/agents.ts");
+    assert.equal(agents.match(/yield runtime\.session\.destroy\(\);/g)?.length, 3, "complete, cancel and the failed shutdown destroy without a cap");
+    assert.match(read("orchestration_1_0_82/lifecycle.ts"), /const raw: any = yield runtime\.session\.checkWorkspace\(/);
+    assert.match(read("orchestration_1_0_82/turn.ts"), /if \(failures\.count >= 2 && state\.blobEnabled\) \{/);
 });

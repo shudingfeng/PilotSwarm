@@ -70,6 +70,7 @@ export const GENERATED_OP_NAMES: readonly string[] = [
     "getModelDefaults",
     "getModelsByProvider",
     "getMotdImage",
+    "getMyDispatcherDelegation",
     "getMyFeatureFlags",
     "getOrchestrationStats",
     "getProviderStatus",
@@ -169,6 +170,7 @@ export const GENERATED_OP_NAMES: readonly string[] = [
     "setCurrentUserProfileSettings",
     "setModelDefault",
     "setMyDefault",
+    "setMyDispatcherDelegation",
     "setMyFeatureFlag",
     "setProviderAllowance",
     "setProviderHold",
@@ -363,7 +365,7 @@ export interface ManagementOps {
     }): Promise<any>;
 
     /**
-     * Create a session. Owner is the authenticated principal; visibility defaults to the deployment default. workspace { root, folder? } sets its working folder.
+     * Create a session. Owner is the authenticated principal; visibility defaults to the deployment default. workspace { root, folder? } sets its working folder. onBehalfOfOwner { subject, provider? }: the deployment's dispatcher only, for a user who allows it, while ownership is enforced; that user owns the private session, shared for reading only, and the dispatcher gets a write share. Ignored on a deployment that names no dispatcher.
      * @remarks `POST /sessions` — access: `session:create`
      */
     createSession(params: {
@@ -373,10 +375,11 @@ export interface ManagementOps {
         groupId?: any;
         visibility?: any;
         workspace?: any;
+        onBehalfOfOwner?: any;
     }): Promise<any>;
 
     /**
-     * Create a session bound to a named agent. workspace { root, folder? } sets its working folder.
+     * Create a session bound to a named agent. workspace { root, folder? } sets its working folder. onBehalfOfOwner as in createSession.
      * @remarks `POST /sessions/for-agent` — access: `session:create`
      */
     createSessionForAgent(params: {
@@ -391,10 +394,11 @@ export interface ManagementOps {
         groupId?: any;
         visibility?: any;
         workspace?: any;
+        onBehalfOfOwner?: any;
     }): Promise<any>;
 
     /**
-     * Stage 2.3: make a session for a package's Workflow Definition (ref, <package>/<name>): a session (model: default the deployment's) with the definition attached and locked at the package's version, instructions to coordinate it from its interface card, and a first message that asks the session to greet the person and ask for the inputs it needs. 404 PACKAGE_WORKFLOW_NOT_FOUND for a definition the caller cannot use.
+     * Stage 2.3: make a session for a package's Workflow Definition (ref, <package>/<name>): a session (model: default the deployment's) with the definition attached and locked at the package's version, instructions to coordinate it from its interface card, and a first message that asks the session to greet the person and ask for the inputs it needs. 404 PACKAGE_WORKFLOW_NOT_FOUND for a definition the caller cannot use. onBehalfOfOwner is refused (400 INVALID_REQUEST) on a deployment that names a dispatcher: no Workflow starts in a session created on behalf of a user.
      * @remarks `POST /sessions/for-workflow` — access: `session:create`
      */
     createSessionForWorkflow(params: {
@@ -404,6 +408,7 @@ export interface ManagementOps {
         contextTier?: any;
         groupId?: any;
         visibility?: any;
+        onBehalfOfOwner?: any;
     }): Promise<any>;
 
     /**
@@ -495,11 +500,14 @@ export interface ManagementOps {
     }): Promise<any>;
 
     /**
-     * Cancel and soft-delete a session.
+     * Cancel and soft-delete a session. With force: when the delete has not settled within settleTimeoutMs (0 to 65000, default 65000; 0 sends no command), delete its subtree directly, leaves first, and fail naming what failed so a retry can finish. reason is recorded with force only.
      * @remarks `DELETE /sessions/:sessionId` — access: `session:destroy`
      */
     deleteSession(params: {
         sessionId: string;
+        reason?: string;
+        force?: boolean;
+        settleTimeoutMs?: number;
     }): Promise<any>;
 
     /**
@@ -778,6 +786,12 @@ export interface ManagementOps {
         motdId: string;
         mobile?: boolean;
     }): Promise<any>;
+
+    /**
+     * Whether you let the deployment's dispatcher create sessions for you and end the ones it created: { enabled, dispatcherConfigured }.
+     * @remarks `GET /me/dispatcher-delegation` — access: `authed`
+     */
+    getMyDispatcherDelegation(params?: Record<string, never>): Promise<any>;
 
     /**
      * Read my feature preferences and effective values.
@@ -1070,7 +1084,7 @@ export interface ManagementOps {
     }): Promise<any>;
 
     /**
-     * Grant (or update) a targeted share ({ user: { provider, subject, email?, displayName? }, access: read|write }). Owner or admin.
+     * Grant (or update) a targeted share ({ user: { provider, subject, email?, displayName? }, access: read|write }). Owner or admin. A tree the dispatcher created for its owner takes no write share but the dispatcher's (403 DELEGATED_SESSION_READ_ONLY).
      * @remarks `POST /sessions/:sessionId/shares` — access: `session:share`
      */
     grantSessionShare(params: {
@@ -1666,6 +1680,14 @@ export interface ManagementOps {
     }): Promise<any>;
 
     /**
+     * Turn your dispatcher delegation on or off (enabled: boolean). Off keeps the dispatcher's shares but refuses it on your sessions (403 DELEGATION_REVOKED) until you turn it back on.
+     * @remarks `PUT /me/dispatcher-delegation` — access: `authed`
+     */
+    setMyDispatcherDelegation(params: {
+        enabled?: any;
+    }): Promise<any>;
+
+    /**
      * Set my preference; locked cluster policy still takes precedence.
      * @remarks `PUT /management/users/me/features/:featureKey` — access: `authed`
      */
@@ -1725,7 +1747,7 @@ export interface ManagementOps {
     }): Promise<any>;
 
     /**
-     * Set the tree's sharing level (private | shared_read | shared_write). Owner or admin.
+     * Set the tree's sharing level (private | shared_read | shared_write). Owner or admin. A tree the dispatcher created for its owner refuses shared_write (403 DELEGATED_SESSION_READ_ONLY).
      * @remarks `PUT /sessions/:sessionId/visibility` — access: `session:share`
      */
     setSessionVisibility(params: {
@@ -2062,6 +2084,7 @@ export function createManagementOps(
         getModelDefaults: (params: Record<string, unknown> = {}) => callOp("getModelDefaults", params),
         getModelsByProvider: (params: Record<string, unknown> = {}) => callOp("getModelsByProvider", params),
         getMotdImage: (params: Record<string, unknown> = {}) => callOp("getMotdImage", params),
+        getMyDispatcherDelegation: (params: Record<string, unknown> = {}) => callOp("getMyDispatcherDelegation", params),
         getMyFeatureFlags: (params: Record<string, unknown> = {}) => callOp("getMyFeatureFlags", params),
         getOrchestrationStats: (params: Record<string, unknown> = {}) => callOp("getOrchestrationStats", params),
         getProviderStatus: (params: Record<string, unknown> = {}) => callOp("getProviderStatus", params),
@@ -2161,6 +2184,7 @@ export function createManagementOps(
         setCurrentUserProfileSettings: (params: Record<string, unknown> = {}) => callOp("setCurrentUserProfileSettings", params),
         setModelDefault: (params: Record<string, unknown> = {}) => callOp("setModelDefault", params),
         setMyDefault: (params: Record<string, unknown> = {}) => callOp("setMyDefault", params),
+        setMyDispatcherDelegation: (params: Record<string, unknown> = {}) => callOp("setMyDispatcherDelegation", params),
         setMyFeatureFlag: (params: Record<string, unknown> = {}) => callOp("setMyFeatureFlag", params),
         setProviderAllowance: (params: Record<string, unknown> = {}) => callOp("setProviderAllowance", params),
         setProviderHold: (params: Record<string, unknown> = {}) => callOp("setProviderHold", params),

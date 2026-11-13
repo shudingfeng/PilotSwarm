@@ -3,10 +3,12 @@
  * state (design docs/proposals/workflow-durable-intake.md 5.4, 5.5, 5.7 and
  * section 8, amendment 2; decision intake-inactive-implementation).
  *
- * - 1.0.83 is the latest version (owner decision 2026-11-08T15:30Z): the
- *   registry's last entry, in orchestration/ (the live tree); only the
- *   registry and the orchestration.ts shim import it; its tree is the frozen
- *   1.0.82 plus the intake files.
+ * - 1.0.83 was the latest version (owner decision 2026-11-08T15:30Z) and is
+ *   frozen in orchestration_1_0_83/, as v0.8.11 released it; its tree is the
+ *   frozen 1.0.82 plus the intake files. The latest, 1.0.84 (the live tree,
+ *   which only the registry and the orchestration.ts shim import), is 1.0.83
+ *   plus owner routing (docs/proposals/windows-worker-pool.md, U18): it keeps
+ *   the intake whole, and the tests below that read the live tree cover it.
  * - Every continue-as-new of 1.0.83 goes through versionedContinueAsNew:
  *   each call site is listed below, and nothing else calls the context's
  *   continue-as-new. Driven with a fake context, it carries the intake state
@@ -40,6 +42,8 @@ import { createInitialState as createInitialState82, deriveOptions as deriveOpti
 import { continueInput as continueInput82, versionedContinueAsNew as versionedContinueAsNew82 } from "../../dist/orchestration_1_0_82/lifecycle.js";
 
 const SRC = new URL("../../src/", import.meta.url);
+/** v0.8.11's 1.0.83, frozen when 1.0.84 became the latest. */
+const V83 = "orchestration_1_0_83";
 const read = name => readFileSync(new URL(name, SRC), "utf8").replace(/\r\n/g, "\n");
 const tsFiles = dir => readdirSync(new URL(`${dir}/`, SRC)).filter(name => name.endsWith(".ts")).sort();
 
@@ -125,10 +129,14 @@ const VALID = carried({ queue: [unclaimed(1), held(2, TEXT_A)], invocation: boun
 
 // ─── Inactive ────────────────────────────────────────────────
 
-test("1.0.83 is the latest version, in the live tree; only the registry and the orchestration.ts shim import it", () => {
-    assert.equal(DURABLE_SESSION_LATEST_VERSION, "1.0.83");
+test("1.0.83 is frozen in orchestration_1_0_83/; the latest, 1.0.84, is the live tree; only the registry and the orchestration.ts shim import it", () => {
+    assert.equal(DURABLE_SESSION_LATEST_VERSION, "1.0.84");
     const latest = DURABLE_SESSION_ORCHESTRATION_REGISTRY.at(-1);
-    assert.deepEqual([latest.version, latest.handler.name], ["1.0.83", "durableSessionOrchestration_1_0_83"]);
+    assert.deepEqual([latest.version, latest.handler.name], ["1.0.84", "durableSessionOrchestration_1_0_84"]);
+    const frozen83 = DURABLE_SESSION_ORCHESTRATION_REGISTRY.find(entry => entry.version === "1.0.83");
+    assert.equal(frozen83.handler.name, "durableSessionOrchestration_1_0_83");
+    assert.match(read(`${V83}/index.ts`), /export function\* durableSessionOrchestration_1_0_83\(/);
+    assert.match(read(`${V83}/runtime.ts`), /^export const CURRENT_ORCHESTRATION_VERSION = "1\.0\.83";$/m);
     for (const path of allSourceFiles()) {
         if (path.startsWith("orchestration/") || path.startsWith("orchestration_")) continue;
         const specifiers = importsOf(read(path)).filter(specifier => /(^|\/)orchestration\//.test(specifier));
@@ -136,7 +144,7 @@ test("1.0.83 is the latest version, in the live tree; only the registry and the 
         assert.deepEqual(specifiers, allowed, `${path} imports ${specifiers.join(", ")}`);
     }
     assert.match(read("orchestration/runtime.ts"), /^export const CURRENT_ORCHESTRATION_VERSION = DURABLE_SESSION_LATEST_VERSION;$/m);
-    assert.match(read("orchestration/index.ts"), /export function\* durableSessionOrchestration_1_0_83\(/);
+    assert.match(read("orchestration/index.ts"), /export function\* durableSessionOrchestration_1_0_84\(/);
 });
 
 /** The lines `a` has that `b` has not, counted (a multiset difference), in `a`'s order. */
@@ -386,22 +394,22 @@ function assertIntakeOnlyAdditions(name, added, generic = []) {
     }
 }
 
-test("1.0.83 is the frozen 1.0.82 plus the intake: the files it does not change are the frozen ones", () => {
-    assert.deepEqual(tsFiles("orchestration"), [...tsFiles("orchestration_1_0_82"), "intake-machine.ts", "intake-state.ts", "intake-wiring.ts",
+test("1.0.83 (orchestration_1_0_83/) is the frozen 1.0.82 plus the intake: the files it does not change are the frozen ones", () => {
+    assert.deepEqual(tsFiles(V83), [...tsFiles("orchestration_1_0_82"), "intake-machine.ts", "intake-state.ts", "intake-wiring.ts",
         "workflow-turn-failure.ts"].sort());
     for (const name of ["agents.ts", "utils.ts"]) {
-        assert.equal(read(`orchestration/${name}`), read(`orchestration_1_0_82/${name}`), name);
+        assert.equal(read(`${V83}/${name}`), read(`orchestration_1_0_82/${name}`), name);
     }
     // Every 1.0.83 turn runs under the workflow-intake contract (design section 8): no 1.0.83 file names the turn-control one.
-    for (const name of tsFiles("orchestration")) {
-        assert.ok(!read(`orchestration/${name}`).includes('"turn-control-v1"'), `${name} names the turn-control contract`);
+    for (const name of tsFiles(V83)) {
+        assert.ok(!read(`${V83}/${name}`).includes('"turn-control-v1"'), `${name} names the turn-control contract`);
     }
     // runtime.ts: its version, the workflow-intake contract, no continue-as-new while an intake write is due (drain races
     // it), and a history-size continue-as-new whose own refusal fails the execution.
     assert.equal(read("orchestration_1_0_82/runtime.ts").split(HISTORY_CHECK_82).length, 2);
-    assert.equal(read("orchestration/runtime.ts"), read("orchestration_1_0_82/runtime.ts")
+    assert.equal(read(`${V83}/runtime.ts`), read("orchestration_1_0_82/runtime.ts")
         .replace(HISTORY_CHECK_82, HISTORY_CHECK_83)
-        .replace('export const CURRENT_ORCHESTRATION_VERSION = "1.0.82";', 'export const CURRENT_ORCHESTRATION_VERSION = DURABLE_SESSION_LATEST_VERSION;')
+        .replace('export const CURRENT_ORCHESTRATION_VERSION = "1.0.82";', 'export const CURRENT_ORCHESTRATION_VERSION = "1.0.83";')
         .replaceAll('"turn-control-v1"', '"workflow-intake-v1"')
         .replace('import { decide, drain, settleQueuedWorkAfterDecide, turnsStarted } from "./queue.js";\n',
             'import { decide, drain, settleQueuedWorkAfterDecide, turnsStarted } from "./queue.js";\nimport { intakeDueAtMs } from "./intake-machine.js";\n'
@@ -422,7 +430,7 @@ test("1.0.83 is the frozen 1.0.82 plus the intake: the files it does not change 
     // are listed; every line it adds names the intake or the owed retry, is a comment or structure, or is one of the listed
     // lines.
     const queue82 = read("orchestration_1_0_82/queue.ts");
-    const queue83 = read("orchestration/queue.ts");
+    const queue83 = read(`${V83}/queue.ts`);
     assert.deepEqual(linesOnly(queue82, queue83).sort(), [...QUEUE_CHANGED_82].sort());
     assertIntakeOnlyAdditions("queue.ts", linesOnly(queue83, queue82), [...QUEUE_ADDED_GENERIC, ...QUEUE_LATE_CANCEL_ADDED, ...QUEUE_SO4B_ADDED,
         ...QUEUE_FU9_ADDED]);
@@ -430,16 +438,88 @@ test("1.0.83 is the frozen 1.0.82 plus the intake: the files it does not change 
     // owed retry of a failed turn and the listed frozen lines; every line it adds names the intake or the owed retry or
     // is a comment or structure.
     const turn82 = read("orchestration_1_0_82/turn.ts");
-    const turn83 = read("orchestration/turn.ts");
+    const turn83 = read(`${V83}/turn.ts`);
     assert.deepEqual(linesOnly(turn82, turn83).sort(), [...TURN_CHANGED_82].sort());
     assertIntakeOnlyAdditions("turn.ts", linesOnly(turn83, turn82), [...TURN_FU9_ADDED, ...TURN_FAILURE_ADDED]);
     // Its new imports are the intake modules and the capability routing only (and node:crypto for the text hash).
     const frozen = new Set(tsFiles("orchestration_1_0_82").flatMap(name => importsOf(read(`orchestration_1_0_82/${name}`))));
-    const added = new Set(tsFiles("orchestration").flatMap(name => importsOf(read(`orchestration/${name}`))).filter(s => !frozen.has(s)));
+    const added = new Set(tsFiles(V83).flatMap(name => importsOf(read(`${V83}/${name}`))).filter(s => !frozen.has(s)));
     assert.deepEqual([...added].sort(), [
         "../activity-routing.js", "../workflow/agent-ids.js", "../workflow/intake.js", "./intake-machine.js", "./intake-state.js",
         "./intake-wiring.js", "./workflow-turn-failure.js", "node:crypto",
     ]);
+});
+
+/**
+ * The lines of the frozen 1.0.83 that 1.0.84 does not keep, by file: owner routing's (U18). Each session proxy now takes the
+ * session's routing; the destroys are capped for an owner-tagged session; a set-workspace check is raced against its cap;
+ * the workspace retry takes the fast busy schedule, and a hold that is no failure keeps its step; and the version and its
+ * handler's name.
+ */
+const DROPPED_FROM_83 = {
+    "agents.ts": [
+        "        yield runtime.session.destroy();",
+        "    try {",
+        "        yield runtime.session.destroy();",
+        "    } catch {}",
+        "    try {",
+        "        yield runtime.session.destroy();",
+        "    } catch {}",
+        "                    ...(result.workspace ? [true] : []),",
+    ],
+    "lifecycle.ts": [
+        '    runtime.session = createSessionProxy(ctx, runtime.input.sessionId, state.affinityKey, state.config, "workflow-intake-v1");',
+        '    runtime.session = createSessionProxy(ctx, runtime.input.sessionId, state.affinityKey, state.config, "workflow-intake-v1");',
+        "            const raw: any = yield runtime.session.checkWorkspace({ workspace: next, revision, turnIndex: state.iteration, previous });",
+        '    runtime.session = createSessionProxy(ctx, runtime.input.sessionId, state.affinityKey, state.config, "workflow-intake-v1");',
+    ],
+    "runtime.ts": [
+        'export const CURRENT_ORCHESTRATION_VERSION = "1.0.83";',
+        '        runtime.session = createSessionProxy(runtime.ctx, input.sessionId, state.affinityKey, state.config, "workflow-intake-v1");',
+        '    const session = createSessionProxy(ctx, input.sessionId, state.affinityKey, state.config, "workflow-intake-v1");',
+    ],
+    "state.ts": [
+        "/** Milliseconds before the next workspace attempt. */",
+        "export function workspaceRetryDelayMs(step: number, retryAfterMs: unknown, scheduleMs?: number[]): number {",
+        "        : WORKSPACE_RETRY_SCHEDULE_SECONDS.map((seconds) => seconds * 1000);",
+    ],
+    "turn.ts": [
+        '                runtime.session = createSessionProxy(ctx, runtime.input.sessionId, state.affinityKey, state.config, "workflow-intake-v1");',
+        '    runtime.session = createSessionProxy(ctx, runtime.input.sessionId, state.affinityKey, state.config, "workflow-intake-v1");',
+        "    const failures = failedOn && previous.failures.workerNodeId === failedOn",
+        "        ? { workerNodeId: failedOn, count: previous.failures.count + 1 }",
+        "        : { workerNodeId: failedOn, count: 1 };",
+        "    const delayMs = workspaceRetryDelayMs(previous.step, wait.retryAfterMs, state.workspaceRetryScheduleMs);",
+        "    state.workspaceRetry = { step: previous.step + 1, failures };",
+        "    // Two failures in a row on one worker: release affinity so the next",
+        "    // attempt may land elsewhere. The count is not reset by the release, so",
+        "    // every further failure there releases again, until a check passes.",
+        "    if (failures.count >= 2 && state.blobEnabled) {",
+        "            workerNodeId: failedOn,",
+        "    } else {",
+    ],
+};
+
+test("1.0.84 keeps 1.0.83's intake whole: the same files, the intake's and queue.ts unchanged, every turn workflow-intake-v1", () => {
+    assert.deepEqual(tsFiles("orchestration"), tsFiles(V83));
+    for (const name of ["intake-machine.ts", "intake-state.ts", "intake-wiring.ts", "workflow-turn-failure.ts", "queue.ts", "utils.ts"]) {
+        assert.equal(read(`orchestration/${name}`), read(`${V83}/${name}`), name);
+    }
+    for (const name of tsFiles("orchestration")) {
+        assert.ok(!read(`orchestration/${name}`).includes('"turn-control-v1"'), `${name} names the turn-control contract`);
+        const dropped = linesOnly(read(`${V83}/${name}`), read(`orchestration/${name}`));
+        if (name === "index.ts") {
+            // Its comment and the handler's name only.
+            assert.ok(dropped.every(line => /^ \* |^export function\* durableSessionOrchestration_1_0_83\($/.test(line)), dropped.join("\n"));
+            continue;
+        }
+        assert.deepEqual(dropped, DROPPED_FROM_83[name] ?? [], name);
+    }
+    // The intake's continue-as-new guard, its due-write race and the failed-turn report stay in the live loop.
+    const runtime = read("orchestration/runtime.ts");
+    assert.ok(runtime.includes(HISTORY_CHECK_83));
+    assert.ok(runtime.includes("        if (intakeDueAtMs(state.intake) !== null) continue; // 1.0.83: drain will race the intake's due write\n"));
+    assert.ok(runtime.includes("    yield* settleWorkflowTurnFailure(runtime);\n"));
 });
 
 // ─── Every continue-as-new goes through versionedContinueAsNew ──

@@ -1,0 +1,24 @@
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+# The coordination host's plugin definitions
+# (WIN_WORKER_COORDINATION_HOST_PLUGIN_CONFIGMAP): the deploy tool adds this
+# component after `coordination-host` when the setting names a ConfigMap in
+# the worker's namespace, and writes that name into deployment-patch.yaml
+# (deploy/scripts/lib/coordination-host.mjs). The worker answers session
+# policy and agent lookups from the plugins it loads, so the coordination
+# host loads the same definitions as the Windows workers. The ConfigMap holds
+# a plugin's plugin.json, its session-policy.json, its agents' *.agent.md
+# files, and each skill an agent declares as <skill>.SKILL.md (and
+# <skill>.tools.json), for example:
+#
+#   kubectl create configmap <name> --from-file=plugin.json \
+#     --from-file=session-policy.json --from-file=agents/ \
+#     --from-file=review.SKILL.md=skills/review/SKILL.md
+#
+# An init container copies only those into a read-only folder in the
+# plugin's layout, which PLUGIN_DIRS names. No tool module or MCP server
+# comes from it.
+
+patches:
+  - path: deployment-patch.yaml

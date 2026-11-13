@@ -160,6 +160,7 @@ echo "🔑 Replacing K8s secret..."
     ${AUTHZ_ADMIN_SCOPE:+--from-literal=AUTHZ_ADMIN_SCOPE="$AUTHZ_ADMIN_SCOPE"} \
     ${SESSIONS_DEFAULT_VISIBILITY:+--from-literal=SESSIONS_DEFAULT_VISIBILITY="$SESSIONS_DEFAULT_VISIBILITY"} \
     ${SESSIONS_SYSTEM_VISIBILITY:+--from-literal=SESSIONS_SYSTEM_VISIBILITY="$SESSIONS_SYSTEM_VISIBILITY"} \
+    ${DISPATCHER_SP_OBJECT_ID:+--from-literal=DISPATCHER_SP_OBJECT_ID="$DISPATCHER_SP_OBJECT_ID"} \
     ${K8S_CONTEXT:+--from-literal=K8S_CONTEXT="$K8S_CONTEXT"}
 
 # ─── Step 0: Run local integration tests ─────────────────────────

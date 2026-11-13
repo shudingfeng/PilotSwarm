@@ -4,7 +4,7 @@
  * @module
  */
 
-import { runMigrations } from "./pg-migrator.js";
+import { assertMigrationsApplied, runMigrations } from "./pg-migrator.js";
 import { FACTS_MIGRATIONS } from "./facts-migrations.js";
 
 const FACTS_LOCK_SEED = 0x66_61_63; // "fac"
@@ -17,4 +17,9 @@ const FACTS_LOCK_SEED = 0x66_61_63; // "fac"
  */
 export async function runFactsMigrations(pool: any, schema: string): Promise<void> {
     await runMigrations(pool, schema, FACTS_MIGRATIONS(schema), FACTS_LOCK_SEED);
+}
+
+/** Throws unless every Facts migration this code knows is applied to the schema. */
+export async function assertFactsMigrationsApplied(pool: any, schema: string): Promise<void> {
+    await assertMigrationsApplied(pool, schema, FACTS_MIGRATIONS(schema), "Facts");
 }

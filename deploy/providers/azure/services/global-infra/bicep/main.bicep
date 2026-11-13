@@ -48,7 +48,9 @@ param dTime string = utcNow()
 
 var location = toLower(region)
 var frontDoorProfileName = '${resourcePrefix}-afd'
-var wafPolicyName = '${resourcePrefix}afdwafpolicy'
+// A Front Door WAF policy name allows only letters and digits. Case is kept, so
+// every name that could deploy before stays the same.
+var wafPolicyName = '${replace(replace(resourcePrefix, '-', ''), '_', '')}afdwafpolicy'
 var logAnalyticsName = '${resourcePrefix}-global-log'
 
 // ==============================================================================

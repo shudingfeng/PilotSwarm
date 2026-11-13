@@ -6,9 +6,20 @@ the turn loop and its queue, the commit of a turn across retries, the timers
 delivery of child updates, and the identity of delivered prompts. A TLC pass is
 a bounded check, not a proof. A FAIL is a model counterexample.
 
-## Status: 1.0.83 is the latest version (this line); 1.0.82 is frozen
+## Status: 1.0.84 is the latest version (this line); 1.0.83 and 1.0.82 are frozen
 
-In this line orchestration 1.0.83 becomes the latest version on every worker: its code moved from
+In this line orchestration 1.0.84 becomes the latest version: 1.0.83 plus owner routing (the Windows worker pool
+proposal). 1.0.83 is frozen in `orchestration_1_0_83/` and stays registered beside 1.0.82; its sessions
+move to 1.0.84 at their next continue-as-new. Every 1.0.84 change reads the owner tag or the fast busy flag of the
+session's input, so a session with neither runs as on 1.0.83. The latest-1.0.84 batch (section 4) models the capacity
+request before each turn, the holds it and the gates cause, the capped destroy and set-workspace check, the tag carried
+through continue-as-new and to children, and the hand-off from 1.0.83 (`CORRESPONDENCE-latest-1084.md`). It is bound
+to `34e73cb1`: `76e4af8f` with the two commits the owner-routing review asked of 1.0.84, `e94c62e4` and `34e73cb1`.
+A turn ends the hold of a session without a workspace only when its input carries an owner tag or the fast flag,
+and an unanswered capacity request waits its `retryAfterMs` (60 s without one), keeps the hold schedule's step and
+counts as no failure.
+
+Earlier in this line, orchestration 1.0.83 became the latest version on every worker: its code moved from
 `orchestration_1_0_83/` to `orchestration/`, and 1.0.82 is frozen in `orchestration_1_0_82/` (the same code as
 `orchestration/` before, except the version literal). Live 1.0.82 sessions move to 1.0.83 at their next
 continue-as-new. Models and batches below name the paths of the commit they were bound to; the latest-1.0.83 batch
@@ -19,20 +30,21 @@ continue-as-new. Models and batches below name the paths of the commit they were
 |---|---|
 | Code the models are bound to | `198ad79a32084cd06d23b00083fa136a05709b3f` (PilotSwarm 0.8.6, durable-session orchestration 1.0.82) |
 | Same code at | main `7f81d217` and `e76a6133`: `packages/sdk/src/orchestration/` (the registered latest, 1.0.82) is byte-identical |
-| Last full TLC run | 2026-10-27 |
-| Result | 38 cases: 21 PASS, 17 FAIL, 0 VOID, 0 not run |
+| Last full TLC run | 2026-11-12: every case of the folder (section 4, latest-1.0.84 batch, bound to `34e73cb1`); before that 2026-11-11 (the same batch, before the two commits) and 2026-10-27 |
+| Result | 2026-11-12: 236 cases, 236 as expected (102 PASS, 134 expected violations), 0 PARTIAL, 0 VOID. 2026-10-27: 38 cases: 21 PASS, 17 FAIL, 0 VOID, 0 not run |
 | Batch so2 (2026-11-08, `e76a6133`) | 16 cases of `RehydrationNotice` and `SnapshotWarmDrop`: 16 of 16 as expected, one code finding (`rn.late-cancel`) |
 | Batch so3 (2026-11-08, `e76a6133`) | 35 cases of `OwnedRetry`, `IntakeDrain`, `WorkerShutdown` and the late-cancel fix: 36 of 36 as expected in the run (with `rn.late-cancel` again), two design limits, no new code finding |
 | Batch ws2 (2026-11-08, `bb162ed8`) | `WorkerShutdown` with steps started after the deadline and overlapping (final review): 11 of 11 as expected; the overlap breaks no invariant |
 | Re-run on v0.8.10 (2026-11-08, `8aaf5435`, `packages/sdk/src` identical to `bb162ed8`) | so2 16 of 16, so3 36 of 36, so5b 48 of 48 as expected (and fork-join fj3 91 of 91) |
 | Latest-1.0.83 batch (2026-11-08, `5d8eaa46` to `4ffbf909`) | 50 cases of `VersionHandoff`, `RollingDeploy`, `DigestWindow`, `MergeRule`, `ForcedRefresh` and `IntakeDrain` with 1.0.83 as the latest version: every case as expected across seven runs (TLC 2.19, two workers, an isolated machine); no new code finding open |
 | Batches so4b, so5, so5b (2026-11-08) | The late-cancel give-back fixes in 1.0.83 (`CarriedGiveBack`): so4b found three gaps, so5 and so5b check their fixes; so5b, 48 cases at `bb162ed8` (`packages/sdk/src` identical at `8aaf5435` on v0.8.10): 48 of 48 as expected |
+| Latest-1.0.84 batch (2026-11-12, `34e73cb1`) | 52 cases of `CapacityHold`, `OwnerCapped`, `OwnerTagCarry` and `VersionHandoff` (1.0.83 into 1.0.84): 52 of 52 as expected, and the folder's other 184 cases as before; three findings in the code before `34e73cb1` (two at `76e4af8f`, one at `e94c62e4`), all fixed at `34e73cb1`; no finding open |
 
-1.0.83 (`src/orchestration/`, the durable Workflow intake) is the latest
-version: new sessions start at it, and every continue-as-new targets it. 1.0.82
-is frozen in `orchestration_1_0_82/` and stays registered for the sessions still
-on it. The modules that describe 1.0.82's queue and turn are bound to the line
-numbers of `198ad79a`; 1.0.83 keeps that behaviour. The intake ships switched
+1.0.84 (`src/orchestration/`) is the latest version: new sessions start at it, and every continue-as-new targets it.
+1.0.83 (the durable Workflow intake) is frozen in `orchestration_1_0_83/`, and 1.0.82
+is frozen in `orchestration_1_0_82/`; both stay registered for the sessions still
+on them. The modules that describe 1.0.82's queue and turn are bound to the line
+numbers of `198ad79a`; 1.0.83 and 1.0.84 keep that behaviour. The intake ships switched
 off: no worker sets the workflowIntake capability. The intake protocol itself is modelled in
 `../workflow/paired/recipient/`. The 1.0.83 run-loop changes around it (the
 owned retry, the intake write as a drain deadline, the carried arrival flag,
@@ -64,12 +76,15 @@ by `RehydrationNotice` and `SnapshotWarmDrop`, bound to `e76a6133`
 | `OwnedRetry.tla` | 1.0.83: a failed turn's retry is owned apart from the pending prompt; it runs before any other turn, alone reuses the thrown attempt's key and is carried by every continue-as-new; a lossy hand-off's retry is fresh (no key); while it is owed an armed wait is released and an agent wait is kept, its poll queued after the retry | 12 (including 4 faults and 1 comparison) |
 | `IntakeDrain.tla` | 1.0.83: no continue-as-new while an intake write is due; one intake call per wake; the arrival flag is carried; a refused continue-as-new at the history cap fails the execution; no continue-as-new to an older version; 1.0.83 turns only on workers with the intake routing | 15 (including 5 faults, 1 comparison; 3 with 1.0.83 as the latest version) |
 | `CarriedGiveBack.tla` | 1.0.83: a queued prompt that took the child digest and the rehydration notice carries them as markers; a cancel that drops it at dispatch, or in the same drain pass, gives them back: child entries merged by observation time and rank, nothing a later queued prompt carries, the notice only once; a `set_model` in the pre-dispatch sweep keeps the prompt queued | 33 (including 5 faults, 10 references to earlier code, 3 design limits) |
-| `VersionHandoff.tla` | A live 1.0.82 session continues as new into 1.0.83: the KV FIFO prompt (no give-back markers), the pending prompt (plain, a returned error's retry, a thrown turn's retry with its key, a lossy hand-off with its notice), unread queue messages (prompts and a `set_model`; duroxide carries at most 100), the child digest, the notice and the cron schedule; an in-flight 1.0.82 history replays on its recorded version | 19 (including 6 faults, 3 design limits) |
+| `VersionHandoff.tla` | A live session of the previous latest version continues as new into the new one: 1.0.82 into 1.0.83, and 1.0.83 into 1.0.84. The KV FIFO prompt (1.0.82's has no give-back markers, 1.0.83's has them), the pending prompt (plain, a returned error's retry, a thrown turn's retry with its key, a lossy hand-off with its notice), unread queue messages (prompts and a `set_model`; duroxide carries at most 100), the child digest, the notice and the cron schedule; from 1.0.83 also a workspace hold, the intake state and an owed report; an in-flight history replays on its recorded version | 31 (including 10 faults, 4 design limits) |
 | `RollingDeploy.tla` | A deploy that makes 1.0.83 the latest: duroxide has no version routing, so an old worker abandons a 1.0.83 item with backoff and fails it past 10 attempts; a stop-upgrade-start (recreate) deploy never reaches that | 2 |
 | `DigestWindow.tla` | The child-update batch window with the late give-back: a given-back digest is delivered once, never after a newer entry, and no later than its entry's arrival plus the window; the digest's own turn runs only after queued prompts | 5 (including 1 fault) |
 | `MergeRule.tla` | decide's prompt batching with the rule that a person's words never share a turn with an agent's or the runtime's prompt, decided by the sender (every runtime enqueue stamps one; a client cannot set one); a prompt with no sender that starts with a runtime header (a runtime prompt queued on 1.0.82, or a person's words quoting one) is of unknown author and merges with nothing | 15 (including 5 references to earlier code, 1 design limit) |
 | `ForcedRefresh.tla` | A turn that ends with a forced continue-as-new (turning Workflows on in a session, `use_package`, loading or unloading an agent, a failed model switch) keeps everything the session holds, an intake write that is due included | 6 (including 3 faults) |
 | `WorkerShutdown.tla` | Every worker: graceful shutdown under one deadline (drain, workspace release, release sweep, close). As written, each step is started even after the deadline, with a zero budget, and only its wait is abandoned, so later steps can overlap a still-running one and the close can cut a legacy upload; the sweep deletes only marked (committed) sessions' local copies and dehydrates unmarked legacy ones | 11 (including 2 faults, 1 comparison and 4 witnesses) |
+| `CapacityHold.tla` | 1.0.84: the capacity request before each turn of an owner-tagged session (ok, deny, busy, no answer) and the holds on the workspace timer: counted and uncounted holds, the schedule's step, the default and fast release thresholds, the hold that a turn past the gates ends; with neither input, 1.0.84 in lockstep with 1.0.83 (C4) | 20 (including 3 references to `76e4af8f`, 1 to `e94c62e4`, 4 faults and 3 witnesses) |
+| `OwnerCapped.tla` | 1.0.84: the waits an owner-tagged session caps: the destroy of complete, cancel, delete and a failed shutdown against 10 s, and a set-workspace command's capacity request and check against 20 minutes; duroxide's race (a queued loser never starts, a running one finishes); the turn and the capacity request themselves are not capped | 11 (including 2 design limits, 1 comparison, 1 fault and 2 witnesses) |
+| `OwnerTagCarry.tla` | 1.0.84: the owner tag and the fast flag through continue-as-new and to the sessions a session creates (spawn_agent in the turn, the orchestration's spawn, the regeneration distiller); a system sub-agent gets neither; a session started on 1.0.83 stays untagged | 9 (including 3 faults and 1 witness) |
 
 ## 2. The code these models are bound to
 
@@ -111,9 +126,19 @@ Bound to `bb162ed8` (`CORRESPONDENCE-bb162ed8-so5b.md`):
 |---|---|
 | `CarriedGiveBack` | `queue.ts`: `markCarriedWork` 456 (called at 1346), `giveBackCarriedWork` 413 (same pass), `observedChronology` 485, `giveBackDroppedPromptWork` 506 (decide-merge 1589-1590, decide-fifo 1703-1705), `peekNextDispatchFifoItem` 259 and the sweep before the pop (1685-1690); `lifecycle.ts` `restorePendingChildDigest` 486-512 |
 
+Bound to `34e73cb1`: `76e4af8f` with the two commits the owner-routing review asked of 1.0.84, `e94c62e4` and
+`34e73cb1` (`CORRESPONDENCE-latest-1084.md`, which also says where the code and the review's description differ):
+
+| Module | Code (`orchestration/`, 1.0.84) |
+|---|---|
+| `CapacityHold` | `turn.ts` 492-524 (the request before each turn), 1276-1362 (`holdForWorkspace`; an uncounted hold's wait and step at 1309-1319), 1427-1451 (a turn past the gates; the reset's gate at 1447-1448); `state.ts` 508, 514, 602-615; `owner-routing.ts` 27-33, 123-189; `lifecycle.ts` 236-250; the 1.0.83 machine: `orchestration_1_0_83/turn.ts` 1219-1285, 1353-1365 |
+| `OwnerCapped` | `agents.ts` 498-512 (the capped destroy; 565, 600, 653); `lifecycle.ts` 1154-1192 (the set-workspace command's request and capped check); `turn.ts` 655-668 (a turn is not raced); `session-proxy.ts` 863-1030, 1567-1605, 6291-6358; `session-manager.ts` 4013-4020 |
+| `OwnerTagCarry` | `state.ts` 852-877; `lifecycle.ts` 714-717, 1396-1397; `agents.ts` 982-1000; `turn.ts` 655-656; `session-proxy.ts` 2939-2947, 3637-3875, 6788-6795, 7418-7428, 7525-7544 |
+| `VersionHandoff` (`From = "83"`) | `orchestration-registry.ts` 84-85; `orchestration_1_0_83/runtime.ts` 23, `lifecycle.ts` 580-691, 724-739; `state.ts` 382-410, 720-845 |
+
 ## 3. Case taxonomy and expected results
 
-`cases.tsv` lists all 175 cases with their module; `cases.json` gives each case
+`cases.tsv` lists all 236 cases with their module; `cases.json` gives each case
 its `mode`, expected result, `meaning`, constants, invariants and properties.
 `expected` is `PASS`, or `safety` or `liveness` when a violation is expected.
 
@@ -142,6 +167,11 @@ proposed late-cancel fix in 1.0.83 and are to be bound to the fix's commit once 
 The 34 `CarriedGiveBack` cases and the two `impl.rn-late-give-back-83` cases come from batch so5b. `impl` cases are
 bound to `bb162ed8`; `ref.*` cases model earlier code (`67fe212c`, `3eebc211`) and must fail; `cg.old-code*` model the
 code before any give-back; design limits are the markers dropped for size and the accepted older-notice case.
+
+The 52 cases of the latest-1.0.84 batch (groups `ch`, `oc`, `ot` and `vh.1084-*`) are `impl` cases bound to `34e73cb1`
+(PASS, witnesses and design limits), `ref.ch-76e4af8f-*` and `ref.ch-e94c62e4-*` comparisons that model the code
+before `34e73cb1` and must fail, `comparison.oc-uncapped` (1.0.83's plain waits for a tagged session), and
+`deliberate` faults, one of them a mutation of the post-turn reset's gate (`fault.ch-reset-both`).
 
 ## 4. Results
 
@@ -311,6 +341,85 @@ deletion first and runs no model and no tool (review DR2-001, `session-proxy.ts`
 dropped; a frozen version's turn, or a worker without the Workflow store, has no such guard. For a Workflow agent session the same guard is checked by
 `fix.cc-dr2-001-*` and `impl.cc-final-live` in `../workflow/continued-session/`.
 
+### Latest-1.0.84 batch (2026-11-11, 2026-11-12): owner routing (bound to `34e73cb1`)
+
+Four modules: `CapacityHold`, `OwnerCapped` and `OwnerTagCarry` are new; `VersionHandoff` gains `From` (`"82"` keeps
+every earlier case as it was; `"83"` is the hand-off into 1.0.84) and `Extra` (1.0.83's other carried state).
+`RollingDeploy` applies unchanged to 1.0.84 (`CORRESPONDENCE-latest-1084.md`). The binding, and where the code and the
+review's description of its two commits differ, are in `CORRESPONDENCE-latest-1084.md`. The first runs (r1 to full1)
+were bound to `76e4af8f` and that description, before the commits; `34e73cb1` changed the rule for an unanswered
+request, so `CapacityHold` and its cases were bound again (r4, full2).
+
+Runs, TLC 2.19 (tla2tools v1.7.4), Microsoft Build of OpenJDK 21, two workers, 300 s per case, on Windows with Git for
+Windows' bash and an LF copy of this folder:
+
+| Run | Cases | Result |
+|---|---|---|
+| r1 | the 72 cases of the four modules | 61 as expected; the 11 `OwnerCapped` cases VOID: a model error (a tuple in a settings value, which TLC does not read), fixed by naming the command sequence |
+| r2 | the 11 `OwnerCapped` cases | 11 VOID: a model error (an `IF` without parentheses before a conjunct left `first` unassigned), fixed |
+| r3 | the 11 `OwnerCapped` cases | 11 of 11 as expected |
+| full1 | all 237 cases of the folder, before the two commits | 237 of 237 as expected (103 PASS, 125 expected safety violations, 9 expected liveness violations), no PARTIAL, no VOID; SANY accepted all 22 modules; 631,856 distinct states in all, 15.5 minutes |
+| r4 | the 73 cases of the four modules and `RollingDeploy`, bound to `34e73cb1` | 73 of 73 as expected; SANY accepted the five modules; 26,830 distinct states in all, 155 s |
+| full2 | all 236 cases of the folder, bound to `34e73cb1` | 236 of 236 as expected (102 PASS, 125 expected safety violations, 9 expected liveness violations), no PARTIAL, no VOID; SANY accepted all 22 modules; 618,447 distinct states in all, 9.1 minutes |
+
+The 52 new cases: 25 PASS, 23 expected safety violations, 4 expected liveness violations; the largest explores 5,598
+distinct states (`ch.tagged-fast`). The 19 earlier `VersionHandoff` cases and the two `RollingDeploy` cases give
+their earlier verdicts. The settings files of the other 165 cases generate byte for byte as before. In full2 every
+case of full1 that is still tabled gives its verdict again, with the same invariant violated (`CapacityHold`'s
+renamed `Inv_UncountedWait` aside).
+
+What holds, in the bounds (two workers, at most two person prompts and four refusals, two continue-as-new per
+session, a tree of five sessions):
+
+- With neither an owner tag nor the fast flag, 1.0.84 holds, waits, releases affinity and carries what 1.0.83 does
+  (`Inv_SameAs83`, in lockstep on the same turn results, with and without a workspace).
+- A tagged session runs a turn only after an `ok`; a deny holds nothing; an unanswered request waits its
+  `retryAfterMs` (60 s without one) whatever the step, keeps the step and the failure record and releases nothing;
+  under the fast policy a WORKSPACE_BUSY refusal releases affinity at once, otherwise the second refusal in a row on
+  one worker does; a turn past the gates ends a tagged or flagged session's hold.
+- Every complete, cancel, delete and set-workspace command is answered when no worker of the owner ever runs; a check
+  that ends after its cap never changes the workspace; the memory and the folders a late check attached are released
+  (by the destroy or by the idle eviction).
+- The tag and the flag ride every continue-as-new and reach every non-system session the tree creates; a system
+  sub-agent gets neither; a session started on 1.0.83 stays untagged.
+- A 1.0.83 session moves to 1.0.84 with nothing lost: the owed retry and its key, the queue, the digest, the notice,
+  the cron schedule, a workspace hold, the intake state and an owed report. A 1.0.83-queued prompt cancelled at
+  dispatch gives its digest back (`vh.1084-late-cancel`), unlike a 1.0.82-queued one.
+
+Findings, each fixed at `34e73cb1`:
+
+1. At `76e4af8f` a turn past the gates clears the hold of every session without a workspace, so an untagged session
+   held at the gate (an admission hook, a credential resolver) restarts its schedule and failure count where 1.0.83
+   goes on (`ref.ch-76e4af8f-reset`). `e94c62e4` fixes it (`ch.untagged`).
+2. At `76e4af8f` an unanswered capacity request advances the step: 60, 120, 300, 900 s
+   (`ref.ch-76e4af8f-unanswered-step`, `-wait`). `e94c62e4` keeps the step.
+3. At `e94c62e4` the wait of an unanswered request is still the kept step's delay of the default schedule, at least
+   60 s: after one, two, three counted busy answers it is 120, 300, 900 s, also under the fast policy
+   (`ref.ch-e94c62e4-unanswered-after-busy`). `34e73cb1` waits `retryAfterMs` whatever the step.
+
+Code behavior to note: an uncounted hold has no floor. A requester that answers `busy` with the code
+`CAPACITY_UNAVAILABLE` and a short `retryAfterMs` makes its sessions ask that often (`wit.ch-uncounted-no-floor`);
+before `34e73cb1` the schedule's 30 s first step was a floor. PilotSwarm's own unanswered and failed requests always
+carry 60 s.
+
+Known limits, accepted as designed:
+
+- The capacity request is not capped. With no worker that has a capacity requester, a tagged session's turn and
+  set-workspace command wait for one, and so do the commands behind them (`oc.no-host`). Deploy the coordination host
+  before turning owner routing on.
+- A turn's activity is never raced. After an `ok` that no worker of the owner follows, the commands wait behind the
+  turn (`oc.turn-vm-lost`); asking before every turn narrows this to the time between the answer and the claim.
+- A capacity `busy` carries no worker, so under the default policy it never counts twice on one worker; only the hold
+  window can release affinity for it.
+- A deny drops only its own prompt. Prompts held by earlier busy answers wait for the person's next message
+  (`wit.ch-deny-keeps-held`).
+- Duroxide carries at most 100 unread messages across a continue-as-new (`vh.1084-carry-cap`), as for every hand-off.
+
+Not covered: the coordination host's backstop (worker side), the client's tagging rules, the custom status (a capacity
+deny publishes it again after the response at `34e73cb1`; no model tracks its `responseVersion` or `response.latest`),
+duroxide itself (the drop of a queued race loser is the proposal's local observation), Workflows in owner-routed trees
+(refused), and error retries of tagged sessions (`OwnedRetry` covers them for every session).
+
 ## 5. How to run
 
 Java 17 or later is required.
@@ -333,3 +442,7 @@ deadlock there is a model error. The recorded run above used one worker; the
 runner uses two, which can change the state counts of cases that stop at a
 violation but not the verdicts. `SHA256SUMS` pins every file named above. The settings files are generated from `cases.json` and
 `tlc-templates.json` (`../tlc_cases.py`) and are not committed.
+
+The runners and `SHA256SUMS` expect the committed text, with LF line ends. On a Windows checkout with
+`core.autocrlf=true` the files have CRLF line ends: run from an LF copy of the folder with `tlc_cases.py` in it (a
+packet, `../README.md` section 2), in Git for Windows' bash, with `PYTHON=python` where `python3` is not Python.

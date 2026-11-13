@@ -1,0 +1,24 @@
+{
+  "$schema": "../deploy.schema.json",
+  "schemaVersion": 1,
+  "_comment": "OSS per-service deploy manifest for disk-controller: the disk controller and credential broker of the Windows worker pool (deploy/providers/azure/disk-controller/README.md). Conditional service: deploy.mjs skips it unless WIN_WORKERS_ENABLED=true. Listed after portal: the controller runs in the portal's namespace and its dispatcher Ingress joins the portal's host. Before its manifests step, deploy.mjs runs the Windows worker deploy step (deploy/providers/azure/deploy-steps/win-workers.mjs), which makes the controller's TLS certificate and puts its CA where the edge and the workers trust it.",
+  "name": "disk-controller",
+  "kind": "app",
+  "bicep": {
+    "modules": [
+      { "name": "base-infra",      "scope": "group" },
+      { "name": "disk-controller", "scope": "group" }
+    ],
+    "allModeModules": [
+      { "name": "disk-controller", "scope": "group" }
+    ]
+  },
+  "image": {
+    "repo":       "pilotswarm-disk-controller",
+    "dockerfile": "deploy/Dockerfile.disk-controller"
+  },
+  "rollout": {
+    "deployment": "pilotswarm-disk-controller",
+    "namespace": "pilotswarm"
+  }
+}

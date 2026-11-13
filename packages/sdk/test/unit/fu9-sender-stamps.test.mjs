@@ -75,11 +75,12 @@ test("F-FU9-1: every prompt the runtime enqueues on a session's message queue ca
 
 test("F-FU9-1: each session-proxy site stamps the kind of sender it is", () => {
     const proxy = fs.readFileSync(path.join(SRC, "session-proxy.ts"), "utf8");
-    // message_agent (queued, and the fallback of deliver "now"): the parent agent.
+    // message_agent (queued, and the fallback of deliver "now"): the parent agent. Its text may be redacted first
+    // (PILOTSWARM_PERSONAL_SECRETS=external: `const message = redactSecretsIn(args.message)`).
     const has = (text, pattern, what) => assert.ok(pattern.test(text), what);
-    has(proxy, /JSON\.stringify\(\{ prompt: args\.message,\s*sender: agentSender\(input\.sessionId, descendant \? "controlling parent agent" : "parent agent"\) \}\)/, "message_agent");
+    has(proxy, /JSON\.stringify\(\{ prompt: (?:args\.)?message,\s*sender: agentSender\(input\.sessionId, descendant \? "controlling parent agent" : "parent agent"\) \}\)/, "message_agent");
     // message_agent_session: the calling agent session.
-    has(proxy, /JSON\.stringify\(\{ prompt: message, sender: agentSender\(input\.sessionId, `agent \$\{input\.sessionId\.slice\(0, 8\)\}`\) \}\)/, "message_agent_session");
+    has(proxy, /JSON\.stringify\(\{ prompt: (?:redactSecrets\(message\)|message), sender: agentSender\(input\.sessionId, `agent \$\{input\.sessionId\.slice\(0, 8\)\}`\) \}\)/, "message_agent_session");
     // sendToSession (a parent's message_agent via the orchestration, a child's failure report): the calling orchestration.
     has(proxy, /const sender = agentSender\(sessionIdOfInstance\(activityCtx\?\.instanceId\),[\s\S]{0,400}JSON\.stringify\(\{ prompt: input\.message, sender \}\)/, "sendToSession");
     const manager = fs.readFileSync(path.join(SRC, "session-manager.ts"), "utf8");

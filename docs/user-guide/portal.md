@@ -573,6 +573,9 @@ the TUI. Or vice versa.
 7. Open **Admin → Model Providers**.
 8. **My Providers** holds your credentials and default. **Shared Providers**
    holds cluster/system routing and system-agent overrides (administrators).
+   On deployments that name a dispatcher, **My Providers** also has the
+   **Dispatcher Delegation** switch (see
+   [Access, sharing & security](security-and-sharing.md#letting-the-deployments-dispatcher-work-for-you)).
 9. Use **Update Key** on a personal provider when its credential expires. The
    provider name, defaults, session routing, and usage history stay intact.
 10. **Providers & Budgets** shows user spend by provider and model. Admins also

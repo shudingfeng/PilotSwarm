@@ -24,6 +24,8 @@ import type {
     SessionWorkspace,
 } from "./types.js";
 import { validateWorkspaceText } from "./workspace-check.js";
+import { isOwnerRoutingTag } from "./owner-routing.js";
+import { delegatedCreationOf, type DelegatedCreation } from "./delegated-creation.js";
 import type { SessionCatalog, SessionEvent, SessionVisibility, SessionRow } from "./cms.js";
 import type { MessageSender } from "./message-sender.js";
 import { normalizeMessageSender } from "./message-sender.js";
@@ -46,6 +48,19 @@ const { SqliteProvider, Client } = require("duroxide");
 
 const WAIT_POLL_SLICE_MS = 10_000;
 const MAX_SESSION_LINEAGE_HOPS = 128;
+
+/** Owner routing: the fields a session's orchestration starts with (OrchestrationInput). */
+interface SessionRouting {
+    ownerTag?: string;
+    workspaceBusyFastRelease?: boolean;
+}
+
+function savedSessionRouting(value: { ownerTag?: unknown; workspaceBusyFastRelease?: unknown } | null | undefined): SessionRouting {
+    return {
+        ...(isOwnerRoutingTag(value?.ownerTag) ? { ownerTag: value!.ownerTag as string } : {}),
+        ...(value?.workspaceBusyFastRelease === true ? { workspaceBusyFastRelease: true } : {}),
+    };
+}
 
 function createAbortError(message: string, reason?: unknown): Error {
     if (reason instanceof Error) return reason;
@@ -143,6 +158,10 @@ export class PilotSwarmClient {
     private nestingLevels = new Map<string, number>();
     /** System session flag. */
     systemSessions = new Set<string>();
+    /** Owner routing given at create; also saved with the creation config. */
+    private sessionRouting = new Map<string, SessionRouting>();
+    /** The fast busy policy for the owner-routed top-level sessions this client starts. */
+    private workspaceBusyFastRelease = false;
     private activeOrchestrations = new Map<string, string>();
     /**
      * The orchestration version _startSessionsAt chose for new sessions; null = the latest version,
@@ -180,6 +199,8 @@ export class PilotSwarmClient {
             ...options,
             waitThreshold: options.waitThreshold ?? 30,
         };
+        this.workspaceBusyFastRelease = options.workspaceBusyFastRelease
+            ?? process.env.PILOTSWARM_WORKSPACE_BUSY_FAST_RELEASE === "1";
     }
 
     // ─── Session Management ──────────────────────────────────
@@ -203,6 +224,23 @@ export class PilotSwarmClient {
         groupId?: string | null;
         /** Sharing level for a new ROOT session (children resolve through their root). */
         visibility?: SessionVisibility | null;
+        /**
+         * Owner routing: the owner tag `owner.<subject>` of an owner-routed
+         * session, saved with the creation config. Whichever client starts
+         * the session copies it into the orchestration input. A worker sets
+         * it for a session created during a tagged turn; the portal, for a
+         * session a dispatcher creates for its owner with
+         * PILOTSWARM_OWNER_ROUTING=1. Never taken from a request.
+         */
+        ownerTag?: string;
+        /** The fast workspace busy policy a session created during a turn takes from that turn. */
+        workspaceBusyFastRelease?: boolean;
+        /**
+         * Dispatcher delegation: the record of a root session that the
+         * deployment's dispatcher created for its owner, saved with the
+         * creation config. The portal sets it, never from a request.
+         */
+        delegatedCreation?: DelegatedCreation | null;
         /**
          * Stage 2 review S2RT-F3: a sub-agent that counts toward its parent's budget of running children (spawn_agent): the
          * catalog counts it under the parent's lock in the creation's transaction (child-budget.ts) and refuses a full one.
@@ -253,6 +291,11 @@ export class PilotSwarmClient {
         }
 
         const sessionId = config?.sessionId ?? crypto.randomUUID();
+        const routing = savedSessionRouting(config);
+        const delegatedCreation = config?.delegatedCreation == null ? null : delegatedCreationOf(config.delegatedCreation);
+        if (config?.delegatedCreation != null && !delegatedCreation) {
+            throw Object.assign(new Error("delegatedCreation must be { dispatcher: { provider, subject } }."), { code: "INVALID_REQUEST", status: 400 });
+        }
         const resolved = await this._resolveCreationModel(config ?? {}, false);
         const { workspace: _rawWorkspace, ...configWithoutWorkspace } = config ?? {};
         const resolvedConfig = {
@@ -313,6 +356,8 @@ export class PilotSwarmClient {
                 ? {
                     ...JSON.parse(JSON.stringify(projectSerializableSessionConfig(configForRow, this.config.waitThreshold))),
                     ...(config?.nestingLevel !== undefined ? { bootstrapNestingLevel: config.nestingLevel } : {}),
+                    ...routing,
+                    ...(delegatedCreation ? { delegatedCreation } : {}),
                 }
                 : null,
         });
@@ -328,6 +373,7 @@ export class PilotSwarmClient {
                 { code: "SESSION_EXISTS", status: 409 });
         }
         if (fullConfig) this.sessionConfigs.set(sessionId, fullConfig);
+        if (routing.ownerTag || routing.workspaceBusyFastRelease) this.sessionRouting.set(sessionId, routing);
         if (resolved) {
             await this._catalog.recordEvents(sessionId, [{
                 eventType: "session.model_resolved",
@@ -375,6 +421,10 @@ export class PilotSwarmClient {
         visibility?: SessionVisibility | null;
         /** Session workspaces: the working folder, { root, folder? }. */
         workspace?: SessionWorkspace | { root: string; folder?: string } | null;
+        /** Owner routing: as createSession's. */
+        ownerTag?: string;
+        /** Dispatcher delegation: as createSession's. */
+        delegatedCreation?: DelegatedCreation | null;
     }): Promise<PilotSwarmSession> {
         // Validate the agent exists and is non-system
         const allowed = this._allowedAgentNames;
@@ -397,6 +447,8 @@ export class PilotSwarmClient {
             groupId: opts?.groupId ?? null,
             visibility: opts?.visibility ?? null,
             ...(opts?.workspace != null ? { workspace: opts.workspace } : {}),
+            ...(opts?.ownerTag !== undefined ? { ownerTag: opts.ownerTag } : {}),
+            ...(opts?.delegatedCreation != null ? { delegatedCreation: opts.delegatedCreation } : {}),
         });
 
         // Set agent metadata in CMS (agentId + prefixed title)
@@ -850,11 +902,36 @@ export class PilotSwarmClient {
         return { parentSessionId, nestingLevel };
     }
 
+    /**
+     * Owner routing: what a session's orchestration starts with. The tag is
+     * the one saved with the session's creation config, on whichever process
+     * starts it and whatever this client's settings: the portal saves it for
+     * a session a dispatcher creates for its owner, and a session created
+     * during a turn takes that turn's. A session without one gets none. This
+     * client's fast busy policy applies to the owner-routed top-level
+     * sessions it starts; a child keeps the policy saved from its turn.
+     */
+    private _routingForStart(
+        sessionId: string,
+        parentSessionId: string | undefined,
+        row: SessionRow | null,
+        saved: SessionRouting,
+    ): SessionRouting {
+        const system = this.systemSessions.has(sessionId) || row?.isSystem === true;
+        const ownerTag = system ? undefined : saved.ownerTag;
+        const workspaceBusyFastRelease = saved.workspaceBusyFastRelease === true
+            || (!parentSessionId && !!ownerTag && this.workspaceBusyFastRelease);
+        return {
+            ...(ownerTag ? { ownerTag } : {}),
+            ...(workspaceBusyFastRelease ? { workspaceBusyFastRelease: true } : {}),
+        };
+    }
+
     /** @internal — ensure orchestration exists, update CMS, enqueue prompt. */
     private async _ensureOrchestrationAndSend(
         sessionId: string,
         prompt: string,
-        opts?: { bootstrap?: boolean; requiredTool?: string; clientMessageIds?: string[]; sender?: MessageSender; attachments?: PromptAttachmentRef[] },
+        opts?: { bootstrap?: boolean; requiredTool?: string; clientMessageIds?: string[]; sender?: MessageSender; attachments?: PromptAttachmentRef[]; ownerTag?: string; workspaceBusyFastRelease?: boolean },
     ): Promise<string> {
         if (!this.duroxideClient) throw new Error("Not started.");
         // A workflow agent state's subtree takes no human prompts (design 03, R13): refused before anything is queued or
@@ -890,6 +967,7 @@ export class PilotSwarmClient {
         // process's default. The default applies only if neither side set it.
         let serializableConfig: SerializableSessionConfig | undefined;
         let bootstrapNestingLevel: unknown;
+        let savedRouting: SessionRouting = {};
 
         trace(`[client] ensureOrchestrationAndSend start session=${sessionId} active=${this.activeOrchestrations.has(sessionId)}`);
 
@@ -908,8 +986,22 @@ export class PilotSwarmClient {
             if (cmsRow?.sessionKind === "workflow" || stored?.workflow) {
                 throw workflowNotConversationalError(sessionId);
             }
-            const { bootstrapNestingLevel: storedDepth, ...storedSessionConfig } = stored ?? {};
+            const {
+                bootstrapNestingLevel: storedDepth,
+                ownerTag: storedOwnerTag,
+                workspaceBusyFastRelease: storedFastRelease,
+                delegatedCreation: _delegatedCreation,
+                ...storedSessionConfig
+            } = stored ?? {};
             bootstrapNestingLevel = storedDepth;
+            // The stored routing wins: this process's map and opts only fill
+            // what the creation config does not hold, so they never change a
+            // saved owner tag.
+            savedRouting = {
+                ...savedSessionRouting(opts),
+                ...this.sessionRouting.get(sessionId),
+                ...savedSessionRouting({ ownerTag: storedOwnerTag, workspaceBusyFastRelease: storedFastRelease }),
+            };
             if (stored && !fullConfig) {
                 trace(`[client] creation config restored from catalog row (in-memory config miss)`);
             }
@@ -978,6 +1070,7 @@ export class PilotSwarmClient {
             // Explicit local identity keeps its precedence; another process
             // reconstructs the named agent's startup contract from the row.
             const agentId = this.sessionAgentIds.get(sessionId) ?? cmsRow?.agentId;
+            const routing = this._routingForStart(sessionId, parentSessionId, cmsRow, savedRouting);
             const startVersion = this.sessionStartVersion ?? DURABLE_SESSION_LATEST_VERSION;
             const input: OrchestrationInput = {
                 sessionId,
@@ -1001,6 +1094,7 @@ export class PilotSwarmClient {
                 ...(agentId ? { agentId } : {}),
                 ...(this._sessionPolicy ? { sessionPolicy: this._sessionPolicy } : {}),
                 ...(this._allowedAgentNames.length > 0 ? { allowedAgentNames: this._allowedAgentNames } : {}),
+                ...routing,
             };
             const startAt = Date.now();
             await this.duroxideClient.startOrchestrationVersioned(
@@ -1080,7 +1174,7 @@ export class PilotSwarmClient {
     async _startTurn(
         sessionId: string,
         prompt: string,
-        opts?: { bootstrap?: boolean; requiredTool?: string; clientMessageIds?: string[]; sender?: MessageSender; attachments?: PromptAttachmentRef[] },
+        opts?: { bootstrap?: boolean; requiredTool?: string; clientMessageIds?: string[]; sender?: MessageSender; attachments?: PromptAttachmentRef[]; ownerTag?: string; workspaceBusyFastRelease?: boolean },
     ): Promise<string> {
         // Match sendAndWait(): snapshot the durable response cursor before
         // enqueue so a following wait() cannot consume the prior turn.

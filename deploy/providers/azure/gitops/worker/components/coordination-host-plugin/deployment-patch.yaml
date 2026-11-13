@@ -1,0 +1,68 @@
+# The plugin definitions' folder. A ConfigMap volume shows its files as
+# symbolic links, which the worker's agent loader skips, and has no
+# subfolders, so the init container copies the files themselves into the
+# plugin's layout: plugin.json and session-policy.json at the top,
+# <name>.agent.md into agents/, and <skill>.SKILL.md and <skill>.tools.json
+# into skills/<skill>/. It copies nothing else. The deploy tool replaces the
+# ConfigMap name.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: copilot-runtime-worker
+spec:
+  template:
+    spec:
+      initContainers:
+        - name: init-coordination-plugin
+          image: busybox:1.36
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              src=/plugin-source
+              dst=/coordination-plugin
+              test -f "$src/plugin.json" || { echo "the plugin ConfigMap has no plugin.json" >&2; exit 1; }
+              mkdir -p "$dst/agents" "$dst/skills"
+              cp -L "$src/plugin.json" "$dst/plugin.json"
+              if [ -e "$src/session-policy.json" ]; then cp -L "$src/session-policy.json" "$dst/session-policy.json"; fi
+              for file in "$src"/*.agent.md; do
+                if [ -e "$file" ]; then cp -L "$file" "$dst/agents/"; fi
+              done
+              for file in "$src"/*.SKILL.md "$src"/*.tools.json; do
+                [ -e "$file" ] || continue
+                name=${file##*/}
+                case "$name" in
+                  *.SKILL.md) skill=${name%.SKILL.md}; target=SKILL.md ;;
+                  *) skill=${name%.tools.json}; target=tools.json ;;
+                esac
+                mkdir -p "$dst/skills/$skill"
+                cp -L "$file" "$dst/skills/$skill/$target"
+              done
+              chown -R 0:0 "$dst"
+              find "$dst" -type f -exec chmod 0444 {} \;
+              find "$dst" -type d -exec chmod 0555 {} \;
+          volumeMounts:
+            - name: coordination-plugin-source
+              mountPath: /plugin-source
+              readOnly: true
+            - name: coordination-plugin
+              mountPath: /coordination-plugin
+      containers:
+        - name: worker
+          env:
+            - name: PLUGIN_DIRS
+              value: /app/coordination-plugin
+          volumeMounts:
+            - name: coordination-plugin
+              mountPath: /app/coordination-plugin
+              readOnly: true
+      volumes:
+        - name: coordination-plugin-source
+          configMap:
+            name: __COORDINATION_HOST_PLUGIN_CONFIGMAP__
+        - name: coordination-plugin
+          emptyDir: {}

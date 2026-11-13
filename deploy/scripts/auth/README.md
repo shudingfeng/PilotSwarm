@@ -19,7 +19,7 @@ You can also invoke it directly.
 |------|---------|
 | `Create3PApplication.ps1` | Generic Azure AD application primitive. Useful if you need a non-portal app registration (e.g. a worker daemon with app roles). The PilotSwarm portal wrapper does **not** call this — it does its own SPA-shaped `az ad app create` so it can configure the SPA platform + implicit-grant + per-token-type groups claim, which the generic primitive doesn't expose. |
 | `Setup-PortalAuth.ps1` | Opinionated wrapper that creates the exact shape the PilotSwarm portal expects. See "Defaults" below. |
-| `Set-PortalAuthAssignments.ps1` | Add / remove / list user + group assignments against the `admin` / `user` app roles on an existing portal app. Idempotent. Re-runnable. See `.github/skills/pilotswarm-portal-auth-assignments/SKILL.md` for full operator docs. |
+| `Set-PortalAuthAssignments.ps1` | Add / remove / list app-role assignments on an existing portal app: users and groups for `admin` / `user`, and service principals for the roles that applications can hold (see "Roles for application identities" below). Idempotent. Re-runnable. See `.github/skills/pilotswarm-portal-auth-assignments/SKILL.md` for full operator docs. |
 
 ## Prerequisites
 
@@ -63,6 +63,8 @@ tenant will reject `az ad app create` without a recognized value.
 | MS Graph delegated scopes | **none** | Portal never calls Graph at runtime; group/role claims ride on the ID token. SPA requests only OIDC standard scopes (`openid`, `profile`) at sign-in, which require no consent. Future downstream API access (e.g. ADO via OBO) belongs on per-purpose worker apps. |
 | Optional `groups` claim | `idToken`, `accessToken`, `saml2Token` | Required for group-based admin/user role mapping (`PORTAL_AUTH_ENTRA_ADMIN_GROUPS`, `PORTAL_AUTH_ENTRA_USER_GROUPS`) |
 | App roles (`-CreateAppRoles`) | optional `admin` + `user` (allowedMemberTypes=["User"]) | Read by `packages/portal/auth/authz/engine.js` — assign principals via "Enterprise applications > Users and groups" |
+| App roles for applications (`-WorkerRoles`) | optional `worker` + `deployer` + `coordinator` (allowedMemberTypes=["Application"]); `user` becomes ["User", "Application"] | For application identities that call the deployment's own services. The portal admits only `admin` / `user`. See "Roles for application identities" below |
+| `api.requestedAccessTokenVersion` (`-WorkerRoles`) | optional `2`; left unset otherwise | Entra issues v2.0 access tokens for the app, the form the portal validates: issuer `https://login.microsoftonline.com/<tenant-id>/v2.0`, audience = the client ID |
 | `appRoleAssignmentRequired` (`-AssignmentRequired`) | optional, off by default | Sets `appRoleAssignmentRequired=true` on the SP — blocks unassigned users from getting a token at all. **Leave OFF in tenants with restricted user-consent policies** (e.g. Microsoft corporate tenant): turning it on causes AADSTS90094 admin-consent prompts on every assigned user's first sign-in. With `-CreateAppRoles` + role assignments, the engine's role-authoritative branch already denies any principal without a role claim — `-AssignmentRequired` is redundant for lockdown in that posture. |
 | Identifier URIs | none | Not an API |
 | Service principal | created | Needed for tenant consent + role assignments |
@@ -198,6 +200,74 @@ Creates the app shell with the correct policy/permissions/claims but
 with an empty redirect-URI list. After deploy finishes, run again with
 `-ExistingAppId <newAppId> -EnvName newstamp` to add the discovered URI.
 
+### Roles for application identities (`-WorkerRoles`)
+
+Off by default. Use it when application identities (service principals,
+including managed identities) call the deployment's own services:
+
+```bash
+# New app: the portal roles plus the roles for applications
+pwsh -NoProfile -ExecutionPolicy Bypass \
+  -File deploy/scripts/auth/Setup-PortalAuth.ps1 \
+  -ServiceTreeId <your-service-tree-id> \
+  -EnvName <env> \
+  -CreateAppRoles -WorkerRoles
+
+# Existing app: add whatever is missing (a redirect URI is optional here)
+pwsh -NoProfile -ExecutionPolicy Bypass \
+  -File deploy/scripts/auth/Setup-PortalAuth.ps1 \
+  -ExistingAppId <client-id> -WorkerRoles
+```
+
+`-WorkerRoles`:
+
+- Sets `api.requestedAccessTokenVersion` to `2`, so Entra issues v2.0
+  access tokens for the app to every caller, users included. The portal
+  validates v2.0 tokens; anything else that validates this app's tokens
+  must accept them too.
+- Adds three roles that only applications can hold
+  (`"allowedMemberTypes": ["Application"]`):
+
+  | Value | Typical holder |
+  |-------|----------------|
+  | `worker` | A worker pool's managed identity |
+  | `deployer` | A deployment pipeline's identity |
+  | `coordinator` | A coordination service's identity |
+
+  The portal admits only `admin` and `user`, so it denies a token whose
+  `roles` claim holds only these roles. A service that accepts one of them
+  checks the claim itself.
+- Lets applications hold `user` (`"allowedMemberTypes": ["User", "Application"]`),
+  for example an automation service principal that creates sessions for
+  users. `admin` stays users-only.
+
+Rerunning is safe. Roles the app already has keep their IDs, because role
+assignments refer to them; missing roles are added; no role is removed or
+disabled. That holds for `-ExistingAppId` and for a rerun of the create
+command, where `az ad app create` updates the app with the same display name.
+
+Then assign the roles to service principals, by object ID or application
+(client) ID:
+
+```bash
+pwsh -NoProfile -ExecutionPolicy Bypass \
+  -File deploy/scripts/auth/Set-PortalAuthAssignments.ps1 \
+  -EnvName <env> \
+  -WorkerAssignments <object-id> \
+  -DeployerAssignments <object-id> \
+  -CoordinatorAssignments <object-id>
+```
+
+`-UserAssignments` takes service principals as well once `user` allows
+applications.
+
+Assigning an app role to a service principal needs an Entra administrator:
+Cloud Application Administrator or Application Administrator. Owning the
+app is enough for users and groups, not for service principals. Assign
+service principals directly; Entra doesn't put a role in a service
+principal's token when the role comes through a group. A managed identity's
+tokens are cached, so a new assignment can take hours to show up in them.
+
 ## What this script will NOT do
 
 - Will not write to `.env` files — you must paste `PORTAL_AUTH_ENTRA_CLIENT_ID`
@@ -210,7 +280,8 @@ with an empty redirect-URI list. After deploy finishes, run again with
   calls Graph or any other downstream API.
 - Will not assign users to app roles. Use `Set-PortalAuthAssignments.ps1`
   (this folder) — wraps the Graph calls, idempotent, accepts UPNs /
-  object IDs / group display names:
+  object IDs / group display names, and service principal object or
+  client IDs for the roles that applications can hold:
   ```
   pwsh -NoProfile -ExecutionPolicy Bypass \
     -File deploy/scripts/auth/Set-PortalAuthAssignments.ps1 \
@@ -238,6 +309,7 @@ with an empty redirect-URI list. After deploy finishes, run again with
 | Signed-in user with no role gets `defaultRole` instead of being denied | The stamp has `PORTAL_AUTHZ_DEFAULT_ROLE=user` (legacy open posture) | Leave `PORTAL_AUTHZ_DEFAULT_ROLE` unset (defaults to `none` = deny-by-default since v0.1.33). With `-CreateAppRoles`, assigned users get `admin`/`user` via the JWT role claim; unassigned signed-in users are denied by the engine |
 | First sign-in fails with `AADSTS90094` admin-consent prompt after `-AssignmentRequired` | Tenant user-consent policy restricts non-verified-publisher apps; the OIDC sign-in flow can't create the user-consent grant for Microsoft Graph (`openid profile offline_access`) on the user's behalf while `appRoleAssignmentRequired=true` blocks them | One-time dance: `az ad sp update --id <sp-objectId> --set appRoleAssignmentRequired=false`, have each affected user sign in once to accept user-consent, then flip back to `true`. Or drop `-AssignmentRequired` entirely — with `-CreateAppRoles` + role assignments, the engine's deny-by-default behavior already enforces lockdown without needing the Entra-side gate |
 | `403` on portal admin routes | Signed-in user does not have the `admin` app role (or matching group via `PORTAL_AUTH_ENTRA_ADMIN_GROUPS`) | Assign the user to the `admin` role: `pwsh -File deploy/scripts/auth/Set-PortalAuthAssignments.ps1 -EnvName <stamp> -AdminAssignments <upn>` (or via Entra portal "Users and groups") |
+| `Authorization_RequestDenied` when assigning `worker`, `deployer`, `coordinator`, or `user` to a service principal | Granting an app role to a service principal needs Cloud Application Administrator or Application Administrator; app owners can't | Have an Entra administrator run `Set-PortalAuthAssignments.ps1` |
 
 ## Why `Create3PApplication.ps1` is included
 

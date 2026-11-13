@@ -29,6 +29,13 @@
  *   PLUGIN_DIRS                     — Comma-separated plugin directories (default: /app/plugin)
  *   PILOTSWARM_EXTENSION_MODULES    — Comma-separated modules; each exports register(worker), called
  *                                     before start (for example a session workspace provider)
+ *   PILOTSWARM_SESSION_MESSAGE_SCOPE — "fleet" (default): session messages and replies reach any live
+ *                                     session; "owner": only the same owner's sessions, or system to system
+ *   PILOTSWARM_WORKER_OWNER_TAG     — Owner routing: also run the sessions tagged for this owner,
+ *                                     owner.<subject> (default: none)
+ *   PILOTSWARM_WORKER_OWNER_ONLY    — Owner routing: 1 runs only the sessions tagged for that owner
+ *                                     and no other work, which another worker must run; needs
+ *                                     PILOTSWARM_WORKER_OWNER_TAG (default: 0)
  *
  * Usage:
  *   node --env-file=.env.remote --import pilotswarm-sdk/telemetry packages/sdk/examples/worker.js
@@ -70,6 +77,14 @@ if (pluginDirs.length === 0 && fs.existsSync("/app/plugin/plugin.json")) {
     pluginDirs.push("/app/plugin");
 }
 
+// Owner routing: a value other than 1 or 0 stops the worker here, so a typo
+// never leaves an owner's worker running everyone's work.
+const ownerOnlySetting = process.env.PILOTSWARM_WORKER_OWNER_ONLY || "0";
+if (ownerOnlySetting !== "0" && ownerOnlySetting !== "1") {
+    throw new Error(`PILOTSWARM_WORKER_OWNER_ONLY must be 1 or 0, not ${JSON.stringify(ownerOnlySetting)}`);
+}
+const ownerOnly = ownerOnlySetting === "1";
+
 console.log(`[worker] Pod: ${podName}`);
 console.log(`[worker] Store: ${process.env.DATABASE_URL?.replace(/\/\/.*@/, "//***@")}`);
 if (pluginDirs.length > 0) console.log(`[worker] Plugin dirs: ${pluginDirs.join(", ")}`);
@@ -79,6 +94,8 @@ if (process.env.PILOTSWARM_CMS_PG_POOL_MAX) console.log(`[worker] CMS PG pool ma
 if (process.env.PILOTSWARM_FACTS_PG_POOL_MAX) console.log(`[worker] Facts PG pool max: ${process.env.PILOTSWARM_FACTS_PG_POOL_MAX}`);
 if (process.env.PILOTSWARM_ORCHESTRATION_CONCURRENCY) console.log(`[worker] Orchestration concurrency: ${process.env.PILOTSWARM_ORCHESTRATION_CONCURRENCY}`);
 if (process.env.PILOTSWARM_WORKER_CONCURRENCY) console.log(`[worker] Worker concurrency: ${process.env.PILOTSWARM_WORKER_CONCURRENCY}`);
+if (process.env.PILOTSWARM_WORKER_OWNER_TAG) console.log(`[worker] Owner tag: ${process.env.PILOTSWARM_WORKER_OWNER_TAG}`);
+if (ownerOnly) console.log("[worker] Owner only: runs no untagged work, capability-tagged activities or capacity requests");
 if (process.env.HORIZON_DATABASE_URL) {
     const graph = process.env.HORIZON_GRAPH_DATABASE_URL ? "on" : "off";
     const embedder = process.env.HORIZON_EMBED_URL ? "on" : "off";
@@ -87,6 +104,7 @@ if (process.env.HORIZON_DATABASE_URL) {
 if (process.env.PS_MODEL_PROVIDERS_PATH || process.env.MODEL_PROVIDERS_PATH) {
     console.log(`[worker] Model providers: ${process.env.PS_MODEL_PROVIDERS_PATH || process.env.MODEL_PROVIDERS_PATH}`);
 }
+if (process.env.PILOTSWARM_SESSION_MESSAGE_SCOPE) console.log(`[worker] Session message scope: ${process.env.PILOTSWARM_SESSION_MESSAGE_SCOPE}`);
 
 // Model providers: auto-discovered from model_providers.json or env vars.
 // The worker loads them automatically — just log what it finds after start.
@@ -106,8 +124,11 @@ const worker = new PilotSwarmWorker({
     sessionStateDir: process.env.SESSION_STATE_DIR || undefined,
     modelProvidersPath: process.env.PS_MODEL_PROVIDERS_PATH || process.env.MODEL_PROVIDERS_PATH || undefined,
     workerNodeId: podName,
+    ownerTag: process.env.PILOTSWARM_WORKER_OWNER_TAG || undefined,
+    ownerOnly,
     systemMessage: SYSTEM_MESSAGE,
     pluginDirs,
+    sessionMessageScope: process.env.PILOTSWARM_SESSION_MESSAGE_SCOPE || undefined,
     // Bicep-deploy MI flow (set in worker-env ConfigMap by the overlay
     // .env). Unset on the legacy `scripts/deploy-aks.sh` path, local
     // Docker, and CI — those keep using the password URL via `store`
@@ -172,20 +193,29 @@ if (mcpNames.length > 0) {
 // then exit. PILOTSWARM_WORKER_SHUTDOWN_TIMEOUT_MS sets the budget (60s
 // default); PILOTSWARM_WORKER_SHUTDOWN_GRACE_MS (15s default) bounds the
 // release and closes after it, so the process exits by budget + grace even
-// when the database does not answer. The pod's terminationGracePeriodSeconds
-// (90s) must exceed both together.
-async function shutdown(signal) {
+// when the database does not answer, plus the time worker.onShutdown() hooks
+// take. The pod's terminationGracePeriodSeconds (90s) must exceed both together.
+let shuttingDown = false;
+function shutdown(signal) {
+    if (shuttingDown) return;
+    shuttingDown = true;
     console.log(`[worker] ${signal} received, draining...`);
-    try {
-        await worker.gracefulShutdown();
-    } finally {
-        await shutdownTelemetry();
-    }
-    process.exit(0);
+    // A failure reaches waitForShutdown() below.
+    worker.gracefulShutdown().catch(() => {});
 }
 
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
 
-// Block forever — worker polls in background
-await new Promise(() => {});
+// Run until a graceful shutdown finishes: after a signal, or when an
+// extension calls worker.requestExit(). The exit code is 0 unless such a
+// request named another one, for example so that a service manager
+// restarts the worker. Telemetry flushes after the drain, whatever its
+// outcome, and its failure never changes the exit code.
+let exitCode;
+try {
+    exitCode = await worker.waitForShutdown();
+} finally {
+    await shutdownTelemetry();
+}
+process.exit(exitCode);

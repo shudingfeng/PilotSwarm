@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import type { SessionCatalog, SessionRow } from "./cms.js";
+import { SYSTEM_USER_PRINCIPAL, type SessionCatalog, type SessionRow } from "./cms.js";
+import { redactSecrets } from "./secret-redaction.js";
 import { formatOwnerLabel } from "./session-owner-utils.js";
 import { agentSender } from "./message-sender.js";
 
@@ -17,12 +18,29 @@ const sessionMessageRateBuckets = new Map<string, { bucketStart: number; senderC
 export type SessionMessageReason = "help" | "guidance" | "fact-request" | "status-request" | "handoff";
 export type SessionMessageVerdict = "answered" | "declined" | "blocked" | "stale";
 
+/**
+ * Which sessions a session message or reply may reach. "fleet" (the default):
+ * any live session. "owner": only a session with the same user owner, or a
+ * system session from a system session.
+ */
+export type SessionMessageScope = "fleet" | "owner";
+
+/** Unset or empty is "fleet". Any other value is refused, so a typo never widens the scope. */
+export function resolveSessionMessageScope(value: unknown): SessionMessageScope {
+    const scope = String(value ?? "").trim().toLowerCase();
+    if (scope === "" || scope === "fleet") return "fleet";
+    if (scope === "owner") return "owner";
+    throw new Error("sessionMessageScope / PILOTSWARM_SESSION_MESSAGE_SCOPE must be fleet or owner");
+}
+
 export interface InternalSessionMessageRuntime {
     catalog: SessionCatalog;
     duroxideClient: {
         getStatus(orchestrationId: string): Promise<{ status?: string } | null | undefined>;
         enqueueEvent(orchestrationId: string, eventName: string, payload: string): Promise<unknown>;
     };
+    /** The worker's scope. Unset is "fleet". */
+    scope?: SessionMessageScope;
 }
 
 function normalizeSessionId(value: unknown): string {
@@ -43,8 +61,9 @@ function userOwnerKey(row: SessionRow | null | undefined): string | null {
 }
 
 /**
- * Cross-session comms is intentionally ungated at the delivery layer, so a
- * message from one user's session lands in another user's session unchanged.
+ * In the default "fleet" scope, cross-session comms is ungated at the delivery
+ * layer, so a message from one user's session lands in another user's session
+ * unchanged.
  * To keep a peer message from distracting or hijacking the receiver, a message
  * that crosses a USER ownership boundary carries extra framing: the sender's
  * owner identity and a note that the receiver's own mission takes precedence.
@@ -61,6 +80,48 @@ function crossOwnerContext(
     const targetKey = userOwnerKey(targetRow);
     const crossOwner = Boolean(senderKey && targetKey && senderKey !== targetKey);
     return { crossOwner, senderOwnerLabel: crossOwner ? formatOwnerLabel(senderRow?.owner) : "" };
+}
+
+// Never equal to a userOwnerKey, which always contains its separator.
+const SYSTEM_PARTY = "system";
+
+function ownedBySystemUser(row: SessionRow): boolean {
+    return row.owner?.provider === SYSTEM_USER_PRINCIPAL.provider && row.owner?.subject === SYSTEM_USER_PRINCIPAL.subject;
+}
+
+/**
+ * Who a session speaks for in the "owner" scope: the system, for a system
+ * session, a session the system user owns (a child of a system session) or
+ * any session under a system root; otherwise its user owner. An unowned
+ * session speaks for no one, so it can neither send nor receive.
+ */
+async function messageScopeParty(catalog: SessionCatalog, row: SessionRow | null): Promise<string | null> {
+    if (!row) return null;
+    if (row.isSystem || ownedBySystemUser(row)) return SYSTEM_PARTY;
+    if (row.rootSessionId && row.rootSessionId !== row.sessionId) {
+        const root = await catalog.getSession(row.rootSessionId);
+        if (root && (root.isSystem || ownedBySystemUser(root))) return SYSTEM_PARTY;
+    }
+    return userOwnerKey(row);
+}
+
+/** Refuses a message or reply that the scope does not allow, before anything is queued or rate-counted. */
+async function assertWithinMessageScope(
+    runtime: InternalSessionMessageRuntime,
+    senderRow: SessionRow | null,
+    targetRow: SessionRow,
+    operation: "message" | "reply",
+): Promise<void> {
+    if (resolveSessionMessageScope(runtime.scope) !== "owner") return;
+    const [sender, target] = await Promise.all([
+        messageScopeParty(runtime.catalog, senderRow),
+        messageScopeParty(runtime.catalog, targetRow),
+    ]);
+    if (sender !== null && sender === target) return;
+    const plural = operation === "message" ? "messages" : "replies";
+    throw new Error(
+        `session ${operation} policy_denied: ${plural} are delivered only between sessions with the same owner, or between system sessions.`,
+    );
 }
 
 function reserveSessionMessageRate(senderSessionId: string, targetSessionId: string): { ok: true } | { ok: false; retryAfterMs: number; reason: string } {
@@ -151,6 +212,7 @@ export async function sendInternalSessionMessage(
 
     const targetRow = await validateSessionMessageTarget(runtime.catalog, fromSessionId, toSessionId, "messages");
     const senderRow = await runtime.catalog.getSession(fromSessionId).catch(() => null);
+    await assertWithinMessageScope(runtime, senderRow, targetRow, "message");
     const { crossOwner, senderOwnerLabel } = crossOwnerContext(senderRow, targetRow);
     const rate = reserveSessionMessageRate(fromSessionId, toSessionId);
     if (!rate.ok) {
@@ -176,10 +238,12 @@ export async function sendInternalSessionMessage(
         crossOwnerPreamble +
         replyInstructions +
         `\nRequest body:\n${body}`;
+    // With secret redaction on, a token in the subject or body is not queued:
+    // the target session reads [REDACTED] in its place.
     await runtime.duroxideClient.enqueueEvent(
         orchestrationId,
         "messages",
-        JSON.stringify({ prompt: message, sender: sessionMessageSender(fromSessionId, senderRow) }),
+        JSON.stringify({ prompt: redactSecrets(message), sender: sessionMessageSender(fromSessionId, senderRow) }),
     );
     return { requestId };
 }
@@ -206,6 +270,7 @@ export async function replyInternalSessionMessage(
 
     const targetRow = await validateSessionMessageTarget(runtime.catalog, fromSessionId, toSessionId, "replies");
     const senderRow = await runtime.catalog.getSession(fromSessionId).catch(() => null);
+    await assertWithinMessageScope(runtime, senderRow, targetRow, "reply");
     const { crossOwner, senderOwnerLabel } = crossOwnerContext(senderRow, targetRow);
     const rate = reserveSessionMessageRate(fromSessionId, toSessionId);
     if (!rate.ok) {
@@ -226,6 +291,6 @@ export async function replyInternalSessionMessage(
     await runtime.duroxideClient.enqueueEvent(
         orchestrationId,
         "messages",
-        JSON.stringify({ prompt: message, sender: sessionMessageSender(fromSessionId, senderRow) }),
+        JSON.stringify({ prompt: redactSecrets(message), sender: sessionMessageSender(fromSessionId, senderRow) }),
     );
 }

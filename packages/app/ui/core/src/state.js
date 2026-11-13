@@ -872,6 +872,10 @@ export function createInitialState({ mode = "local", branding = null, docs = nul
             // replaces the legacy GitHub-key editor in new UI; the legacy
             // state remains available for rollback compatibility only.
             section: "providers",
+            // The caller's opt-in to the deployment's dispatcher. `available`
+            // is false until the server says the deployment has one, which
+            // keeps the control hidden everywhere else.
+            dispatcherDelegation: { loaded: false, available: false, enabled: false, saving: false, error: null },
             features: { mode: "mine", userId: null, data: null, users: [], drafts: {}, loading: false, saving: false, error: null, generation: 0, fetchedAt: null, userQuery: "" },
             motds: createMotdAdminState(),
             // Agent packages (docs/proposals/agent-packages.md) — registry

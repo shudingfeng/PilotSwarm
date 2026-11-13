@@ -19,6 +19,20 @@
 //      primarily so the AGIC addon identity can hold "Managed Identity
 //      Operator" on it (required by AGIC docs to mutate AppGw config that
 //      references a UAMI). Wired in `agic-rbac.bicep`.
+//
+// With winWorkersEnabled (WIN_WORKERS_ENABLED=true) two more:
+//   6. Windows worker UAMI — the only identity of every Windows worker VM
+//      (win-workers.bicep). A second identity on the VMs would break the
+//      database sign-in, which cannot choose between identities.
+//   7. Disk controller UAMI — the controller's workload identity, federated
+//      with its service account in `uami-federation.bicep`.
+//
+// With coordinationHostEnabled too (WIN_WORKER_COORDINATION_HOST=true), one
+// more:
+//   8. Coordination host UAMI — the Linux worker's workload identity. Its
+//      service account is federated with this identity instead of the CSI
+//      identity (`uami-federation.bicep`), so the Linux worker no longer
+//      signs in as the portal's identity.
 // ==============================================================================
 
 @description('Azure region.')
@@ -27,6 +41,13 @@ param location string
 @description('Naming prefix applied to every UAMI.')
 param resourceNamePrefix string
 
+@description('Windows worker pool: add the workers\' and the disk controller\'s identities. False keeps the identities as they are.')
+param winWorkersEnabled bool = false
+
+@description('Windows worker pool with the coordination host: add the Linux worker\'s own identity. False adds none.')
+param coordinationHostEnabled bool = false
+
+var coordinationHost = winWorkersEnabled && coordinationHostEnabled
 var kubeletIdentityName = '${resourceNamePrefix}-kubelet-mid'
 var csiIdentityName = '${resourceNamePrefix}-csi-mid'
 var approverIdentityName = '${resourceNamePrefix}-pe-approver-mid'
@@ -66,6 +87,21 @@ resource appGwIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01
   location: location
 }
 
+resource winWorkerIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = if (winWorkersEnabled) {
+  name: '${resourceNamePrefix}-win-worker-mid'
+  location: location
+}
+
+resource diskControllerIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = if (winWorkersEnabled) {
+  name: '${resourceNamePrefix}-disk-pool-mid'
+  location: location
+}
+
+resource coordinationHostIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = if (coordinationHost) {
+  name: '${resourceNamePrefix}-linux-worker-mid'
+  location: location
+}
+
 output kubeletIdentityName string = kubeletIdentity.name
 output kubeletIdentityResourceId string = kubeletIdentity.id
 output kubeletIdentityPrincipalId string = kubeletIdentity.properties.principalId
@@ -90,3 +126,18 @@ output appGwIdentityName string = appGwIdentity.name
 output appGwIdentityResourceId string = appGwIdentity.id
 output appGwIdentityPrincipalId string = appGwIdentity.properties.principalId
 output appGwIdentityClientId string = appGwIdentity.properties.clientId
+
+// Empty without the Windows worker pool.
+output winWorkerIdentityName string = winWorkersEnabled ? winWorkerIdentity.name : ''
+output winWorkerIdentityResourceId string = winWorkersEnabled ? winWorkerIdentity.id : ''
+output winWorkerIdentityPrincipalId string = winWorkersEnabled ? winWorkerIdentity!.properties.principalId : ''
+output winWorkerIdentityClientId string = winWorkersEnabled ? winWorkerIdentity!.properties.clientId : ''
+
+output diskControllerIdentityName string = winWorkersEnabled ? diskControllerIdentity.name : ''
+output diskControllerIdentityPrincipalId string = winWorkersEnabled ? diskControllerIdentity!.properties.principalId : ''
+output diskControllerIdentityClientId string = winWorkersEnabled ? diskControllerIdentity!.properties.clientId : ''
+
+// Empty without the coordination host.
+output coordinationIdentityName string = coordinationHost ? coordinationHostIdentity.name : ''
+output coordinationIdentityPrincipalId string = coordinationHost ? coordinationHostIdentity!.properties.principalId : ''
+output coordinationIdentityClientId string = coordinationHost ? coordinationHostIdentity!.properties.clientId : ''

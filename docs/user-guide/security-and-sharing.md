@@ -146,6 +146,33 @@ grants, visibility changes, and denied operations are audited too. Owners can se
 audit entries about their own sessions ("who accessed my session"); admins can
 see the full audit surface.
 
+## Letting the deployment's dispatcher work for you
+
+Some deployments name a **dispatcher**: an application that starts and runs
+sessions for people, for example to work through a queue of tasks. It has no
+access to your sessions until you allow it, and only you can allow it:
+
+- Turn on **Dispatcher Delegation** in the Admin Console under **Model
+  Providers → My Providers** (in the TUI, press `g` on that page). The switch
+  only appears on deployments that have a dispatcher.
+- While it is on, the dispatcher may create sessions **that you own**. They
+  stay private, and the dispatcher holds a write share on each one. It may
+  also complete, cancel and delete the sessions it holds that share on.
+- You can share such a session **for reading only**: a read share or the
+  `shared_read` visibility. Nobody can give anyone else write access to it,
+  administrators included, because its prompts may run with your own
+  credentials. To hand the work to someone else, the dispatcher starts a new
+  session for that person.
+- Turn it off at any time. The dispatcher loses access to your sessions from
+  its next request — including work in progress, and including live updates it
+  is already watching — and can start no new ones. Its shares stay, so turning
+  delegation back on restores its access to the same sessions.
+- Every session the dispatcher creates or ends for you is recorded in the
+  audit log, which you can read for your own sessions.
+
+Administrators get no delegation rights from their role: only the dispatcher,
+and only for people who allowed it.
+
 ## Identity in messages, and how agents weigh it
 
 When more than one person can write to a session, every message carries a
@@ -163,7 +190,9 @@ agent can message another session. A message from a session owned by a **differe
 user** is delivered but framed as **advisory** — the receiving agent's own task
 takes precedence, and it declines anything that distracts from or contradicts its
 mission. Messages within your own session tree (same owner) and to/from system
-sessions are unaffected.
+sessions are unaffected. A deployment can set `PILOTSWARM_SESSION_MESSAGE_SCOPE=owner`
+to deliver these messages only between sessions with the same owner, or between
+system sessions; any other message is refused before delivery.
 
 Two things identity is **never** used for:
 
@@ -185,6 +214,8 @@ Operators control the posture with these environment variables:
 | `AUTHZ_ENFORCE_OWNERSHIP` | `true` / `false` | Enforce the rules above. `false` = legacy everyone-sees-everything, but still records would-be denials for a safe dark-launch. |
 | `SESSIONS_DEFAULT_VISIBILITY` | `private` / `shared_read` / `shared_write` | Visibility for newly created sessions. `shared_write` reproduces the old trusted-team behavior. |
 | `SESSIONS_SYSTEM_VISIBILITY` | `read` / `admin` | Whether users can see system sessions at all. |
+| `DISPATCHER_SP_OBJECT_ID` | object ID, unset by default | The deployment's dispatcher (above). Unset turns delegation off. The dispatcher works only with `AUTHZ_ENFORCE_OWNERSHIP=true`. |
+| `PILOTSWARM_SESSION_MESSAGE_SCOPE` | `fleet` / `owner` | `owner` limits agent messages to sessions with the same owner, or between system sessions, and lets only admins change the shared `skills/`, `asks/` and `config/facts-manager/` facts through the API. Set it on the portal and the workers. See [Configuration](../developer/reference/configuration.md#session-message-scope). |
 
 `SESSIONS_DEFAULT_VISIBILITY` affects only sessions created after the setting
 is deployed. Migration `0029` stamps existing sessions as `private`; changing

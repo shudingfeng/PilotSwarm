@@ -17,6 +17,8 @@ import {
     MAX_SUB_AGENTS,
     SHUTDOWN_POLL_INTERVAL_MS,
     SHUTDOWN_TIMEOUT_MS,
+    WORKSPACE_RELEASE_CAP_MS,
+    createdSessionRouting,
     type DurableSessionRuntime,
     type PendingShutdownState,
     type ShutdownMode,
@@ -487,6 +489,27 @@ export function* refreshTrackedSubAgents(
 
 // ─── Graceful shutdown cascade ──────────────────────────────
 
+/**
+ * Free the session on the worker that holds it. 1.0.84: an owner-tagged
+ * session's destroy waits for a worker of its owner, so it is raced against
+ * WORKSPACE_RELEASE_CAP_MS. With no such worker nothing is held in memory,
+ * the session ends anyway, and duroxide drops the destroy no worker took.
+ */
+function* destroySession(runtime: DurableSessionRuntime): Generator<any, void, any> {
+    if (!runtime.options.ownerTag) {
+        try {
+            yield runtime.session.destroy();
+        } catch {}
+        return;
+    }
+    try {
+        const raced: any = yield runtime.ctx.race(runtime.session.destroy(), runtime.ctx.scheduleTimer(WORKSPACE_RELEASE_CAP_MS));
+        if (raced?.index === 1) {
+            runtime.ctx.traceInfo(`[orch] destroySession did not finish within ${WORKSPACE_RELEASE_CAP_MS}ms; ending the session anyway`);
+        }
+    } catch {}
+}
+
 export function* notifyParentOfTerminalState(
     runtime: DurableSessionRuntime,
     updateType: "completed" | "cancelled",
@@ -539,9 +562,7 @@ export function* completeSession(
     publishStatus(runtime, "completed");
     yield* notifyParentOfTerminalState(runtime, "completed", reason, commandId, requestedBy);
 
-    try {
-        yield runtime.session.destroy();
-    } catch {}
+    yield* destroySession(runtime);
 
     if (commandId) {
         const resp: CommandResponse = {
@@ -576,9 +597,7 @@ export function* cancelSession(
 
     yield* notifyParentOfTerminalState(runtime, "cancelled", reason, commandId, requestedBy);
 
-    try {
-        yield runtime.session.destroy();
-    } catch {}
+    yield* destroySession(runtime);
 
     if (commandId) {
         const resp: CommandResponse = {
@@ -631,9 +650,7 @@ export function* failPendingShutdown(
     clearPendingChildDigest(runtime);
     runtime.state.activeTimer = null;
 
-    try {
-        yield runtime.session.destroy();
-    } catch {}
+    yield* destroySession(runtime);
 
     if (shutdown?.commandId) {
         const resp: CommandResponse = {
@@ -963,6 +980,8 @@ export function* handleSubAgentAction(
             });
 
             let childSessionId: string;
+            // 1.0.84: the child takes the tag and busy policy; a system child neither.
+            const childRouting = agentIsSystem ? undefined : createdSessionRouting(runtime.options);
             try {
                 childSessionId = yield runtime.manager.spawnChildSession(
                     runtime.input.sessionId,
@@ -975,7 +994,9 @@ export function* handleSubAgentAction(
                     agentSplash,
                     agentTitleIsExplicit,
                     bootstrapRequiredTool,
-                    ...(result.workspace ? [true] : []),
+                    ...(childRouting
+                        ? [result.workspace ? true : undefined, childRouting]
+                        : result.workspace ? [true] : []),
                 );
             } catch (err: any) {
                 ctx.traceInfo(`[orch] spawnChildSession failed: ${err.message}`);

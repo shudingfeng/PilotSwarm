@@ -7,7 +7,8 @@
  *   - session cleanup when a session is deleted
  */
 
-import { runFactsMigrations } from "./facts-migrator.js";
+import { assertFactsMigrationsApplied, runFactsMigrations } from "./facts-migrator.js";
+import { dbMigrationsSkipped } from "./pg-migrator.js";
 
 export interface FactRecord {
     /**
@@ -630,7 +631,8 @@ export class PgFactStore implements FactStore {
 
     async initialize(): Promise<void> {
         if (this.initialized) return;
-        await runFactsMigrations(this.pool, this.sql.schema);
+        if (dbMigrationsSkipped()) await assertFactsMigrationsApplied(this.pool, this.sql.schema);
+        else await runFactsMigrations(this.pool, this.sql.schema);
         this.initialized = true;
     }
 

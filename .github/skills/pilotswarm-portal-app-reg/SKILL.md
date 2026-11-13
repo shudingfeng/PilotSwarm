@@ -101,6 +101,15 @@ Optional (off by default, opt-in with switches):
   The role assignment list **is** the allowlist — the engine's
   deny-by-default behavior rejects any signed-in principal without an
   admin/user role claim. See the posture matrix below.
+- `-WorkerRoles` prepares the app for application identities (service
+  principals, including managed identities) that call the deployment's own
+  services: it adds three roles only applications can hold (`worker`,
+  `deployer`, `coordinator`), lets applications hold `user`, and sets
+  `api.requestedAccessTokenVersion` to `2` (v2.0 access tokens). The portal
+  admits only `admin` / `user`. Rerunning keeps existing role IDs and never
+  removes a role; with `-ExistingAppId` it adds the roles to an existing app
+  (no redirect URI needed). Use it only when such identities exist — see
+  `docs/developer/deploy/entra-app-roles.md`.
 
 These bakes are NOT user-configurable — they are the contract the
 PilotSwarm portal depends on. The script's parameters only cover the
@@ -144,6 +153,7 @@ Identity
 Role-driven authz (recommended for prod stamps)
   CreateAppRoles           false (default)             # add 'admin' + 'user' app roles
   AssignmentRequired       false (default, recommended OFF — see caveat in "Underlying tooling" above)
+  WorkerRoles              false (default)             # roles for application identities + v2.0 access tokens
 
 Redirect URI (mode=create-new only)
   EnvName                  <required-or-pick-one>
@@ -377,6 +387,13 @@ principal with no admin/user role claim sees a "You are not authorized
 to access this portal" page rather than the app. Assign at least one
 app-role admin via `Set-PortalAuthAssignments.ps1` before the first
 sign-in so someone can actually reach the portal.
+
+With `-WorkerRoles`, the `worker`, `deployer` and `coordinator` roles
+(and `user`, for an application that acts for users) go to service
+principals through the same script (`-WorkerAssignments`,
+`-DeployerAssignments`, `-CoordinatorAssignments`, `-UserAssignments`).
+Those assignments need an Entra administrator (Cloud Application
+Administrator or Application Administrator); owning the app is not enough.
 
 ## What this skill will not do
 

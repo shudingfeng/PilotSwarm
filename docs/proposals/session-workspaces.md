@@ -631,12 +631,21 @@ the session:
 - **Which pid is the shell.** CLI 1.0.83 keeps a finished detached shell
   listed as running, with its pid. The host may give that pid to another
   process later. A pid counts as the shell only if its process did not start
-  after the task did (`/proc/<pid>/stat` on Linux, `ps -o lstart=`
-  elsewhere, with 2 s of slack). Any other process with that pid is never
-  killed.
+  after the task did (`/proc/<pid>/stat` on Linux, the process's creation
+  time on Windows, `ps -o lstart=` elsewhere, with 2 s of slack). Any other
+  process with that pid is never killed. On Windows, a process keeps its
+  parent's pid after the parent ends, and the pid may go to a new process.
+  The worker lists every process with its parent's pid, and kills nothing
+  when the list misses the shell or the worker, or when the shell's tree, so
+  listed, holds the worker. Otherwise `taskkill /T /F` ends the tree; should
+  it fail, the listed processes are killed one by one.
 - **One deadline.** Steps 1 to 3 run under one 20 s deadline on the worker. A
   CLI frozen by a hung mount never answers; the handle is dropped anyway, and
   step 4 still runs.
+- **A wedged CLI.** With `PILOTSWARM_CLI_ABORT_TIMEOUT_MS` set, the worker
+  force-stops a CLI that leaves a turn guard's abort unanswered. Such a CLI
+  can't run step 1, so the worker first ends the CLI's process and every
+  process below it, which stops the shells of every session on it.
 
 Step 1 is required. Live check on CLI 1.0.83: `disconnect()`, `client.stop()`,
 `abort()`, `forceStop()` and `rpc.shutdown()` all left a background shell

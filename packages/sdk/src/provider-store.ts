@@ -12,6 +12,14 @@
 import type { Pool } from "pg";
 import type { BudgetPeriod, BudgetRuleState, TurnAdmission } from "./provider-budgets.js";
 import { toTurnAdmission } from "./provider-budgets.js";
+import {
+    EXTERNAL_SECRET_KIND,
+    externalSecretRef,
+    personalSecretsMode,
+    withoutSecretValues,
+    type ExternalSecretRef,
+    type PersonalSecretStore,
+} from "./personal-secret-store.js";
 
 export type ProviderClass = "shared" | "personal";
 
@@ -267,12 +275,26 @@ export interface ProviderCredential {
  * accepted and stored as a literal under `value`. `ref` and `source` are
  * dropped, and a literal that looks like a pointer is refused outright
  * rather than silently stored as something that will never resolve.
+ *
+ * `requireFineGrainedGitHubToken` is the synchronous half of the
+ * fine-grained GitHub token gate below: whichever field carries the key, it
+ * must be a `github_pat_` token.
+ *
+ * A reference to an external secret (`kind: "externalSecret"`) is refused
+ * too: only the store writes one, after it has stored the key itself.
  */
 export function normalizeCallerSecret(
     input: Record<string, unknown> | string | null | undefined,
-    options: { workloadIdentity?: boolean } = {},
+    options: { workloadIdentity?: boolean; requireFineGrainedGitHubToken?: boolean } = {},
 ): Record<string, unknown> {
     const raw = typeof input === "string" ? { value: input } : (input ?? {});
+
+    if (typeof raw.kind === "string" && raw.kind.trim().toLowerCase() === EXTERNAL_SECRET_KIND.toLowerCase()) {
+        throw new ProviderError(
+            "PROVIDER_INVALID",
+            "A credential must be the key itself. A reference to a secret store is written only by PilotSwarm, after it stores the key there.",
+        );
+    }
 
     // A workload-identity provider is credential-less by design. It stores a
     // marker rather than nothing at all, so the row is distinguishable from
@@ -318,18 +340,479 @@ export function normalizeCallerSecret(
         );
     }
 
+    if (options.requireFineGrainedGitHubToken && !candidate.startsWith(FINE_GRAINED_GITHUB_TOKEN_PREFIX)) {
+        const kind = GITHUB_TOKEN_KINDS.find(([prefix]) => candidate.startsWith(prefix))?.[1]
+            ?? "not a GitHub personal access token";
+        throw new ProviderError(
+            "PROVIDER_INVALID",
+            "This deployment accepts only fine-grained personal access tokens (github_pat_…) for GitHub providers, "
+            + `and this key is ${kind}.`,
+        );
+    }
+
     const apiVersion = typeof raw.apiVersion === "string" ? { apiVersion: raw.apiVersion } : {};
     return { kind: isGithub ? "githubToken" : "apiKey", value: candidate, ...apiVersion };
+}
+
+// ── the fine-grained GitHub token gate ───────────────────────────
+//
+// With PILOTSWARM_REQUIRE_FINE_GRAINED_GH_PAT on, a GitHub-type provider
+// takes only a fine-grained personal access token that reaches no private
+// or internal repository, expires within 30 days, and holds none of the
+// account permissions that would let a stolen copy outlive it. The store
+// knows a type only by its name, so the caller that holds the type catalog
+// says when the gate applies (`requireFineGrainedGitHubToken`), exactly as
+// it does for workload identity.
+
+const FINE_GRAINED_GITHUB_TOKEN_SETTING = "PILOTSWARM_REQUIRE_FINE_GRAINED_GH_PAT";
+const FINE_GRAINED_GITHUB_TOKEN_PREFIX = "github_pat_";
+
+/**
+ * Is the fine-grained GitHub token gate on? Off unless set.
+ *
+ * `1`, `true`, `yes` and `on` turn it on; unset, empty, `0`, `false`, `no`
+ * and `off` leave it off. Anything else throws rather than guessing: a typo
+ * that quietly left a security gate off is the one outcome worse than a
+ * refusal.
+ */
+export function requiresFineGrainedGitHubTokens(
+    env: Record<string, string | undefined> = process.env,
+): boolean {
+    const value = String(env[FINE_GRAINED_GITHUB_TOKEN_SETTING] ?? "").trim().toLowerCase();
+    if (["", "0", "false", "no", "off"].includes(value)) return false;
+    if (["1", "true", "yes", "on"].includes(value)) return true;
+    throw new Error(`${FINE_GRAINED_GITHUB_TOKEN_SETTING} must be 1 or 0 (true/false, yes/no and on/off also work).`);
+}
+
+/** A refused token is named by its well-known prefix, never echoed. */
+const GITHUB_TOKEN_KINDS: Array<[prefix: string, kind: string]> = [
+    ["ghp_", "a classic personal access token (ghp_)"],
+    ["gho_", "an OAuth app token (gho_)"],
+    ["ghu_", "a GitHub App user token (ghu_)"],
+    ["ghs_", "a GitHub App installation token (ghs_)"],
+    ["ghr_", "a GitHub refresh token (ghr_)"],
+];
+
+/** How the gate reaches GitHub. Tests pass stand-ins, so nothing touches the network. */
+export interface GitHubTokenCheckOptions {
+    fetch?: typeof globalThis.fetch;
+    /** Epoch milliseconds, for the expiry check. */
+    now?: () => number;
+    /** The bound on each request to GitHub. Default: 10 seconds. */
+    timeoutMs?: number;
+}
+
+const GITHUB_API_URL = "https://api.github.com";
+const GITHUB_REQUEST_TIMEOUT_MS = 10_000;
+const MAX_TOKEN_LIFETIME_MS = 30 * 24 * 60 * 60 * 1000;
+const REPOSITORY_PAGE_SIZE = 100;
+const MAX_REPOSITORY_PAGES = 100;
+
+/**
+ * Account permissions the token must not hold. Sign-in and signing keys
+ * outlive the token that added them; the others read private account data.
+ * GitHub has no API that lists a fine-grained token's permissions, so each
+ * one is probed, and the token's other account permissions stay unchecked.
+ */
+const REFUSED_ACCOUNT_PERMISSIONS: Array<[path: string, permission: string]> = [
+    ["/user/keys", "Git SSH keys"],
+    ["/user/gpg_keys", "GPG keys"],
+    ["/user/ssh_signing_keys", "SSH signing keys"],
+    ["/user/emails", "Email addresses"],
+    ["/user/codespaces/secrets", "Codespaces user secrets"],
+];
+
+function refuseToken(message: string): never {
+    throw new ProviderError("PROVIDER_INVALID", message);
+}
+
+/** Network-layer text, with the token cut out wherever it might appear. */
+function withoutToken(text: string, token: string): string {
+    const cut = token ? text.split(token).join("[redacted]") : text;
+    return cut.replace(/\b(?:github_pat|gh[opusr])_[A-Za-z0-9_]+/g, "[redacted]");
+}
+
+function unanswered(err: any, token: string, timeoutMs: number): string {
+    if (err?.name === "TimeoutError" || err?.name === "AbortError") return `no answer within ${timeoutMs} ms`;
+    return withoutToken(String(err?.cause?.message ?? err?.message ?? err), token);
+}
+
+async function askGitHub(
+    fetchImpl: typeof globalThis.fetch, path: string, token: string, timeoutMs: number,
+): Promise<Response> {
+    try {
+        return await fetchImpl(`${GITHUB_API_URL}${path}`, {
+            method: "GET",
+            headers: {
+                Accept: "application/vnd.github+json",
+                Authorization: `Bearer ${token}`,
+                "User-Agent": "PilotSwarm",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+            // The token goes to GitHub's API and nowhere else.
+            redirect: "error",
+            signal: AbortSignal.timeout(timeoutMs),
+        });
+    } catch (err) {
+        refuseToken(`GitHub could not be reached to check the token (${unanswered(err, token, timeoutMs)}), so it was not saved. Try again.`);
+    }
+}
+
+/** Free the connection behind an answer whose body is not needed. */
+async function discard(response: Response): Promise<void> {
+    try {
+        await response.body?.cancel();
+    } catch {
+        // Nothing left to release.
+    }
+}
+
+/** `GitHub-Authentication-Token-Expiration`, such as `2026-12-01 09:30:00 UTC`, in epoch ms. */
+function parseGitHubTokenExpiry(value: string): number | null {
+    const m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(?:\.\d+)?\s*(UTC|GMT|Z|[+-]\d{2}:?\d{2})?$/i
+        .exec(value.trim());
+    if (!m) return null;
+    const [, year, month, day, hour, minute, second, zone = "UTC"] = m;
+    const offsetMs = /^[+-]/.test(zone)
+        ? (zone.startsWith("-") ? -1 : 1) * (Number(zone.slice(1, 3)) * 60 + Number(zone.slice(-2))) * 60_000
+        : 0;
+    const at = Date.UTC(Number(year), Number(month) - 1, Number(day), Number(hour), Number(minute), Number(second)) - offsetMs;
+    return Number.isFinite(at) ? at : null;
+}
+
+function expiryProblem(header: string | null, now: number): string | null {
+    if (!header) return "GitHub reports no expiry for the token. Create one that expires within 30 days.";
+    const expiresAt = parseGitHubTokenExpiry(header);
+    if (expiresAt === null) return "GitHub's expiry for the token could not be read, so it was refused.";
+    if (expiresAt - now <= MAX_TOKEN_LIFETIME_MS) return null;
+    return `The token expires at ${new Date(expiresAt).toISOString()}, more than 30 days from now. `
+        + `Create one that expires by ${new Date(now + MAX_TOKEN_LIFETIME_MS).toISOString()}.`;
+}
+
+/** GitHub's answer for a permission the token does not hold. A rate limit is not that answer. */
+function permissionDenied(response: Response): boolean {
+    if (![401, 403, 404].includes(response.status)) return false;
+    return response.headers.get("x-ratelimit-remaining") !== "0" && !response.headers.has("retry-after");
+}
+
+/**
+ * The asynchronous half of the gate: what GitHub says about the token.
+ *
+ * Every repository the token can list must be public, so it reaches no
+ * private or internal one; GitHub must report an expiry at most 30 days
+ * away; and none of the refused account permissions may answer. Each request
+ * is bounded, and one that gets no usable answer refuses the token: a check
+ * that could not be made is not a pass. A token that passes comes back with
+ * the expiry GitHub reported.
+ */
+export async function checkFineGrainedGitHubToken(
+    token: string,
+    options: GitHubTokenCheckOptions = {},
+): Promise<{ expiresOn: string }> {
+    const fetchImpl = options.fetch ?? globalThis.fetch;
+    const now = options.now ?? Date.now;
+    const timeoutMs = options.timeoutMs ?? GITHUB_REQUEST_TIMEOUT_MS;
+    const ask = (path: string) => askGitHub(fetchImpl, path, token, timeoutMs);
+    let expiresOn = "";
+
+    for (let page = 1; ; page += 1) {
+        if (page > MAX_REPOSITORY_PAGES) {
+            refuseToken(`The token can list more than ${MAX_REPOSITORY_PAGES * REPOSITORY_PAGE_SIZE} repositories, too many to check, so it was refused.`);
+        }
+        const response = await ask(`/user/repos?visibility=all&per_page=${REPOSITORY_PAGE_SIZE}&page=${page}`);
+        if (!response.ok) {
+            await discard(response);
+            refuseToken(response.status === 401
+                ? "GitHub does not accept the token (HTTP 401): it is wrong, expired or revoked."
+                : `GitHub answered HTTP ${response.status} when listing the token's repositories, so it could not be checked. Try again.`);
+        }
+        if (page === 1) {
+            const header = response.headers.get("github-authentication-token-expiration");
+            const problem = expiryProblem(header, now());
+            if (problem) {
+                await discard(response);
+                refuseToken(problem);
+            }
+            expiresOn = new Date(parseGitHubTokenExpiry(header!)!).toISOString();
+        }
+        let repositories: unknown = null;
+        try {
+            repositories = await response.json();
+        } catch (err) {
+            refuseToken(`GitHub's list of the token's repositories could not be read (${unanswered(err, token, timeoutMs)}), so it was refused.`);
+        }
+        if (!Array.isArray(repositories)) {
+            refuseToken("GitHub's list of the token's repositories could not be read, so it was refused.");
+        }
+        // `visibility` is "public", "private" or "internal"; anything else,
+        // missing included, is not public.
+        if (repositories.some((repository: any) => repository?.visibility !== "public")) {
+            refuseToken("The token can reach a repository that is not public. Create it with access to public repositories only.");
+        }
+        if (repositories.length < REPOSITORY_PAGE_SIZE) break;
+    }
+
+    const answers = await Promise.allSettled(REFUSED_ACCOUNT_PERMISSIONS.map(async ([path]) => {
+        const response = await ask(path);
+        await discard(response);
+        return response;
+    }));
+    // A permission that answers is a definite refusal, so it is named ahead
+    // of a probe that could not be made.
+    answers.forEach((answer, i) => {
+        if (answer.status === "fulfilled" && answer.value.ok) {
+            refuseToken(`The token has the account permission "${REFUSED_ACCOUNT_PERMISSIONS[i][1]}". Create it without that permission.`);
+        }
+    });
+    for (const answer of answers) {
+        if (answer.status === "rejected") throw answer.reason;
+        if (!permissionDenied(answer.value)) {
+            refuseToken(`GitHub answered HTTP ${answer.value.status} when checking the token's account permissions, so it could not be checked. Try again.`);
+        }
+    }
+    return { expiresOn };
 }
 
 const iso = (v: any): string | null =>
     v === null || v === undefined ? null : (v instanceof Date ? v.toISOString() : String(v));
 
+export interface ProviderStoreOptions {
+    /** How the fine-grained GitHub token gate reaches GitHub. */
+    gitHubTokenCheck?: GitHubTokenCheckOptions;
+    /**
+     * Where personal GitHub tokens go with PILOTSWARM_PERSONAL_SECRETS=external.
+     * Only the portal has one; elsewhere, external mode refuses to save a
+     * personal credential.
+     */
+    personalSecretStore?: PersonalSecretStore | null;
+}
+
+/** Set by the caller that holds the type catalog: does the gate apply to this credential? */
+export interface CredentialGateOptions {
+    requireFineGrainedGitHubToken?: boolean;
+}
+
+/**
+ * What external mode needs to know about a personal credential, from the
+ * caller that holds the type catalog and the signed-in principal.
+ */
+export interface PersonalCredentialContext {
+    /** The provider's TYPE is a GitHub one (catalog `type: "github"`). The secret store holds only those. */
+    gitHubType?: boolean;
+    /** The owner's signed-in principal, which the secret store may record with the token. */
+    owner?: { provider: string; subject: string } | null;
+}
+
+/** The secret store did not do what was asked. Its message is fixed text, safe to show. */
+function secretStoreError(message: string, cause?: unknown): ProviderError {
+    const error = new ProviderError("PROVIDER_SECRET_STORE_UNAVAILABLE", message);
+    if (cause !== undefined) (error as Error & { cause?: unknown }).cause = cause;
+    return error;
+}
+
 export class ProviderStore {
-    constructor(private readonly pool: Pool, private readonly schema: string) {}
+    private personalSecretStore: PersonalSecretStore | null;
+
+    constructor(
+        private readonly pool: Pool,
+        private readonly schema: string,
+        private readonly options: ProviderStoreOptions = {},
+    ) {
+        this.personalSecretStore = options.personalSecretStore ?? null;
+    }
+
+    /** The store for personal tokens, for a host that builds this store before it has one. */
+    setPersonalSecretStore(store: PersonalSecretStore | null): void {
+        this.personalSecretStore = store;
+    }
 
     private fn(name: string): string {
         return `"${this.schema}".${name}`;
+    }
+
+    /**
+     * The fine-grained GitHub token gate, when the caller says it applies:
+     * the prefix first, then GitHub's answers, and nothing written until both
+     * pass. Off, it costs nothing. Returns the token's expiry when checked.
+     */
+    private async assertFineGrainedGitHubToken(
+        secretRef: Record<string, unknown> | null | undefined,
+        gate: CredentialGateOptions | undefined,
+    ): Promise<string | null> {
+        if (!gate?.requireFineGrainedGitHubToken) return null;
+        const { value } = normalizeCallerSecret(secretRef, { requireFineGrainedGitHubToken: true });
+        return (await checkFineGrainedGitHubToken(String(value), this.options.gitHubTokenCheck)).expiresOn;
+    }
+
+    /**
+     * External mode: check the token as the caller asked, store it in the
+     * secret store, and return the reference the row will keep instead.
+     * Nothing reaches the database here.
+     */
+    private async putPersonalSecret(input: {
+        name: string;
+        actor: number;
+        secretRef: Record<string, unknown> | null | undefined;
+        gate: CredentialGateOptions & PersonalCredentialContext;
+        previous: ExternalSecretRef | null;
+    }): Promise<ExternalSecretRef> {
+        const store = this.personalSecretStore;
+        if (!store) {
+            throw new ProviderError(
+                "PROVIDER_FORBIDDEN",
+                "This deployment keeps personal credentials in its secret store, which only the portal can write. "
+                + "Add or update the provider in the portal.",
+            );
+        }
+        if (!input.gate.gitHubType) {
+            throw new ProviderError(
+                "PROVIDER_INVALID",
+                "This deployment keeps personal credentials in its secret store, which holds GitHub tokens only. "
+                + "Ask an administrator for a shared provider of this type.",
+            );
+        }
+        const { value } = normalizeCallerSecret(input.secretRef, {
+            requireFineGrainedGitHubToken: input.gate.requireFineGrainedGitHubToken,
+        });
+        const expiresOn = await this.assertFineGrainedGitHubToken(input.secretRef, input.gate);
+        let written: Awaited<ReturnType<PersonalSecretStore["put"]>>;
+        try {
+            written = await store.put({
+                provider: input.name,
+                owner: {
+                    userId: input.actor,
+                    principal: input.gate.owner?.provider && input.gate.owner?.subject
+                        ? { provider: input.gate.owner.provider, subject: input.gate.owner.subject }
+                        : null,
+                },
+                token: String(value),
+                expiresOn,
+                previous: input.previous,
+            });
+        } catch (err) {
+            throw secretStoreError("The secret store did not store the token, so nothing was saved. Try again.", err);
+        }
+        const ref = externalSecretRef({
+            ...written,
+            kind: EXTERNAL_SECRET_KIND,
+            expiresOn: written?.expiresOn ?? expiresOn,
+        });
+        if (!ref) {
+            throw secretStoreError("The secret store did not return a complete reference to the token, so nothing was saved.");
+        }
+        return ref;
+    }
+
+    /** Best effort: a secret nothing references any more. */
+    private async discardPersonalSecret(ref: ExternalSecretRef): Promise<void> {
+        try {
+            await this.personalSecretStore?.delete(ref);
+        } catch (err: any) {
+            console.warn(`[ProviderStore] could not delete the unused secret ${ref.name}: ${String(err?.message ?? err)}`);
+        }
+    }
+
+    private async createExternalPersonalProvider(
+        input: Parameters<ProviderStore["createProvider"]>[0],
+        actor: number | null,
+        isAdmin: boolean,
+    ): Promise<{ name: string; typeId: string; class: ProviderClass }> {
+        if (actor === null) {
+            throw new ProviderError("PROVIDER_FORBIDDEN", "sign in to add a provider of your own");
+        }
+        const ref = await this.putPersonalSecret({
+            name: input.name,
+            actor,
+            secretRef: input.secretRef,
+            gate: input,
+            previous: null,
+        });
+        try {
+            const rows = await this.call(
+                `SELECT * FROM ${this.fn("cms_provider_create")}($1,$2,$3,$4,$5,$6,$7,$8)`,
+                [input.name, input.typeId, input.class, input.ownerUserId ?? null,
+                    JSON.stringify(ref), input.baseUrl ?? null, actor, isAdmin]);
+            const r = rows[0] ?? {};
+            return { name: r.name, typeId: r.type_id, class: r.class };
+        } catch (err) {
+            await this.discardPersonalSecret(ref);
+            throw err;
+        }
+    }
+
+    private async updateExternalPersonalCredential(
+        name: string,
+        secretRef: Record<string, unknown> | null | undefined,
+        actor: number | null,
+        gate: CredentialGateOptions & PersonalCredentialContext,
+    ): Promise<{ name: string; typeId: string; class: ProviderClass }> {
+        if (actor === null) {
+            throw new ProviderError("PROVIDER_FORBIDDEN", "sign in to update a provider of your own");
+        }
+        // The same refusal the update procedure gives, before anything is stored.
+        const current = await this.getCredential(name, actor);
+        if (!current || current.class !== "personal" || current.ownerUserId !== actor) {
+            throw new ProviderError("PROVIDER_NOT_FOUND", `there is no provider named "${name}"`);
+        }
+        const previous = externalSecretRef(current.secretRef);
+        const ref = await this.putPersonalSecret({ name, actor, secretRef, gate, previous });
+        const sameSecret = previous !== null && previous.store === ref.store && previous.name === ref.name;
+        let rows: any[];
+        try {
+            rows = await this.call(
+                `SELECT * FROM ${this.fn("cms_provider_update_personal_credential")}($1,$2,$3)`,
+                [name, JSON.stringify(ref), actor]);
+        } catch (err) {
+            // A new version of the row's own secret is harmless: the row
+            // still names the version it had.
+            if (!sameSecret) await this.discardPersonalSecret(ref);
+            throw err;
+        }
+        if (previous && !sameSecret) await this.discardPersonalSecret(previous);
+        const r = rows[0] ?? {};
+        return { name: r.name, typeId: r.type_id, class: r.class };
+    }
+
+    /**
+     * Delete a provider whose token is in the secret store, and the token
+     * with it. The row goes in a transaction that commits only once the
+     * store has deleted the secret, so a failure keeps both.
+     */
+    private async deleteProviderWithSecret(
+        name: string, actor: number | null, isAdmin: boolean, ref: ExternalSecretRef,
+    ): Promise<number> {
+        const store = this.personalSecretStore;
+        if (!store) {
+            throw new ProviderError(
+                "PROVIDER_FORBIDDEN",
+                `Provider "${name}" keeps its key in the deployment's secret store, which only the portal can reach. Delete it in the portal.`,
+            );
+        }
+        const client = await this.pool.connect();
+        try {
+            await client.query("BEGIN");
+            let waiting: number;
+            try {
+                const { rows } = await client.query(
+                    `SELECT ${this.fn("cms_provider_delete")}($1,$2,$3) AS waiting`, [name, actor, isAdmin]);
+                waiting = Number(rows[0]?.waiting ?? 0);
+            } catch (err) {
+                rethrow(err);
+            }
+            try {
+                await store.delete(ref);
+            } catch (err) {
+                throw secretStoreError(
+                    `The secret store did not delete the key of provider "${name}", so the provider was kept. Try again.`, err);
+            }
+            await client.query("COMMIT");
+            return waiting;
+        } catch (err) {
+            await client.query("ROLLBACK").catch(() => {});
+            throw err;
+        } finally {
+            client.release();
+        }
     }
 
     private async call(sql: string, params: any[] = []): Promise<any[]> {
@@ -550,7 +1033,8 @@ export class ProviderStore {
      * Every provider with its credential, for the worker's own runtime
      * catalog. Not a viewer-scoped read and never shown to anyone: a worker
      * runs turns for everybody, and what a person may spend from is settled
-     * by the admission gate long before a credential is reached for.
+     * by the admission gate long before a credential is reached for. A token
+     * kept in the secret store comes back as its reference alone.
      */
     async allCredentials(): Promise<ProviderCredential[]> {
         const rows = await this.call(
@@ -562,7 +1046,7 @@ export class ProviderStore {
             class: r.class as ProviderClass,
             ownerUserId: r.owner_user_id === null ? null : Number(r.owner_user_id),
             baseUrl: r.base_url ?? null,
-            secretRef: (r.secret_ref ?? {}) as Record<string, unknown>,
+            secretRef: withoutSecretValues((r.secret_ref ?? {}) as Record<string, unknown>),
             systemUseEnabled: r.system_use_enabled === true,
         }));
     }
@@ -578,7 +1062,7 @@ export class ProviderStore {
             class: r.class as ProviderClass,
             ownerUserId: r.owner_user_id === null ? null : Number(r.owner_user_id),
             baseUrl: r.base_url ?? null,
-            secretRef: (r.secret_ref ?? {}) as Record<string, unknown>,
+            secretRef: withoutSecretValues((r.secret_ref ?? {}) as Record<string, unknown>),
         };
     }
 
@@ -593,7 +1077,7 @@ export class ProviderStore {
             class: r.class as ProviderClass,
             ownerUserId: r.owner_user_id === null ? null : Number(r.owner_user_id),
             baseUrl: r.base_url ?? null,
-            secretRef: (r.secret_ref ?? {}) as Record<string, unknown>,
+            secretRef: withoutSecretValues((r.secret_ref ?? {}) as Record<string, unknown>),
             systemUseEnabled: true,
         };
     }
@@ -760,7 +1244,19 @@ export class ProviderStore {
          * holds the type catalog; the store only knows a type by its name.
          */
         workloadIdentity?: boolean;
-    }, actor: number | null, isAdmin: boolean): Promise<{ name: string; typeId: string; class: ProviderClass }> {
+        /**
+         * The credential must pass the fine-grained GitHub token gate: the
+         * type is a GitHub one and the deployment requires the gate. Decided
+         * by the caller for the same reason.
+         */
+        requireFineGrainedGitHubToken?: boolean;
+    } & PersonalCredentialContext, actor: number | null, isAdmin: boolean): Promise<{ name: string; typeId: string; class: ProviderClass }> {
+        if (input.class === "personal" && !input.workloadIdentity && personalSecretsMode() === "external") {
+            return this.createExternalPersonalProvider(input, actor, isAdmin);
+        }
+        await this.assertFineGrainedGitHubToken(input.secretRef, {
+            requireFineGrainedGitHubToken: input.requireFineGrainedGitHubToken,
+        });
         const rows = await this.call(
             `SELECT * FROM ${this.fn("cms_provider_create")}($1,$2,$3,$4,$5,$6,$7,$8)`,
             [input.name, input.typeId, input.class, input.ownerUserId ?? null,
@@ -774,7 +1270,12 @@ export class ProviderStore {
         name: string,
         secretRef: Record<string, unknown> | null | undefined,
         actor: number | null,
+        gate: CredentialGateOptions & PersonalCredentialContext = {},
     ): Promise<{ name: string; typeId: string; class: ProviderClass }> {
+        if (personalSecretsMode() === "external") {
+            return this.updateExternalPersonalCredential(name, secretRef, actor, gate);
+        }
+        await this.assertFineGrainedGitHubToken(secretRef, gate);
         const rows = await this.call(
             `SELECT * FROM ${this.fn("cms_provider_update_personal_credential")}($1,$2,$3)`,
             [name, JSON.stringify(normalizeCallerSecret(secretRef)), actor]);
@@ -795,7 +1296,9 @@ export class ProviderStore {
         secretRef: Record<string, unknown> | null | undefined,
         actor: number | null,
         isAdmin: boolean,
+        gate: CredentialGateOptions = {},
     ): Promise<{ name: string; typeId: string; class: ProviderClass }> {
+        await this.assertFineGrainedGitHubToken(secretRef, gate);
         const rows = await this.call(
             `SELECT * FROM ${this.fn("cms_provider_update_shared_credential")}($1,$2,$3,$4)`,
             [name, JSON.stringify(normalizeCallerSecret(secretRef)), actor, isAdmin]);
@@ -803,8 +1306,16 @@ export class ProviderStore {
         return { name: r.name, typeId: r.type_id, class: r.class };
     }
 
-    /** Returns how many sessions now name a provider that no longer exists. */
+    /**
+     * Returns how many sessions now name a provider that no longer exists.
+     * A provider whose token is in the secret store takes the token with it.
+     */
     async deleteProvider(name: string, actor: number | null, isAdmin: boolean): Promise<number> {
+        // Read only where a secret could be: with a store, or in external mode.
+        if (this.personalSecretStore || personalSecretsMode() === "external") {
+            const ref = externalSecretRef((await this.getCredential(name, actor))?.secretRef);
+            if (ref) return this.deleteProviderWithSecret(name, actor, isAdmin, ref);
+        }
         const rows = await this.call(
             `SELECT ${this.fn("cms_provider_delete")}($1,$2,$3) AS waiting`, [name, actor, isAdmin]);
         return Number(rows[0]?.waiting ?? 0);

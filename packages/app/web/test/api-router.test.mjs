@@ -65,6 +65,12 @@ test("every operation in the table is routable and dispatches by name", async ()
 test("path, query, and body params are collected with declared types", async () => {
     const { baseUrl, calls, close } = await createHarness();
     try {
+        await fetch(`${baseUrl}/api/v1/sessions/s1?reason=work%20ended&force=true&settleTimeoutMs=0`, { method: "DELETE" });
+        const forced = calls.find((call) => call.name === "deleteSession");
+        assert.deepEqual(
+            { sessionId: forced.params.sessionId, reason: forced.params.reason, force: forced.params.force, settleTimeoutMs: forced.params.settleTimeoutMs },
+            { sessionId: "s1", reason: "work ended", force: true, settleTimeoutMs: 0 },
+        );
         const cursor = { updatedAt: 123, sessionId: "abc" };
         await fetch(`${baseUrl}/api/v1/management/sessions?limit=5&includeDeleted=true&systemFilter=exclude&viewerOnly=true&cursor=${encodeURIComponent(JSON.stringify(cursor))}`);
         const page = calls.find((call) => call.name === "listSessionsPage");

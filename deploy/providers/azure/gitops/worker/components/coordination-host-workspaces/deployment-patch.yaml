@@ -1,0 +1,27 @@
+# The coordination host's pods with session workspaces. Strategic merge into
+# the base Deployment, after the workspaces and coordination-host components:
+# env entries merge by name, so these values replace theirs.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: copilot-runtime-worker
+spec:
+  template:
+    spec:
+      containers:
+        - name: worker
+          env:
+            # The workspace provider and clone tools
+            # (packages/sdk/examples/repo-workspaces/index.mjs), and the
+            # capacity requester (deploy/providers/azure/linux-worker/README.md).
+            - name: PILOTSWARM_EXTENSION_MODULES
+              value: /app/packages/sdk/examples/repo-workspaces/index.mjs,/app/deploy/providers/azure/linux-worker/capacity-requester.mjs
+            # The repo-coder agent's plugin, after the Windows workers' plugin
+            # when WIN_WORKER_COORDINATION_HOST_PLUGIN_CONFIGMAP names one.
+            - name: PLUGIN_DIRS
+              value: __COORDINATION_HOST_PLUGIN_DIRS__
+            # With PILOTSWARM_SCRUB_CLI_ENV=1 an agent's tools get only the
+            # CLI's baseline and this list. Git in a session clone needs the
+            # repo service for its credential helper, and a name to commit as.
+            - name: PILOTSWARM_CLI_ENV_ALLOWLIST
+              value: REPO_SERVICE_URL,GIT_AUTHOR_NAME,GIT_AUTHOR_EMAIL,GIT_COMMITTER_NAME,GIT_COMMITTER_EMAIL

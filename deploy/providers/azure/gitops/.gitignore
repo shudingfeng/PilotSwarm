@@ -12,3 +12,6 @@
 !portal/overlays/public-letsencrypt/.env
 !pls-anchor/overlays/default/.env
 !repo-cache/overlays/default/.env
+!disk-controller/overlays/afd-akv/.env
+!disk-controller/overlays/afd-letsencrypt/.env
+!disk-controller/overlays/private-akv/.env

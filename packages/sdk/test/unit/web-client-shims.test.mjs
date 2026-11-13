@@ -79,6 +79,9 @@ const SHIM_CASES = [
     { call: (c) => c.listSessionShares("s1"), op: "listSessionShares", params: { sessionId: "s1" } },
     { call: (c) => c.listKnownUsers({ limit: 10 }), op: "listKnownUsers", params: { limit: 10 } },
     { call: (c) => c.listAuthzAudit({ limit: 5, sessionId: "s1" }), op: "listAuthzAudit", params: { limit: 5, sessionId: "s1" } },
+    // — dispatcher delegation: the server binds both to the signed-in caller —
+    { call: (c) => c.getMyDispatcherDelegation(USER), op: "getMyDispatcherDelegation", params: {} },
+    { call: (c) => c.setMyDispatcherDelegation(true, USER), op: "setMyDispatcherDelegation", params: { enabled: true } },
     // — workflow read: its options are the operation's declared parameters, passed to the request builder, which leaves
     //   out an absent or null one (review api-01); so these rows check the HTTP request it builds (WIRE_CHECKED). Only an
     //   absent run is left out; an empty one is sent for the server to refuse —
@@ -171,6 +174,8 @@ test("direct-only plumbing refuses loudly with WEB_MODE_UNSUPPORTED", () => {
         // client concern either. Both are portal-internal, direct mode only.
         "recordUserRole",
         "getUserRole",
+        // The portal applies a delegated session's sharing rule server-side.
+        "getSessionDelegation",
         "dumpSession",
         "sendCommand",
         "getCommandResponse",

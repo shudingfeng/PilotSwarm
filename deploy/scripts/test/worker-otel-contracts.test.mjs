@@ -32,9 +32,18 @@ test("every production worker launch preloads bootstrap; portal launch does not"
 
 test("shutdown drains before the best-effort telemetry flush and exits successfully", () => {
     const source = read("packages/sdk/examples/worker.js");
-    const shutdown = source.slice(source.indexOf("async function shutdown(signal)"));
-    assert.ok(shutdown.indexOf("await worker.gracefulShutdown()") < shutdown.indexOf("await shutdownTelemetry()"));
-    assert.ok(shutdown.indexOf("await shutdownTelemetry()") < shutdown.indexOf("process.exit(0)"));
+    // A signal, or an extension's worker.requestExit(), starts the drain; the
+    // process exits once waitForShutdown() settles, with 0 unless such a
+    // request named another code.
+    const shutdown = source.slice(source.indexOf("function shutdown(signal)"));
+    const at = text => {
+        const index = shutdown.indexOf(text);
+        assert.notEqual(index, -1, text);
+        return index;
+    };
+    assert.ok(at("worker.gracefulShutdown()") < at("await worker.waitForShutdown()"));
+    assert.ok(at("await worker.waitForShutdown()") < at("await shutdownTelemetry()"));
+    assert.ok(at("await shutdownTelemetry()") < at("process.exit(exitCode)"));
     assert.doesNotMatch(shutdown, /process\.exit\(1\)/);
 });
 

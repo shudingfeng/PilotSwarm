@@ -1,9 +1,10 @@
 import { capabilityHash, type CapabilitySource } from "./capability-catalog.js";
+import { OWNER_CAPACITY_CAPABILITY, workerTagFilter } from "./activity-routing.js";
+import { isOwnerRoutingTag } from "./owner-routing.js";
 import { isWorkflowTestBench } from "./workflow/test-bench.js";
 import { workflowScriptsEnabledFromEnv } from "./workflow/scripts-gate.js";
 import { skillsIndexLine, skillsIndexSection, WORKFLOW_SKILLS_DIR, WORKFLOW_TEST_MODE_SKILLS_DIR } from "./workflow/guidance.js";
 import { workflowTestModeFromEnv } from "./workflow/test-mode-switch.js";
-import { AGENT_HANDOFF_CAPABILITY, TURN_CONTROL_CAPABILITY, WORKSPACE_CAPABILITY } from "./activity-routing.js";
 import { resolveNativeSubagents } from "./native-subagents.js";
 import { FeatureFlagCache } from "./feature-flag-cache.js";
 import { SessionManager, packageAgentKey, agentOwnerKey, type AgentCopyEntry, type AgentPromptEntry } from "./session-manager.js";
@@ -11,6 +12,7 @@ import { loadAdminScope, ADMIN_SCOPE_POLICY_VERSION } from "../api/src/admin-sco
 import { SessionBlobStore, createSessionBlobStore } from "./blob-store.js";
 import { FilesystemArtifactStore, FilesystemSessionStore, type ArtifactStore, type SessionStateStore } from "./session-store.js";
 import { registerActivities } from "./session-proxy.js";
+import { resolveSessionMessageScope, type SessionMessageScope } from "./session-messages.js";
 import {
     DURABLE_SESSION_ORCHESTRATION_NAME,
     DURABLE_SESSION_ORCHESTRATION_REGISTRY,
@@ -33,14 +35,19 @@ import type { GraphStore } from "./graph-store.js";
 import { DEFAULT_CMS_SCHEMA, resolveStorageConfig, type StorageConfig } from "./storage-config.js";
 import { getDuroxideStorageProvider, getRuntimeStorageProvider } from "./storage-providers.js";
 import { createSweeperTools } from "./sweeper-tools.js";
-import { createResourceManagerTools } from "./resourcemgr-tools.js";
+import { createResourceManagerTools, eventRetentionMinutesFromEnv } from "./resourcemgr-tools.js";
+import { cliSecretEnvVars, copilotCliProgramPath, scrubbedCliEnvironment } from "./copilot-client.js";
+import { assertCliProgramForExternalSecrets } from "./cli-program-guard.js";
+import { personalSecretsMode, type PersonalCredentialResolver, type PersonalSecretsMode } from "./personal-secret-store.js";
+import { installLogRedaction, redactGitHubTokens } from "./secret-redaction.js";
+import { assertCliHooksHome } from "./cli-hooks.js";
 import { composeSystemPrompt, mergePromptSections } from "./prompt-layering.js";
 import { buildSchemaIdentifier } from "./prompt-layers.js";
-import { DEFAULT_TURN_TIMEOUT_MS, ManagedSession } from "./managed-session.js";
+import { DEFAULT_TURN_TIMEOUT_MS, ManagedSession, cliAbortTimeoutMsFromEnv } from "./managed-session.js";
 import { findReservedPackageToolName } from "./reserved-tool-names.js";
 import type { Tool } from "@github/copilot-sdk";
-import type { PilotSwarmWorkerOptions, ManagedSessionConfig, WorkspaceProvider } from "./types.js";
-import { createBuiltInWorkspaceProvider } from "./workspace.js";
+import type { PilotSwarmWorkerOptions, ManagedSessionConfig, OwnerCapacityRequester, SessionAdmission, WorkspaceProvider } from "./types.js";
+import { createBuiltInWorkspaceProvider, workspaceAttachTimeoutMsFromEnv } from "./workspace.js";
 import type { AgentConfig } from "./agent-loader.js";
 import { installAgentPackageEntry, installAgentPackages, loadAgentPackageTools, type InstalledAgentPackage } from "./agent-package-installer.js";
 import { parsePinnedAgentPackageId } from "./agent-package-pins.js";
@@ -63,6 +70,7 @@ const DEFAULT_SESSION_STATE_DIR = path.join(os.homedir(), ".copilot", "session-s
 const DEFAULT_ORCHESTRATION_CONCURRENCY = 2;
 const DEFAULT_WORKER_CONCURRENCY = 2;
 const DEFAULT_DUROXIDE_PG_POOL_MAX = 10;
+const PERSONAL_CREDENTIAL_RESOLVER = "A personal credential resolver (worker.setPersonalCredentialResolver)";
 
 function normalizeAgentIdentity(value: unknown): string {
     return String(value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "");
@@ -231,6 +239,7 @@ interface PackageDirProvenance {
 
 export class PilotSwarmWorker {
     private config: PilotSwarmWorkerOptions & { waitThreshold: number };
+    private _sessionMessageScope: SessionMessageScope;
     private sessionManager: SessionManager;
     private sessionStore: SessionStateStore | null = null;
     private blobStore: SessionBlobStore | null = null;
@@ -246,6 +255,17 @@ export class PilotSwarmWorker {
     private _started = false;
     private _runtimeStartup: Promise<void> | null = null;
     private _stopRequested = false;
+    /** Hooks awaited at the end of every graceful shutdown, in registration order. */
+    private _shutdownHooks: Array<() => Promise<void> | void> = [];
+    /** The graceful shutdown in progress; a second call joins it. */
+    private _gracefulShutdown: Promise<void> | null = null;
+    /** The first exit asked for with requestExit() since start(). */
+    private _exitRequest: { code: number; reason: string } | null = null;
+    /** How the last graceful shutdown ended, for waitForShutdown(). Cleared by start(). */
+    private _shutdownResult: { code: number } | { error: unknown } | null = null;
+    private _shutdownWaiters: Array<{ resolve: (code: number) => void; reject: (error: unknown) => void }> = [];
+    /** Owner routing: whether the running runtime declares the capacity tag. */
+    private _declaresOwnerCapacity = false;
     /** Worker-level tool registry — name → Tool. */
     private toolRegistry = new Map<string, Tool<any>>();
     /** Loaded skill directories from plugins + direct config. */
@@ -356,6 +376,8 @@ export class PilotSwarmWorker {
     /** Agent-package dynamic install state (docs/proposals/agent-packages.md). */
     private _agentPackagesCacheDir: string | null = null;
     private _agentPackagesRefreshMs = 20_000;
+    /** `PILOTSWARM_EVENT_RETENTION_MINUTES`, checked when the worker is created. */
+    private readonly _eventRetentionMinutes: number | undefined;
     private _agentPackagesEpoch = -1;
     private _agentPackagesTimer: ReturnType<typeof setInterval> | null = null;
     private _agentPackagesRefreshing = false;
@@ -377,6 +399,12 @@ export class PilotSwarmWorker {
     private _agentPackagesRefreshError: string | null = null;
     private _featureFlags: FeatureFlagCache | null = null;
     private _registryReporting = false;
+    /** The Copilot CLI program passed the checks for people's tokens (assertCliProgramForExternalSecrets). */
+    private _cliProgramChecked = false;
+    /** start() was called: a personal credential resolver set from then on is checked when it is set. */
+    private _startCalled = false;
+    /** PILOTSWARM_PERSONAL_SECRETS, read once: the provider catalog is rebuilt before every turn. */
+    private readonly _personalSecrets: PersonalSecretsMode;
 
     constructor(options: PilotSwarmWorkerOptions) {
         this.config = {
@@ -384,7 +412,39 @@ export class PilotSwarmWorker {
             waitThreshold: options.waitThreshold ?? 30,
             turnTimeoutMs: resolveWorkerTurnTimeoutMs(options.turnTimeoutMs),
         };
+        // Read here so a bad value stops the worker before its first turn.
+        // Attaches read the attach timeout again when they run.
+        workspaceAttachTimeoutMsFromEnv();
+        const cliAbortTimeoutMs = cliAbortTimeoutMsFromEnv();
+        this._eventRetentionMinutes = eventRetentionMinutesFromEnv(process.env.PILOTSWARM_EVENT_RETENTION_MINUTES);
+        // A bad PILOTSWARM_CLI_ENV_ALLOWLIST fails here, not at the first session.
+        scrubbedCliEnvironment({});
+        // So do bad PILOTSWARM_CLI_SECRET_ENV_VARS names and a missing CLI program.
+        if (cliSecretEnvVars()) copilotCliProgramPath();
+        // External personal secrets start only with a CLI that keeps the
+        // token from agents and runs only its own, protected code.
+        this._personalSecrets = personalSecretsMode();
+        if (this._personalSecrets === "external") {
+            assertCliProgramForExternalSecrets();
+            this._cliProgramChecked = true;
+        }
+        // A malformed PILOTSWARM_REDACT_SECRET_PREFIXES stops the worker here;
+        // when redaction is on, this process's logs are redacted from now on.
+        installLogRedaction();
+        this._sessionMessageScope = resolveSessionMessageScope(options.sessionMessageScope);
+        if (options.ownerTag !== undefined && !isOwnerRoutingTag(options.ownerTag)) {
+            throw new TypeError(
+                `ownerTag must be "owner.<subject>", without whitespace and at most 256 bytes, not ${JSON.stringify(options.ownerTag)}`,
+            );
+        }
+        if (options.ownerOnly !== undefined && typeof options.ownerOnly !== "boolean") {
+            throw new TypeError(`ownerOnly must be true or false, not ${JSON.stringify(options.ownerOnly)}`);
+        }
+        if (options.ownerOnly && options.ownerTag === undefined) {
+            throw new TypeError("ownerOnly needs an ownerTag: an owner-only worker runs only the activities tagged for its owner");
+        }
         const effectiveSessionStateDir = options.sessionStateDir ?? DEFAULT_SESSION_STATE_DIR;
+        assertCliHooksHome(effectiveSessionStateDir);
 
         // Agent packages: resolve the cache dir up front; installation itself
         // runs in start() (needs the CMS catalog) and on every epoch refresh.
@@ -476,8 +536,10 @@ export class PilotSwarmWorker {
                 deploymentMcpNames: this._deploymentMcpNames,
                 provider: options.provider,
                 modelProviders: this._modelProviders ?? undefined,
+                getModelProviderTypes: () => this._modelProviderTypes,
                 turnTimeoutMs: this.config.turnTimeoutMs,
                 turnInactivityTimeoutMs: options.turnInactivityTimeoutMs,
+                cliAbortTimeoutMs,
             },
             effectiveSessionStateDir,
         );
@@ -554,7 +616,7 @@ export class PilotSwarmWorker {
                 store.getDefaults(null),
             ]);
             this._modelProviders = buildRuntimeRegistry(
-                this._modelProviderTypes, credentials, defaults.cluster.model);
+                this._modelProviderTypes, credentials, defaults.cluster.model, { personalSecrets: this._personalSecrets });
             this.sessionManager.setModelProviders(this._modelProviders);
         } catch (err) {
             // Provider identity and credentials are authoritative in CMS.
@@ -611,6 +673,104 @@ export class PilotSwarmWorker {
      */
     setWorkspaceProvider(provider: WorkspaceProvider | null): void {
         this.sessionManager.setWorkspaceProvider(provider, this.config.workerNodeId ?? undefined);
+    }
+
+    /**
+     * Before every turn of every session on this worker, before the session
+     * is loaded here, ask `admission` whether this worker may run it.
+     * `busy` holds the turn as a busy workspace does; `deny` fails it without
+     * a retry. A hook that throws or answers anything else, or a session the
+     * worker cannot read from the catalog, fails the turn with an error that
+     * is retried. Replaces any earlier hook; null removes it.
+     */
+    setSessionAdmission(admission: SessionAdmission | null): void {
+        if (admission !== null && typeof admission !== "function") {
+            throw new TypeError("setSessionAdmission: the admission hook must be a function or null");
+        }
+        this.sessionManager.setSessionAdmission(admission);
+    }
+
+    /**
+     * Session workspaces: release one session's folders on this worker now,
+     * unless a lock, a running turn or a background task holds the session
+     * (`{ released: false, busy: true }`); it never waits. For a provider
+     * that needs a folder back, such as one another session asks for.
+     * `{ released: false, notHeld: true }`: nothing of the session is held
+     * here. `releaseTimeoutMs` bounds the provider's release (default 60 s).
+     */
+    tryReleaseIdleWorkspace(
+        sessionId: string,
+        opts: { reason: string; releaseTimeoutMs?: number },
+    ): Promise<{ released: boolean; busy?: boolean; notHeld?: boolean; detail?: string }> {
+        return this.sessionManager.tryReleaseIdleWorkspace(sessionId, {
+            ...opts,
+            workerNodeId: this.config.workerNodeId ?? os.hostname(),
+        });
+    }
+
+    /**
+     * What keeps this worker busy: held session locks (running turns and other
+     * session operations) plus the background shells and agent tasks of its
+     * other warm sessions. Zero means idle.
+     */
+    getActiveWorkloadCount(): Promise<number> {
+        return this.sessionManager.getActiveWorkloadCount();
+    }
+
+    /**
+     * External personal secrets (PILOTSWARM_PERSONAL_SECRETS=external): set
+     * the function that returns the token behind a provider's secret-store
+     * reference. PilotSwarm calls it before a turn that runs on such a
+     * provider, unless it already holds that secret version in memory, and
+     * again after the model refuses the token. Its answer is the provider's
+     * only credential: `refused` ends the turn as an authentication failure,
+     * `unavailable` (or a throw) fails it and the turn is retried, and `busy`
+     * holds the session the way a busy workspace does. Pass null to remove it.
+     *
+     * In either mode, a worker with a resolver holds people's tokens: it
+     * starts only when the Copilot CLI program passes the checks that
+     * external mode makes, and it redacts GitHub tokens. A resolver set
+     * before start() is checked there; one set once start() was called is
+     * checked here, and refused by a throw.
+     */
+    setPersonalCredentialResolver(resolver: PersonalCredentialResolver | null): void {
+        if (resolver && this._startCalled) this._prepareForPersonalCredentials();
+        this.sessionManager.setPersonalCredentialResolver(resolver);
+    }
+
+    /** Throw unless the CLI program keeps people's tokens from agents; then redact GitHub tokens in this process. */
+    private _prepareForPersonalCredentials(): void {
+        if (!this._cliProgramChecked) {
+            assertCliProgramForExternalSecrets(process.env, { subject: PERSONAL_CREDENTIAL_RESOLVER });
+            this._cliProgramChecked = true;
+        }
+        redactGitHubTokens();
+        installLogRedaction();
+    }
+
+    /**
+     * Owner routing: the hook that asks the deployment for a worker for an
+     * owner. Before each turn of an owner-tagged session, the
+     * requestOwnerCapacity activity calls it with `{ sessionId,
+     * rootSessionId, ownerTag }` and a signal that fires after 15 seconds.
+     * Register it before start(): only then does this worker declare the
+     * capacity tag and take those requests. An owner-only worker never
+     * takes them, and a worker with an owner tag that is not owner-only
+     * refuses to start with one: the owner tag and the capacity tag together
+     * exceed duroxide's five tags. With a requester, the worker also refuses,
+     * without a retry, a turn whose session's creation config holds an owner
+     * tag that the turn doesn't carry (`OWNER_TAG_MISSING`). Null removes it.
+     */
+    setOwnerCapacityRequester(requester: OwnerCapacityRequester | null): void {
+        if (requester !== null && typeof requester !== "function") {
+            throw new TypeError("setOwnerCapacityRequester: the requester must be a function or null");
+        }
+        if (requester && this.config.ownerOnly) {
+            console.warn("[PilotSwarmWorker] an owner-only worker takes no capacity requests: a worker without ownerOnly must have the capacity requester");
+        } else if (requester && this._started && !this._declaresOwnerCapacity) {
+            console.warn("[PilotSwarmWorker] a capacity requester registered after start() is used only once the worker restarts");
+        }
+        this.sessionManager.setOwnerCapacityRequester(requester);
     }
 
     /** Store full config (with tools/hooks) for a session. */
@@ -709,7 +869,19 @@ export class PilotSwarmWorker {
 
     async start(): Promise<void> {
         if (this._started) return;
+        // Owner routing: refuse a filter duroxide can't take before anything opens.
+        workerTagFilter({
+            ownerTag: this.config.ownerTag,
+            ownerOnly: this.config.ownerOnly === true,
+            ownerCapacity: this.sessionManager.getOwnerCapacityRequester() !== null,
+        });
+        // People's tokens: refuse an unsafe Copilot CLI before anything opens, too.
+        // A resolver set from here on is checked when it is set.
+        this._startCalled = true;
+        if (this.sessionManager.getPersonalCredentialResolver()) this._prepareForPersonalCredentials();
         this._stopRequested = false;
+        this._exitRequest = null;
+        this._shutdownResult = null;
         // Workflow tools are available again after a stop of this worker (E1-R4).
         this.sessionManager.startWorkflowTools();
 
@@ -921,11 +1093,19 @@ export class PilotSwarmWorker {
         this.sessionManager.setDuroxideClient(inspectClient);
 
         // The full Workflow engine (owner decision 2026-11-08T15:30Z): every worker serves orchestration 1.0.83's intake and
-        // request turns, the Workflow controller and the agent host of agent states (milestone-worker.ts).
+        // request turns, the Workflow controller and the agent host of agent states (milestone-worker.ts). An owner-only
+        // worker serves only its owner's turns (workerTagFilter).
         const milestone = await import("./workflow/milestone-worker.js");
 
+        const tagFilter = workerTagFilter({
+            workflowTags: milestone.WORKFLOW_MILESTONE_WORKER_TAGS,
+            ownerTag: this.config.ownerTag,
+            ownerOnly: this.config.ownerOnly === true,
+            ownerCapacity: this.sessionManager.getOwnerCapacityRequester() !== null,
+        });
+        const declaredTags = "tags" in tagFilter ? tagFilter.tags : tagFilter.defaultAnd;
         const runtimeOptions = {
-            workerTagFilter: { defaultAnd: [AGENT_HANDOFF_CAPABILITY, WORKSPACE_CAPABILITY, TURN_CONTROL_CAPABILITY, ...milestone.WORKFLOW_MILESTONE_WORKER_TAGS] },
+            workerTagFilter: tagFilter,
             orchestrationConcurrency,
             workerConcurrency,
             dispatcherPollIntervalMs: 10,
@@ -937,6 +1117,7 @@ export class PilotSwarmWorker {
         };
 
         this.runtime = new Runtime(this._provider, runtimeOptions);
+        this._declaresOwnerCapacity = declaredTags.includes(OWNER_CAPACITY_CAPABILITY);
         trace(
             `[worker] runtime options: orchestrationConcurrency=${runtimeOptions.orchestrationConcurrency}, ` +
             `workerConcurrency=${runtimeOptions.workerConcurrency}, ` +
@@ -949,7 +1130,8 @@ export class PilotSwarmWorker {
             `sessionLockRenewalBufferMs=${runtimeOptions.sessionLockRenewalBufferMs ?? "(duroxide default)"}, ` +
             `maxSessionsPerRuntime=${runtimeOptions.maxSessionsPerRuntime}, ` +
             `sessionIdleTimeoutMs=${runtimeOptions.sessionIdleTimeoutMs}, ` +
-            `workerNodeId=${runtimeOptions.workerNodeId ?? "(unset)"}`,
+            `workerNodeId=${runtimeOptions.workerNodeId ?? "(unset)"}, ` +
+            `workerTags=${declaredTags.join(",")}${"tags" in tagFilter ? " (owner only: no untagged work)" : ""}`,
         );
         if (!runtimeOptions.workerNodeId) {
             // Without a stable process-level session identity, duroxide
@@ -995,6 +1177,7 @@ export class PilotSwarmWorker {
             this.config.workerNodeId,
             this.artifactStore,
             this.config.testOptions?.intakeAdmissionRetryDelaysMs ? { intakeAdmissionRetryDelaysMs: this.config.testOptions.intakeAdmissionRetryDelaysMs } : undefined,
+            this._sessionMessageScope,
         );
 
         for (const registration of DURABLE_SESSION_ORCHESTRATION_REGISTRY) {
@@ -1102,6 +1285,8 @@ export class PilotSwarmWorker {
                 blobStore: this.blobStore,
                 duroxideSchema: storage.duroxide.schema,
                 cmsSchema: storage.runtime.cmsSchema,
+                eventRetentionMinutes: this._eventRetentionMinutes,
+                k8sScalingDisabled: process.env.PILOTSWARM_DISABLE_K8S_SCALING === "1",
             });
             this.registerTools(rmTools);
         }
@@ -1252,6 +1437,8 @@ export class PilotSwarmWorker {
      *      unmarked sessions whose local files may be the only copy.
      *   4. Exit — anything still leased lapses within the duroxide session
      *      lock timeout.
+     *   5. Hooks — every onShutdown() hook runs once the worker has stopped,
+     *      also when stopping failed.
      *
      * Bounded (FU-11): every step races one deadline, the drain budget plus
      * PILOTSWARM_WORKER_SHUTDOWN_GRACE_MS (15 s by default) for the release
@@ -1259,104 +1446,190 @@ export class PilotSwarmWorker {
      * hangs, as under a cluster DNS fault) is left behind and this returns,
      * so the caller exits whatever the database does. The configuration and
      * heartbeat timer stops once the runtime has drained.
+     *
+     * `drainTimeoutMs` replaces PILOTSWARM_WORKER_SHUTDOWN_TIMEOUT_MS for this
+     * drain, and `releaseTimeoutMs` bounds each workspace provider release
+     * (default 5 s). A call while a graceful shutdown is in progress joins it,
+     * with that shutdown's budgets.
      */
-    async gracefulShutdown(): Promise<void> {
-        this._stopRequested = true;
-        this._stopProviderPolling();
-        const rawDrainMs = Number.parseInt(process.env.PILOTSWARM_WORKER_SHUTDOWN_TIMEOUT_MS || "", 10);
-        const drainBudgetMs = Number.isFinite(rawDrainMs) && rawDrainMs >= 0 ? rawDrainMs : 60_000;
-        const rawGraceMs = Number.parseInt(process.env.PILOTSWARM_WORKER_SHUTDOWN_GRACE_MS || "", 10);
-        const graceMs = Number.isFinite(rawGraceMs) && rawGraceMs >= 0 ? rawGraceMs : 15_000;
-        const deadline = Date.now() + drainBudgetMs + graceMs;
-        // One step of the shutdown, waited for until the deadline at most; a failure is the step's own to report.
-        // `capMs`: a step's own shorter limit, if any; the earlier of it and the deadline applies (review RT-D4).
-        const bounded = async (step: string, work: () => Promise<unknown>, capMs: number | null = null): Promise<void> => {
-            let timer: ReturnType<typeof setTimeout> | undefined;
-            const untilDeadline = Math.max(0, deadline - Date.now());
-            const limitMs = capMs === null ? untilDeadline : Math.min(capMs, untilDeadline);
-            const late = await Promise.race([
-                Promise.resolve().then(work).then(() => false, (err: any) => {
-                    console.warn(`[PilotSwarmWorker] shutdown: ${step} failed: ${err?.message ?? err}`);
-                    return false;
-                }),
-                new Promise<boolean>((resolve) => {
-                    timer = setTimeout(() => resolve(true), limitMs);
-                    timer.unref?.();
-                }),
-            ]);
-            if (timer) clearTimeout(timer);
-            if (late) {
-                console.error(limitMs < untilDeadline
-                    ? `[PilotSwarmWorker] shutdown: ${step} did not finish within ${limitMs}ms; going on without it`
-                    : `[PilotSwarmWorker] shutdown: ${step} did not finish by the drain deadline; exiting without it`);
-            }
-        };
-
-        // Advertise draining before the runtime drain so operators see the
-        // phase for the duration of the drain window. Best-effort AND
-        // bounded: a black-holed CMS socket must not eat the drain budget
-        // (SIGKILL at grace-period expiry would crash in-flight turns).
-        // Review RT-D4: under the shared deadline too (the earlier of its own 5 s and the deadline), its timer cleared.
-        this._workerPhase = "draining";
-        if (this._agentPackagesCacheDir) {
-            await bounded("the draining report", () => this._reportAgentWorkerState(), 5_000);
-        }
-
-        if (this.runtime) {
-            const runtime = this.runtime;
-            console.error(`[PilotSwarmWorker] draining: waiting up to ${drainBudgetMs}ms for in-flight turns...`);
-            await bounded("the runtime drain", async () => {
-                try { await this._runtimeStartup; } catch {}
-                await runtime.shutdown(drainBudgetMs);
-            });
-            this.runtime = null;
-            this._runtimeStartup = null;
-        }
-        // The heartbeat (configuration poll) and the eviction clock stop here, not at stop(): a release that hangs
-        // must not keep a draining worker reporting itself.
-        if (this._agentPackagesTimer) {
-            clearInterval(this._agentPackagesTimer);
-            this._agentPackagesTimer = null;
-        }
-        if (this._evictionTimer) {
-            clearInterval(this._evictionTimer);
-            this._evictionTimer = null;
-        }
-
-        // Session workspaces: idle workspace sessions tell their provider
-        // they left before this worker goes (section 4.5). Sessions whose
-        // turn the drain cut are skipped; the provider sees the dead holder
-        // at the next attach.
-        await bounded("the workspace release", async () => {
+    async gracefulShutdown(opts: { drainTimeoutMs?: number; releaseTimeoutMs?: number } = {}): Promise<void> {
+        if (this._gracefulShutdown) return this._gracefulShutdown;
+        const shutdown = (async () => {
             try {
-                const released = await this.sessionManager.releaseIdleWorkspaces({
-                    reason: "worker_shutdown",
-                    workerNodeId: this.config.workerNodeId ?? os.hostname(),
-                });
-                if (released > 0) console.error(`[PilotSwarmWorker] drain released ${released} workspace session(s)`);
-            } catch (err: any) {
-                console.warn(`[PilotSwarmWorker] drain workspace release failed: ${err?.message ?? err}`);
-            }
-        });
+                this._stopRequested = true;
+                this._stopProviderPolling();
+                const rawDrainMs = Number.parseInt(process.env.PILOTSWARM_WORKER_SHUTDOWN_TIMEOUT_MS || "", 10);
+                const requestedDrainMs = opts.drainTimeoutMs;
+                const drainBudgetMs = typeof requestedDrainMs === "number" && Number.isFinite(requestedDrainMs) && requestedDrainMs >= 0
+                    ? requestedDrainMs
+                    : Number.isFinite(rawDrainMs) && rawDrainMs >= 0 ? rawDrainMs : 60_000;
+                const rawGraceMs = Number.parseInt(process.env.PILOTSWARM_WORKER_SHUTDOWN_GRACE_MS || "", 10);
+                const graceMs = Number.isFinite(rawGraceMs) && rawGraceMs >= 0 ? rawGraceMs : 15_000;
+                const deadline = Date.now() + drainBudgetMs + graceMs;
+                // One step of the shutdown, waited for until the deadline at most; a failure is the step's own to report.
+                // `capMs`: a step's own shorter limit, if any; the earlier of it and the deadline applies (review RT-D4).
+                const bounded = async (step: string, work: () => Promise<unknown>, capMs: number | null = null): Promise<void> => {
+                    let timer: ReturnType<typeof setTimeout> | undefined;
+                    const untilDeadline = Math.max(0, deadline - Date.now());
+                    const limitMs = capMs === null ? untilDeadline : Math.min(capMs, untilDeadline);
+                    const late = await Promise.race([
+                        Promise.resolve().then(work).then(() => false, (err: any) => {
+                            console.warn(`[PilotSwarmWorker] shutdown: ${step} failed: ${err?.message ?? err}`);
+                            return false;
+                        }),
+                        new Promise<boolean>((resolve) => {
+                            timer = setTimeout(() => resolve(true), limitMs);
+                            timer.unref?.();
+                        }),
+                    ]);
+                    if (timer) clearTimeout(timer);
+                    if (late) {
+                        console.error(limitMs < untilDeadline
+                            ? `[PilotSwarmWorker] shutdown: ${step} did not finish within ${limitMs}ms; going on without it`
+                            : `[PilotSwarmWorker] shutdown: ${step} did not finish by the drain deadline; exiting without it`);
+                    }
+                };
 
-        // Release everything this worker served, via the same lock-aware
-        // sweep the eviction clock uses: committed sessions are deleted
-        // locally (the store holds their state), unmarked legacy sessions
-        // dehydrate (with the versioned-snapshot fence), and sessions whose
-        // aborted turns still hold their run-turn lock are SKIPPED — their
-        // dirs must not be deleted or archived out from under a still-
-        // running body; the post-deploy retry self-validates instead.
-        if (this.sessionStore) {
-            await bounded("the release sweep", async () => {
-                try {
-                    const released = await this.sessionManager.sweepIdleSessions(1);
-                    console.error(`[PilotSwarmWorker] drain released ${released} warm session(s)`);
-                } catch (err: any) {
-                    console.warn(`[PilotSwarmWorker] drain release sweep failed: ${err?.message ?? err}`);
+                // Advertise draining before the runtime drain so operators see the
+                // phase for the duration of the drain window. Best-effort AND
+                // bounded: a black-holed CMS socket must not eat the drain budget
+                // (SIGKILL at grace-period expiry would crash in-flight turns).
+                // Review RT-D4: under the shared deadline too (the earlier of its own 5 s and the deadline), its timer cleared.
+                this._workerPhase = "draining";
+                if (this._agentPackagesCacheDir) {
+                    await bounded("the draining report", () => this._reportAgentWorkerState(), 5_000);
                 }
-            });
+
+                if (this.runtime) {
+                    const runtime = this.runtime;
+                    console.error(`[PilotSwarmWorker] draining: waiting up to ${drainBudgetMs}ms for in-flight turns...`);
+                    await bounded("the runtime drain", async () => {
+                        try { await this._runtimeStartup; } catch {}
+                        await runtime.shutdown(drainBudgetMs);
+                    });
+                    this.runtime = null;
+                    this._runtimeStartup = null;
+                }
+                // The heartbeat (configuration poll) and the eviction clock stop here, not at stop(): a release that hangs
+                // must not keep a draining worker reporting itself.
+                if (this._agentPackagesTimer) {
+                    clearInterval(this._agentPackagesTimer);
+                    this._agentPackagesTimer = null;
+                }
+                if (this._evictionTimer) {
+                    clearInterval(this._evictionTimer);
+                    this._evictionTimer = null;
+                }
+
+                // Session workspaces: idle workspace sessions tell their provider
+                // they left before this worker goes (section 4.5). Sessions whose
+                // turn the drain cut are skipped; the provider sees the dead holder
+                // at the next attach.
+                await bounded("the workspace release", async () => {
+                    try {
+                        const released = await this.sessionManager.releaseIdleWorkspaces({
+                            reason: "worker_shutdown",
+                            workerNodeId: this.config.workerNodeId ?? os.hostname(),
+                            releaseTimeoutMs: opts.releaseTimeoutMs,
+                        });
+                        if (released > 0) console.error(`[PilotSwarmWorker] drain released ${released} workspace session(s)`);
+                    } catch (err: any) {
+                        console.warn(`[PilotSwarmWorker] drain workspace release failed: ${err?.message ?? err}`);
+                    }
+                });
+
+                // Release everything this worker served, via the same lock-aware
+                // sweep the eviction clock uses: committed sessions are deleted
+                // locally (the store holds their state), unmarked legacy sessions
+                // dehydrate (with the versioned-snapshot fence), and sessions whose
+                // aborted turns still hold their run-turn lock are SKIPPED — their
+                // dirs must not be deleted or archived out from under a still-
+                // running body; the post-deploy retry self-validates instead.
+                if (this.sessionStore) {
+                    await bounded("the release sweep", async () => {
+                        try {
+                            const released = await this.sessionManager.sweepIdleSessions(1);
+                            console.error(`[PilotSwarmWorker] drain released ${released} warm session(s)`);
+                        } catch (err: any) {
+                            console.warn(`[PilotSwarmWorker] drain release sweep failed: ${err?.message ?? err}`);
+                        }
+                    });
+                }
+                await bounded("closing the worker", () => this.stop());
+            } finally {
+                // Every onShutdown() hook, one at a time, once the worker has stopped, also when stopping failed.
+                for (const hook of [...(this._shutdownHooks ?? [])]) {
+                    try {
+                        await hook();
+                    } catch (err: any) {
+                        console.warn(`[PilotSwarmWorker] shutdown hook failed: ${err?.message ?? err}`);
+                    }
+                }
+            }
+        })();
+        this._gracefulShutdown = shutdown;
+        let result: { code: number } | { error: unknown } = { code: 0 };
+        try {
+            await shutdown;
+            result = { code: this._exitRequest?.code ?? 0 };
+        } catch (error) {
+            result = { error };
+            throw error;
+        } finally {
+            this._gracefulShutdown = null;
+            this._shutdownResult = result;
+            const waiters = this._shutdownWaiters ?? [];
+            this._shutdownWaiters = [];
+            for (const waiter of waiters) {
+                if ("error" in result) waiter.reject(result.error);
+                else waiter.resolve(result.code);
+            }
         }
-        await bounded("closing the worker", () => this.stop());
+    }
+
+    /**
+     * Run `fn` at the end of every graceful shutdown, after the worker has
+     * stopped. Hooks run one at a time in the order they were registered; one
+     * that throws is logged and the next still runs. Returns a function that
+     * removes the hook.
+     */
+    onShutdown(fn: () => Promise<void> | void): () => void {
+        this._shutdownHooks.push(fn);
+        return () => {
+            this._shutdownHooks = this._shutdownHooks.filter((hook) => hook !== fn);
+        };
+    }
+
+    /**
+     * Shut down gracefully, and ask the host to exit with `code`: for example a
+     * non-zero code, so that a service manager starts the worker again. The
+     * drain gets `drainTimeoutMs` instead of PILOTSWARM_WORKER_SHUTDOWN_TIMEOUT_MS.
+     * A graceful shutdown already in progress keeps its own budget, and the
+     * first request's code wins. The worker never exits the process itself:
+     * its host reads the code from waitForShutdown(), as examples/worker.js does.
+     */
+    async requestExit(code: number, reason: string, opts: { drainTimeoutMs?: number } = {}): Promise<void> {
+        if (!Number.isInteger(code) || code < 0 || code > 255) {
+            throw new RangeError(`requestExit: the exit code must be an integer from 0 to 255, not ${code}`);
+        }
+        if (!this._exitRequest) {
+            this._exitRequest = { code, reason };
+            console.error(`[PilotSwarmWorker] exit requested with code ${code}: ${reason}`);
+        }
+        await this.gracefulShutdown({ drainTimeoutMs: opts.drainTimeoutMs });
+    }
+
+    /**
+     * Resolves once a graceful shutdown has finished, hooks included, with the
+     * exit code for the host: the first requestExit() code, else 0. Rejects
+     * when the shutdown failed.
+     */
+    waitForShutdown(): Promise<number> {
+        const result = this._shutdownResult;
+        if (result) return "error" in result ? Promise.reject(result.error) : Promise.resolve(result.code);
+        return new Promise((resolve, reject) => {
+            this._shutdownWaiters.push({ resolve, reject });
+        });
     }
 
     /** Destroy a session on this worker. */
