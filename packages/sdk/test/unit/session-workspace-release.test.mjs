@@ -153,6 +153,88 @@ test("releaseIdleWorkspaces skips a session whose turn holds the lock", async (t
     await busy;
 });
 
+test("tryReleaseIdleWorkspace releases an idle session's folders at once", async (t) => {
+    const h = fixture(t);
+    await open(h);
+    const result = await h.manager.tryReleaseIdleWorkspace("s1", { reason: "moved", workerNodeId: "worker-a" });
+    assert.deepEqual(result, { released: true });
+    assert.deepEqual(h.releases.map((r) => [r.sessionId, r.workerNodeId, r.reason]), [["s1", "worker-a", "moved"]]);
+    assert.equal(h.manager.get("s1"), null, "the warm session is dropped");
+});
+
+test("tryReleaseIdleWorkspace answers busy at once while a lock or a running turn holds the session", async (t) => {
+    const h = fixture(t);
+    await open(h, "locked");
+    await open(h, "turning");
+    let unlock;
+    const turn = h.manager.withRunTurnLock("locked", "test", () => new Promise((resolve) => { unlock = resolve; }));
+    h.manager.get("turning").activeTurn = { turnIndex: 4, startedAt: Date.now() };
+    const started = Date.now();
+    assert.deepEqual(await h.manager.tryReleaseIdleWorkspace("locked", { reason: "moved" }), { released: false, busy: true });
+    assert.deepEqual(await h.manager.tryReleaseIdleWorkspace("turning", { reason: "moved" }), { released: false, busy: true });
+    assert.ok(Date.now() - started < 1_000, "it does not wait for the lock");
+    assert.deepEqual(h.releases, []);
+    unlock();
+    await turn;
+});
+
+test("tryReleaseIdleWorkspace answers busy while a background task runs, and cancels nothing", async (t) => {
+    const h = fixture(t, { tasks: [{ id: "sh-1", type: "shell", status: "running" }] });
+    await open(h);
+    assert.deepEqual(await h.manager.tryReleaseIdleWorkspace("s1", { reason: "moved" }), { released: false, busy: true });
+    assert.deepEqual(h.order, ["list"]);
+    assert.notEqual(h.manager.get("s1"), null);
+});
+
+test("tryReleaseIdleWorkspace counts a task list that fails as no task, and releases", async (t) => {
+    const h = fixture(t);
+    await open(h);
+    h.handles[0].rpc.tasks.list = async () => { throw new Error("the CLI is gone"); };
+    const result = await h.manager.tryReleaseIdleWorkspace("s1", { reason: "moved" });
+    assert.equal(result.released, true);
+    assert.deepEqual(h.releases.map((r) => r.sessionId), ["s1"]);
+});
+
+test("tryReleaseIdleWorkspace answers notHeld when nothing of the session is held here", async (t) => {
+    const h = fixture(t);
+    await open(h, "plain", { workingDirectory: "/home/app" });
+    assert.deepEqual(await h.manager.tryReleaseIdleWorkspace("never-here", { reason: "moved" }), { released: false, notHeld: true });
+    assert.deepEqual(await h.manager.tryReleaseIdleWorkspace("plain", { reason: "moved" }), { released: false, notHeld: true });
+    assert.equal(h.handles[0].disconnected, false);
+    assert.deepEqual(h.releases, []);
+});
+
+test("tryReleaseIdleWorkspace and releaseIdleWorkspaces cut a hanging provider release off at releaseTimeoutMs", async (t) => {
+    const h = fixture(t, { release: () => new Promise(() => {}) });
+    await open(h, "s1");
+    await open(h, "s2");
+    const started = Date.now();
+    const one = await h.manager.tryReleaseIdleWorkspace("s1", { reason: "moved", releaseTimeoutMs: 100 });
+    assert.equal(one.released, true);
+    assert.match(one.detail, /timed out/);
+    const count = await h.manager.releaseIdleWorkspaces({ reason: "worker_shutdown", workerNodeId: "worker-a", releaseTimeoutMs: 100 });
+    assert.equal(count, 1);
+    assert.ok(Date.now() - started < 2_000, "neither waits for the 60 s or 5 s defaults");
+});
+
+test("getActiveWorkloadCount counts held locks and the background tasks of the other warm sessions", async (t) => {
+    const h = fixture(t, {
+        tasks: [
+            { id: "sh-1", type: "shell", status: "running" },
+            { id: "ag-1", type: "agent", status: "idle" },
+            { id: "sh-2", type: "shell", status: "completed" },
+        ],
+    });
+    await open(h, "s1");
+    await open(h, "s2");
+    assert.equal(await h.manager.getActiveWorkloadCount(), 4, "two running or idle tasks in each session");
+    let unlock;
+    const turn = h.manager.withRunTurnLock("s1", "test", () => new Promise((resolve) => { unlock = resolve; }));
+    assert.equal(await h.manager.getActiveWorkloadCount(), 3, "the lock of s1, plus the two tasks of s2");
+    unlock();
+    await turn;
+});
+
 test("the eviction sweep releases a workspace session before it evicts it", async (t) => {
     const h = fixture(t);
     await open(h);
@@ -162,12 +244,18 @@ test("the eviction sweep releases a workspace session before it evicts it", asyn
     assert.equal(h.manager.get("s1"), null);
 });
 
-test("a shell the CLI will not cancel (after an abort) is killed with every process below it", { skip: process.platform === "win32" && "process-tree cleanup uses Unix process groups" }, async (t) => {
+test("a shell the CLI will not cancel (after an abort) is killed with every process below it", async (t) => {
     // CLI 1.0.83, verified: after session.abort(), tasks.cancel answers
     // { cancelled: false }; the reported pid is not a process-group leader;
     // and the task stays "running" after the process dies. This fake does
-    // the same: a shell in our own process group, with a child.
-    const shell = spawn("sh", ["-c", "sleep 30 & echo $!; wait"], { stdio: ["ignore", "pipe", "ignore"] });
+    // the same: a process in our own process group, with a child. The child
+    // is detached: on Windows, Node ends a child that is not when its parent
+    // dies, which would hide a missed child.
+    const shell = spawn(process.execPath, ["-e", [
+        "const child = require('node:child_process').spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30_000)'], { stdio: 'ignore', detached: true });",
+        "console.log(child.pid);",
+        "setTimeout(() => {}, 30_000);",
+    ].join("\n")], { stdio: ["ignore", "pipe", "ignore"] });
     const childPid = Number(await new Promise((resolve) => shell.stdout.once("data", (chunk) => resolve(String(chunk).trim()))));
     t.after(() => { for (const pid of [shell.pid, childPid]) { try { process.kill(pid, "SIGKILL"); } catch {} } });
     const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
@@ -188,7 +276,7 @@ test("a shell the CLI will not cancel (after an abort) is killed with every proc
     assert.equal(result.detail, undefined, `a dead pid counts as done although the CLI still says running: ${result.detail}`);
 });
 
-test("a pid that now belongs to another process is never killed; a dead one counts as done (review R4)", { skip: process.platform === "win32" && "pid reuse detection uses Linux /proc" }, async (t) => {
+test("a pid that now belongs to another process is never killed; a dead one counts as done (review R4)", { skip: process.platform === "win32" && "on Windows the dead task's pid may already belong to a new process, which this test would then kill; process-tree.test.mjs tests pid reuse there" }, async (t) => {
     // CLI 1.0.83 keeps a finished detached shell listed as running, with its
     // pid. The host may give that pid to another process later: here, one
     // that started a minute after the task did.

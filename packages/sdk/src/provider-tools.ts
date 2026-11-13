@@ -33,7 +33,8 @@ import { defineTool } from "@github/copilot-sdk";
 import type { Tool } from "@github/copilot-sdk";
 import type { SessionCatalog } from "./cms.js";
 import type { ProviderStore, ChargeClass } from "./provider-store.js";
-import { ProviderError } from "./provider-store.js";
+import { ProviderError, requiresFineGrainedGitHubTokens } from "./provider-store.js";
+import { personalSecretsMode } from "./personal-secret-store.js";
 import type { BudgetPeriod } from "./provider-budgets.js";
 import { wakeProviderPausedSessions, type ProviderWakeClient } from "./provider-wake.js";
 
@@ -89,6 +90,14 @@ export interface CreateProviderToolsOptions {
      * then ignored for ever — and reported as a successful rotation.
      */
     providerUsesWorkloadIdentity?: (providerName: string) => boolean;
+    /**
+     * Is this provider TYPE a GitHub one (catalog `type: "github"`)? With
+     * PILOTSWARM_REQUIRE_FINE_GRAINED_GH_PAT on, its credentials must pass the
+     * fine-grained GitHub token gate, which the store applies only when told:
+     * it knows a type only by its name. While the setting is on, a host that
+     * cannot answer gets every credential write refused rather than unchecked.
+     */
+    isGitHubProviderType?: (typeId: string) => boolean;
 }
 
 interface ProviderToolSpec {
@@ -547,6 +556,32 @@ export function createProviderTools(opts: CreateProviderToolsOptions): Tool<any>
         }
     }
 
+    /**
+     * Does the fine-grained GitHub token gate apply to this credential write?
+     * A create names its type; an update names none, so the stored row's type
+     * decides, and a name the viewer cannot see is left to the write, which
+     * refuses it. The setting is read first, so a deployment without it makes
+     * no extra lookup.
+     */
+    async function fineGrainedGitHubTokenRequired(
+        store: ProviderStore,
+        v: ProviderToolsViewer,
+        args: { action: string; name: string; type?: string },
+    ): Promise<boolean> {
+        if (!requiresFineGrainedGitHubTokens()) return false;
+        if (!opts.isGitHubProviderType) {
+            throw new ProviderError(
+                "PROVIDER_INVALID",
+                "This deployment accepts only checked fine-grained GitHub tokens, and this host cannot tell which "
+                + "provider types are GitHub ones, so it saves no credential.",
+            );
+        }
+        const typeId = args.action === "create"
+            ? text(args.type)
+            : (await store.listProviders(v.userId, v.isAdmin)).find((row) => row.name === args.name)?.typeId;
+        return typeId ? opts.isGitHubProviderType(typeId) : false;
+    }
+
     const handlers: Record<string, ProviderToolHandler> = {
         list_providers: async () => call("list_providers", async (store, v) => ({
             providers: await store.listProviders(v.userId, v.isAdmin),
@@ -571,6 +606,16 @@ export function createProviderTools(opts: CreateProviderToolsOptions): Tool<any>
             if (args.action === "clear_routing") {
                 return { name: args.name, ...(await store.clearRoutingDependencies(args.name, v.userId, v.isAdmin)) };
             }
+            // With external personal secrets the portal is the only place a
+            // personal key is saved: it is the one host with the secret store.
+            if (args.mine && (args.action === "create" || args.action === "update_credential")
+                && personalSecretsMode() === "external") {
+                throw new ProviderError(
+                    "PROVIDER_FORBIDDEN",
+                    "This deployment keeps personal credentials in its secret store, and only the portal saves them. "
+                    + "Add or update your personal provider in the portal.",
+                );
+            }
             if (args.action === "update_credential") {
                 // Nothing to rotate on a provider that stores no key. Saying so
                 // beats writing a real secret into a row that never reads one
@@ -581,12 +626,13 @@ export function createProviderTools(opts: CreateProviderToolsOptions): Tool<any>
                             + "identity and has no key to update. Change the worker's identity configuration instead.",
                     };
                 }
+                const gate = { requireFineGrainedGitHubToken: await fineGrainedGitHubTokenRequired(store, v, args) };
                 // mine:false is the SHARED provider, admin-only and enforced in
                 // SQL by the same manage gate the other shared mutations use —
                 // a non-admin gets PROVIDER_FORBIDDEN, and a personal name
                 // reads as absent even to an admin.
                 if (!args.mine) {
-                    return store.updateSharedCredential(args.name, args.credentials ?? null, v.userId, v.isAdmin);
+                    return store.updateSharedCredential(args.name, args.credentials ?? null, v.userId, v.isAdmin, gate);
                 }
                 // NOT AUDITED. The HTTP route writes an authz_audit row
                 // (management-client updateMyProviderCredential); this surface
@@ -600,7 +646,7 @@ export function createProviderTools(opts: CreateProviderToolsOptions): Tool<any>
                 // attribution and is not. The real fix is to thread the
                 // principal into the viewer and route all four actions through
                 // the management client.
-                return store.updatePersonalCredential(args.name, args.credentials ?? null, v.userId);
+                return store.updatePersonalCredential(args.name, args.credentials ?? null, v.userId, gate);
             }
             // Deleting your own and deleting a shared one are the same call:
             // `cms_provider_delete` refuses a name the caller may not touch,
@@ -616,6 +662,7 @@ export function createProviderTools(opts: CreateProviderToolsOptions): Tool<any>
                 ownerUserId: args.mine ? v.userId : null,
                 secretRef: args.credentials ?? null,
                 baseUrl: text(args.base_url),
+                requireFineGrainedGitHubToken: await fineGrainedGitHubTokenRequired(store, v, args),
             }, v.userId, v.isAdmin);
             await wakeProviderPausedSessions(catalog, opts.duroxideClient, args.name);
             return created;

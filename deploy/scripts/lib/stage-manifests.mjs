@@ -14,6 +14,13 @@
 //     → combo-keyed: `${EDGE_MODE}-${TLS_SOURCE simplified}`
 //       (`afd-letsencrypt`, `afd-akv`, `private-akv`; `akv-selfsigned`
 //       collapses to `akv` because it shares the `private-akv` overlay)
+//   disk-controller
+//     → the portal's combo key: its dispatcher Ingress joins the portal's
+//       host and edge (afd or private only)
+//
+// With WIN_WORKERS_ENABLED=true, staging the portal also writes the database
+// role Job's manifest to <staging>/db-role-job.yaml, outside the published
+// tree (deploy/providers/azure/deploy-steps/db-role-job.mjs).
 
 import { cpSync, existsSync, rmSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -25,6 +32,66 @@ import { databaseOverlayOmittedKeys } from "./overlay-contracts.mjs";
 import { stageDatabaseSecrets } from "./database-secrets.mjs";
 import { stageWorkspacesComponent } from "./workspaces.mjs";
 import { WORKER_ENV_DEFAULTS, workerTelemetryOmittedKeys } from "./worker-env.mjs";
+import { stageDbRoleJob } from "../../providers/azure/deploy-steps/db-role-job.mjs";
+import { coordinationHostEnabled, coordinationHostOverlayEnv, stageCoordinationHost } from "./coordination-host.mjs";
+import {
+  DISK_CONTROLLER_SERVICE,
+  WIN_WORKER_ENV_DEFAULTS,
+  DISK_CONTROLLER_ENV_DEFAULTS,
+  PORTAL_SETTING_DEFAULTS,
+  WIN_WORKER_OUTPUT_DEFAULTS,
+  diskControllerTokenScope,
+  personalSecretVaultUri,
+  settingValue,
+} from "./aks-env.mjs";
+
+// Portal settings at their default stay out of the staged overlay: the portal
+// behaves the same without them, and a stamp that sets none of them stages
+// the same files as before they existed. Unset, the dispatcher's object ID
+// turns delegation off.
+const PORTAL_OPTIONAL_DEFAULTS = Object.freeze({ ...PORTAL_SETTING_DEFAULTS, DISPATCHER_SP_OBJECT_ID: "__PS_UNSET__" });
+
+export function portalSettingOmittedKeys(envMap) {
+  return Object.entries(PORTAL_OPTIONAL_DEFAULTS)
+    .filter(([key, fallback]) => {
+      const value = settingValue(envMap, key);
+      return value === "" || value === fallback;
+    })
+    .map(([key]) => key);
+}
+
+// The controller overlay's values, from the shared env map, which this leaves
+// unchanged. The controller runs as its own identity: its service account
+// takes the controller identity's client ID, never the portal's
+// WORKLOAD_IDENTITY_CLIENT_ID. An empty value falls back to its default.
+// The overlay's APPGW_TRUSTED_ROOT_CERTS lists the dispatcher Ingress's
+// trusted roots, which the Windows worker deploy step finds or uploads and
+// passes as APPGW_TRUSTED_ROOT_CERT_NAMES just before the manifests; in the
+// env file, APPGW_TRUSTED_ROOT_CERTS is only the prefix of the roots it
+// uploads. A stamp whose CA is on the root of the default name renders the
+// same overlay as before CA rotations.
+export function diskControllerOverlayEnv(env) {
+  const clientId = settingValue(env, "DISK_CONTROLLER_IDENTITY_CLIENT_ID");
+  if (!clientId) {
+    throw new Error(
+      "[stage-manifests] the disk controller needs DISK_CONTROLLER_IDENTITY_CLIENT_ID from base-infra: " +
+        "deploy base-infra with WIN_WORKERS_ENABLED=true first.",
+    );
+  }
+  const set = Object.fromEntries(Object.entries(env).filter(([, value]) => value !== undefined && value !== null && value !== ""));
+  const rootNames = settingValue(env, "APPGW_TRUSTED_ROOT_CERT_NAMES");
+  return {
+    ...WIN_WORKER_ENV_DEFAULTS,
+    ...DISK_CONTROLLER_ENV_DEFAULTS,
+    ...WIN_WORKER_OUTPUT_DEFAULTS,
+    PORTAL_TLS_CERT_NAME: "pilotswarm-portal-tls",
+    ...set,
+    ...(rootNames ? { APPGW_TRUSTED_ROOT_CERTS: rootNames } : {}),
+    WORKLOAD_IDENTITY_CLIENT_ID: clientId,
+    PS_DISK_CONTROLLER_TOKEN_SCOPE: diskControllerTokenScope(env),
+    PILOTSWARM_PERSONAL_SECRET_VAULT_URI: personalSecretVaultUri(env),
+  };
+}
 
 // Files inside the staged GitOps tree that contain `__PLACEHOLDER__`-style
 // tokens which need substitution against the env map. Each entry maps a
@@ -154,7 +221,10 @@ function applyFoundryAuthModeTransform({ service, stagedServiceRoot, env }) {
         `received '${env.FOUNDRY_AUTH_MODE}'.`,
     );
   }
-  if (authMode === "key") return;
+  // The coordination host loads no Key Vault secret, so it reaches Foundry
+  // with its own identity in either mode.
+  const coordinationHost = service === "worker" && coordinationHostEnabled(env);
+  if (authMode === "key" && !coordinationHost) return;
   if (!FOUNDRY_CATALOG_SERVICES.has(service)) return;
 
   const abs = join(stagedServiceRoot, "base", "model_providers.json");
@@ -185,7 +255,7 @@ function applyFoundryAuthModeTransform({ service, stagedServiceRoot, env }) {
 // the deploy script should substitute + stage. Mirrors the bicep
 // `kustomizationPath` for each service. Exported for testability.
 export function resolveOverlayName({ service, envName, env }) {
-  if (service === "portal") {
+  if (service === "portal" || service === DISK_CONTROLLER_SERVICE) {
     // Hard-fail when EDGE_MODE or TLS_SOURCE is missing from the env Map.
     // The silent default was a footgun — operators got an unexpected
     // overlay when they forgot to scaffold the env. The pre-deploy
@@ -330,30 +400,57 @@ export function stageManifests({ service, envName, env, stagingDir }) {
 
   // The cp above already produced a copy at overlayDst; we now overwrite it
   // with the substituted version.
+  const envMap = service === DISK_CONTROLLER_SERVICE ? diskControllerOverlayEnv(env) : {
+    ...DATABASE_ENV_DEFAULTS,
+    HORIZON_EMBED_URL: "__PS_UNSET__",
+    HORIZON_EMBED_MODEL: "text-embedding-3-small",
+    HORIZON_EMBED_DIM: "1536",
+    HORIZON_EMBED_API_KEY_HEADER: "api-key",
+    // Preserve runtime defaults for older stamps that omit optional policy.
+    AUTHZ_ENFORCE_OWNERSHIP: "__PS_UNSET__",
+    AUTHZ_ADMIN_SCOPE: "__PS_UNSET__",
+    SESSIONS_DEFAULT_VISIBILITY: "__PS_UNSET__",
+    SESSIONS_SYSTEM_VISIBILITY: "__PS_UNSET__",
+    DISPATCHER_SP_OBJECT_ID: "__PS_UNSET__",
+    ...PORTAL_SETTING_DEFAULTS,
+    ...WORKER_ENV_DEFAULTS,
+    ...env,
+    PILOTSWARM_PERSONAL_SECRET_VAULT_URI: personalSecretVaultUri(env),
+    // The coordination host's own identity, in this call's map only: the
+    // portal, staged from the same env map, keeps the portal's.
+    ...(service === "worker" ? coordinationHostOverlayEnv(env) : {}),
+  };
+  const omittedKeys = [
+    ...(runtimeService ? databaseOverlayOmittedKeys(env) : []),
+    ...(service === "portal" ? portalSettingOmittedKeys(envMap) : []),
+    ...(service === "worker" ? workerTelemetryOmittedKeys(env) : []),
+  ];
+  // With App Gateway, the dispatcher Ingress names the trusted roots of the
+  // controller's CAs, which the Windows worker deploy step finds or uploads
+  // and lists in the env map just before these manifests (win-workers.mjs).
+  if (service === DISK_CONTROLLER_SERVICE && overlayName.startsWith("afd-") && !settingValue(envMap, "APPGW_TRUSTED_ROOT_CERT_NAMES")) {
+    throw new Error(
+      "[stage-manifests] the disk controller's dispatcher Ingress names App Gateway's trusted roots, which the Windows worker " +
+        "deploy step lists before the controller's manifests: deploy the disk-controller service with deploy.mjs.",
+    );
+  }
   const { substituted } = substituteOverlayEnv({
     srcPath: overlaySrc,
     dstPath: overlayDst,
-    envMap: {
-      ...DATABASE_ENV_DEFAULTS,
-      HORIZON_EMBED_URL: "__PS_UNSET__",
-      HORIZON_EMBED_MODEL: "text-embedding-3-small",
-      HORIZON_EMBED_DIM: "1536",
-      HORIZON_EMBED_API_KEY_HEADER: "api-key",
-      // Preserve runtime defaults for older stamps that omit optional policy.
-      AUTHZ_ENFORCE_OWNERSHIP: "__PS_UNSET__",
-      AUTHZ_ADMIN_SCOPE: "__PS_UNSET__",
-      SESSIONS_DEFAULT_VISIBILITY: "__PS_UNSET__",
-      SESSIONS_SYSTEM_VISIBILITY: "__PS_UNSET__",
-      ...WORKER_ENV_DEFAULTS,
-      ...env,
-    },
-    omittedKeys: [
-      ...(runtimeService ? databaseOverlayOmittedKeys(env) : []),
-      ...(service === "worker" ? workerTelemetryOmittedKeys(env) : []),
-    ],
+    envMap,
+    omittedKeys,
   });
   log("ok", `Substituted ${substituted.length} overlay .env keys → ${overlayDst}`);
   if (runtimeService) stageDatabaseSecrets({ service, env, stagedServiceRoot, overlayName });
+  // WIN_WORKERS_ENABLED=true: the worker becomes the coordination host, which
+  // the pool requires (see coordination-host.mjs). It stages before the
+  // workspaces component, which goes first in the components list, so the
+  // host's coordination-host-workspaces settings follow and win.
+  const coordinationHost = stageCoordinationHost({ service, env, stagedServiceRoot, overlayName });
+  if (coordinationHost) {
+    log("info", `[stage-manifests] Windows worker pool: ${service}/${overlayName} has ${coordinationHost.replicas} replica(s)` +
+      ` and the ${coordinationHost.components.join(" and ")} component(s).`);
+  }
   // WORKSPACES_ENABLED=true: the worker and portal overlays get the
   // workspaces component (see workspaces.mjs).
   if (stageWorkspacesComponent({ service, env, stagedServiceRoot, overlayName })) {
@@ -364,6 +461,10 @@ export function stageManifests({ service, envName, env, stagingDir }) {
   // model_providers.json's __FOUNDRY_ENDPOINT__).
   applyPlaceholderRules({ service, stagedServiceRoot, env });
   applyFoundryAuthModeTransform({ service, stagedServiceRoot, env });
+
+  // WIN_WORKERS_ENABLED=true: the database role Job, from the portal's env map
+  // and staged model catalog, beside the published tree (db-role-job.mjs).
+  if (service === "portal") stageDbRoleJob({ env: envMap, stagingDir, stagedServiceRoot });
 
   return stagedServiceRoot;
 }

@@ -37,7 +37,7 @@ const LATEST_PATCH = Number(String(LATEST).split(".")[2]);
 
 test("the latest version is defined once, above every frozen version this test names", () => {
     assert.match(String(LATEST), /^1\.0\.\d+$/);
-    assert.ok(LATEST_PATCH > 82);
+    assert.ok(LATEST_PATCH > 83);
 });
 
 test("1.0.70 through 1.0.79 are frozen in their own directories", () => {
@@ -68,7 +68,7 @@ test("1.0.70 through 1.0.79 are frozen in their own directories", () => {
     assert.match(registry, /\{ version: "1\.0\.73", handler: durableSessionOrchestration_1_0_73 \}/);
     assert.match(read("orchestration_1_0_73/runtime.ts"), /CURRENT_ORCHESTRATION_VERSION = "1\.0\.73";/);
     assert.match(read("orchestration_1_0_73/index.ts"), /export function\* durableSessionOrchestration_1_0_73\(/);
-    for (const patch of [74, 75, 76, 77, 78, 79, 81, 82].filter(patch => patch < LATEST_PATCH)) {
+    for (const patch of [74, 75, 76, 77, 78, 79, 81, 82, 83].filter(patch => patch < LATEST_PATCH)) {
         assert.match(registry, new RegExp(`import \\{ durableSessionOrchestration_1_0_${patch} \\} from "\\.\\/orchestration_1_0_${patch}\\/index\\.js";`));
         assert.match(registry, new RegExp(`\\{ version: "1\\.0\\.${patch}", handler: durableSessionOrchestration_1_0_${patch} \\}`));
         assert.match(read(`orchestration_1_0_${patch}/runtime.ts`), new RegExp(`CURRENT_ORCHESTRATION_VERSION = "1\\.0\\.${patch}";`));

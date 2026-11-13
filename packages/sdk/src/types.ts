@@ -717,6 +717,39 @@ export const WORKSPACE_ERROR_CODES = {
 } as const;
 
 /**
+ * Owner routing: what a worker's capacity requester is asked before each
+ * turn of an owner-tagged session (`PilotSwarmWorker.setOwnerCapacityRequester`).
+ */
+export interface OwnerCapacityRequest {
+    sessionId: string;
+    /** The root of the session's tree: the session itself for a root. */
+    rootSessionId: string;
+    /** The session's owner routing tag, `owner.<subject>`. */
+    ownerTag: string;
+}
+
+/**
+ * The requester's answer. `deny`: the turn ends with `message` and is not
+ * retried. `busy`: the session waits on its workspace busy timer, at least
+ * `retryAfterMs`, and asks again; `code` defaults to `WORKSPACE_BUSY`. Any
+ * other answer lets the turn run.
+ */
+export type OwnerCapacityAnswer =
+    | { decision: "ok" }
+    | { decision: "deny"; message?: string; code?: string }
+    | { decision: "busy"; message?: string; code?: string; retryAfterMs?: number };
+
+/**
+ * The capacity requester. Its signal fires after 15 seconds without an
+ * answer; the session then waits a minute (`CAPACITY_UNAVAILABLE`) and asks
+ * again.
+ */
+export type OwnerCapacityRequester = (
+    request: OwnerCapacityRequest,
+    signal: AbortSignal,
+) => OwnerCapacityAnswer | void | Promise<OwnerCapacityAnswer | void>;
+
+/**
  * Error code for a refused delete, cancel, complete or rename of a system
  * session. Workers create system sessions, so these calls do not apply.
  */
@@ -727,6 +760,27 @@ export const SYSTEM_SESSION_PROTECTED = "SYSTEM_SESSION_PROTECTED";
  * loads its agent and would create the session again.
  */
 export const SYSTEM_AGENT_LOADED = "SYSTEM_AGENT_LOADED";
+
+/** What a worker's session admission hook is asked before each turn (`PilotSwarmWorker.setSessionAdmission`). */
+export interface SessionAdmissionRequest {
+    sessionId: string;
+    /** The root of the session's tree: the session itself for a root. */
+    rootSessionId: string;
+    /** A system session, a session the system user owns, or any session under a system root. */
+    isSystem: boolean;
+}
+
+/**
+ * The hook's answer. `busy`: the turn is held and retried as when a required
+ * folder fails (`WORKSPACE_BUSY`). `deny`: the turn fails with `message` and
+ * is not retried.
+ */
+export type SessionAdmissionDecision =
+    | { decision: "admit" }
+    | { decision: "busy"; message?: string; retryAfterMs?: number }
+    | { decision: "deny"; message?: string };
+
+export type SessionAdmission = (request: SessionAdmissionRequest) => SessionAdmissionDecision | Promise<SessionAdmissionDecision>;
 
 /**
  * The refusal for a lifecycle call on a system session. It is a 409 with a
@@ -1441,6 +1495,23 @@ export interface OrchestrationInput {
     sessionPolicy?: SessionPolicy;
     /** Names of all loaded non-system agents. Used by orchestration to validate policy. */
     allowedAgentNames?: string[];
+
+    // ─── Owner routing (1.0.84) ──────────────────────────────
+    /**
+     * The owner routing tag, `owner.<subject>` of the session's owner, as
+     * its creation config holds it (the client copies it at start).
+     * With it, every session-scoped activity goes only to a worker that
+     * declares the tag (`PilotSwarmWorkerOptions.ownerTag`), and the session
+     * asks for capacity (`requestOwnerCapacity`) before each turn. Carried
+     * across continue-as-new; absent = routed as before 1.0.84.
+     */
+    ownerTag?: string;
+    /**
+     * The fast workspace busy policy: the first `WORKSPACE_BUSY` refusal
+     * releases the session's worker, and retries follow 10 s, 20 s, 1 min,
+     * then every 3 min. Carried across continue-as-new.
+     */
+    workspaceBusyFastRelease?: boolean;
 }
 
 /** A sub-agent entry tracked in the parent orchestration's state. */
@@ -1599,6 +1670,30 @@ export interface PilotSwarmWorkerOptions {
     workerPool?: string;
     /** Worker-registry owner principal — user-owned workers (laptops). */
     workerOwner?: { provider: string; subject: string } | null;
+    /**
+     * Owner routing: an owner's tag, `owner.<subject>`. The worker then also
+     * runs the session-scoped activities of that owner's owner-routed
+     * sessions, which carry the tag when their creation config does (the
+     * portal records it for a session a dispatcher creates for its owner).
+     * Fixed for the worker's lifetime. Default: none. `examples/worker.js`
+     * reads `PILOTSWARM_WORKER_OWNER_TAG`. Without `ownerOnly`, a worker with
+     * a tag refuses to start with a capacity requester: its filter would hold
+     * six tags, one more than duroxide allows.
+     */
+    ownerTag?: string;
+    /**
+     * Owner routing: run only the activities tagged for `ownerTag`, the
+     * session-scoped activities of that owner's sessions. The worker then
+     * runs no untagged work (system sessions' turns, titles, the manager
+     * activities around every turn, the duroxide activities behind
+     * `ctx.utcNow()` and `ctx.newGuid()`), no capability-tagged activity and
+     * no capacity request, even with a capacity requester: another worker
+     * without this option must run those. It still runs orchestration turns.
+     * Needs `ownerTag`; without one the constructor throws. Fixed for the
+     * worker's lifetime. Default: false. `examples/worker.js` reads
+     * `PILOTSWARM_WORKER_OWNER_ONLY=1`.
+     */
+    ownerOnly?: boolean;
     /** Azure Blob Storage connection string for the built-in blob-backed session store. */
     blobConnectionString?: string;
     /** Blob container name for the built-in blob-backed session store. */
@@ -1652,6 +1747,17 @@ export interface PilotSwarmWorkerOptions {
      * Default: PILOTSWARM_NATIVE_SUBAGENTS, then sync.
      */
     nativeSubagents?: "off" | "sync";
+
+    /**
+     * Which sessions `send_session_message` and `reply_session_message` reach.
+     * "fleet" (the default): any live session. "owner": only sessions with the
+     * same user owner, or system sessions from a system session (a system
+     * session, a session the system user owns, or any session under a system
+     * root); anything else is refused with `policy_denied` before it is queued.
+     * Any other value fails the constructor. The bundled worker entrypoints
+     * read `PILOTSWARM_SESSION_MESSAGE_SCOPE`.
+     */
+    sessionMessageScope?: "fleet" | "owner";
 
     /**
      * Session workspaces: the application's provider. Takes precedence over
@@ -1892,7 +1998,7 @@ export interface PilotSwarmClientOptions {
     waitThreshold?: number;
     dehydrateThreshold?: number;
     dehydrateOnInputRequired?: number;
-    /** Seconds to keep an idle top-level session warm before dehydrating. Default: 60. */
+    /** Seconds an idle top-level session keeps its worker before the worker is released. Default: 1800. */
     dehydrateOnIdle?: number;
 
     /**
@@ -1979,6 +2085,16 @@ export interface PilotSwarmClientOptions {
      * Only consulted when `useManagedIdentity` is `true`.
      */
     aadDbUser?: string;
+
+    /**
+     * The fast workspace busy policy for the owner-routed top-level sessions
+     * this client starts (those whose creation config carries an owner tag):
+     * their first `WORKSPACE_BUSY` refusal releases the worker, and retries
+     * follow 10 s, 20 s, 1 min, then every 3 min. Sessions they create during
+     * a turn get it too. Other sessions keep the default policy. Default:
+     * `PILOTSWARM_WORKSPACE_BUSY_FAST_RELEASE=1`.
+     */
+    workspaceBusyFastRelease?: boolean;
 }
 
 // ─── User Input ──────────────────────────────────────────────────

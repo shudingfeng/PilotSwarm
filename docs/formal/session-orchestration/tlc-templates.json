@@ -1,4 +1,23 @@
 {
+  "CapacityHold": {
+    "indent": 4,
+    "constants": [
+      "Tagged",
+      "Fast",
+      "HasWorkspace",
+      "StepRule",
+      "ResetRule",
+      "Answers",
+      "Results",
+      "BusyRetry",
+      "HoldWindow",
+      "MaxPrompts",
+      "MaxRefusals",
+      "Fault"
+    ],
+    "lists": "block",
+    "deadlockFirst": false
+  },
   "CarriedGiveBack": {
     "indent": 4,
     "constants": [
@@ -100,6 +119,33 @@
       "AllowExhaust",
       "Report",
       "AllowLaterSuccess"
+    ],
+    "lists": "block",
+    "deadlockFirst": false
+  },
+  "OwnerCapped": {
+    "indent": 4,
+    "constants": [
+      "Tagged",
+      "Capped",
+      "Owner",
+      "MayStop",
+      "Host",
+      "Cmds",
+      "TurnFirst",
+      "Fault"
+    ],
+    "lists": "block",
+    "deadlockFirst": false
+  },
+  "OwnerTagCarry": {
+    "indent": 4,
+    "constants": [
+      "RootTag",
+      "RootFast",
+      "RootOn83",
+      "MaxCan",
+      "Fault"
     ],
     "lists": "block",
     "deadlockFirst": false
@@ -208,6 +254,7 @@
   "VersionHandoff": {
     "indent": 4,
     "constants": [
+      "From",
       "PendKind",
       "SourceStamp",
       "RegistryOK",
@@ -217,6 +264,7 @@
       "FifoTookDigest",
       "AllowLateCancel",
       "AllowSweepSetModel",
+      "Extra",
       "FieldFault"
     ],
     "lists": "block",

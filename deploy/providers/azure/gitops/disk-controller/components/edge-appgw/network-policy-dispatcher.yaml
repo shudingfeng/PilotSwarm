@@ -1,0 +1,26 @@
+# EDGE_MODE=afd: the dispatcher port, 3004, only from App Gateway's subnet. With
+# classic Azure CNI, App Gateway sends to the pod's address directly, from its
+# instances' addresses in this subnet. If a live dispatcher request shows
+# another source, this range must follow it; the dispatcher token stays the
+# control either way.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: pilotswarm-disk-controller-dispatcher
+  labels:
+    app.kubernetes.io/name: pilotswarm
+    app.kubernetes.io/component: disk-controller
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: pilotswarm
+      app.kubernetes.io/component: disk-controller
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 3004
+      from:
+        - ipBlock:
+            cidr: 10.20.16.0/24

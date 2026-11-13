@@ -1,0 +1,69 @@
+# Where the coordination host's pods may connect; AKS enforces NetworkPolicy
+# with Calico. A NetworkPolicy can't name hosts, so the rules are addresses:
+#
+#   53       the cluster's DNS pods
+#   3005     the disk controller's pods (capacity requests), in this namespace
+#   443      the main storage account's blob private endpoint, 10.20.33.4
+#   443,     addresses outside the stamp VNet (10.20.0.0/16): Entra ID,
+#   5432     Foundry and PostgreSQL's public endpoint, so every internet host
+#            on those two ports. Never the instance metadata endpoint or the
+#            Azure host endpoint (168.63.129.16).
+#
+# Nothing else in the VNet is reachable. The worker's base already has a
+# policy of this name, the worker egress policy (base/network-policy.yaml),
+# which allows all egress but those two addresses. Policies add up, so this
+# one is a patch that replaces the base policy's spec, not a second policy.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: copilot-runtime-worker-egress
+  labels:
+    app.kubernetes.io/name: pilotswarm
+    app.kubernetes.io/component: worker
+spec:
+  $patch: replace
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: pilotswarm
+      app.kubernetes.io/component: worker
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: pilotswarm
+              app.kubernetes.io/component: disk-controller
+      ports:
+        - protocol: TCP
+          port: 3005
+    - to:
+        - ipBlock:
+            cidr: 10.20.33.4/32
+      ports:
+        - protocol: TCP
+          port: 443
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.20.0.0/16
+              - 169.254.169.254/32
+              - 168.63.129.16/32
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 5432

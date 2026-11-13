@@ -49,6 +49,7 @@ test("all Node image stages pin the patched Trixie runtime", () => {
     "Dockerfile.portal": 2,
     "Dockerfile.starter": 1,
     "Dockerfile.repo-cache": 1,
+    "Dockerfile.disk-controller": 2,
   };
   for (const [file, count] of Object.entries(expectedStages)) {
     const images = [...read(`deploy/${file}`).matchAll(/^FROM\s+(node:\S+)/gm)];

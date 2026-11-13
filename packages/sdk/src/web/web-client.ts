@@ -60,6 +60,8 @@ export class WebPilotSwarmClient {
         reasoningEffort?: string;
         contextTier?: string;
         groupId?: string | null;
+        /** The deployment's dispatcher only: create the session for this user (who must allow it). */
+        onBehalfOfOwner?: { subject: string; provider?: string };
         onUserInputRequest?: UserInputHandler;
     } & Record<string, unknown>): Promise<WebPilotSwarmSession> {
         for (const key of ["sessionId", "parentSessionId", "agentId", "toolNames", "nestingLevel"]) {
@@ -73,6 +75,7 @@ export class WebPilotSwarmClient {
             contextTier: config?.contextTier,
             groupId: config?.groupId,
             ...(config?.workspace != null ? { workspace: config.workspace } : {}),
+            ...(config?.onBehalfOfOwner != null ? { onBehalfOfOwner: config.onBehalfOfOwner } : {}),
         });
         return new WebPilotSwarmSession(view.sessionId, this._api, config?.onUserInputRequest);
     }
@@ -88,6 +91,8 @@ export class WebPilotSwarmClient {
         groupId?: string | null;
         /** Session workspaces: the working folder, { root, folder? }. */
         workspace?: { root: string; folder?: string } | null;
+        /** As in createSession: the deployment's dispatcher only. */
+        onBehalfOfOwner?: { subject: string; provider?: string };
         onUserInputRequest?: UserInputHandler;
     }): Promise<WebPilotSwarmSession> {
         const view = await this._api.call("createSessionForAgent", {
@@ -101,6 +106,7 @@ export class WebPilotSwarmClient {
             initialPrompt: opts?.initialPrompt,
             groupId: opts?.groupId,
             ...(opts?.workspace != null ? { workspace: opts.workspace } : {}),
+            ...(opts?.onBehalfOfOwner != null ? { onBehalfOfOwner: opts.onBehalfOfOwner } : {}),
         });
         return new WebPilotSwarmSession(view.sessionId, this._api, opts?.onUserInputRequest);
     }

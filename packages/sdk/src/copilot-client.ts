@@ -1,6 +1,8 @@
 import { CopilotClient, CopilotRequestHandler, RuntimeConnection } from "@github/copilot-sdk";
-import type { CopilotClientOptions, CopilotRequestContext } from "@github/copilot-sdk";
+import type { CopilotClientOptions, CopilotRequestContext, CopilotSession, ResumeSessionConfig, SessionConfig } from "@github/copilot-sdk";
+import { createRequire } from "node:module";
 import { createParser } from "eventsource-parser";
+import { cliHooksDisabled, resetCliHomeSettings } from "./cli-hooks.js";
 import { normalizeToolCatalog, type ToolCatalogCapability } from "./model-providers.js";
 
 type JsonObject = Record<string, any>;
@@ -242,13 +244,196 @@ export function createCopilotClient(
     if (toolCatalog && !needsByokRequestCompatibility(provider)) {
         throw new Error("toolCatalog requires an OpenAI-compatible Chat Completions provider.");
     }
-    return new CopilotClient({
-        ...options,
-        // Do not let ambient COPILOT_SDK_DEFAULT_CONNECTION opt a multi-tenant
-        // worker into the experimental process-global in-process transport.
-        // Stdio uses the pinned SDK runtime and honors COPILOT_CLI_PATH.
-        connection: RuntimeConnection.forStdio(),
-        ...(needsByokRequestCompatibility(provider) ? { requestHandler: new ByokRequestCompatibility(toolCatalog) } : {}),
+    const env = scrubbedCliEnvironment(options.env ?? process.env);
+    const secretNames = cliSecretEnvVars();
+    let clientOptions: CopilotClientOptions;
+    if (secretNames) {
+        // The SDK refuses a client env next to a connection env, so the
+        // caller's environment moves to the connection.
+        const { env: callerEnv, ...rest } = options;
+        const connectionEnv = definedValues(env ?? callerEnv ?? process.env);
+        clientOptions = {
+            ...rest,
+            connection: RuntimeConnection.forStdio({
+                path: connectionEnv.COPILOT_CLI_PATH || copilotCliProgramPath(),
+                args: [`--secret-env-vars=${secretNames.join(",")}`],
+                env: connectionEnv,
+            }),
+            ...(needsByokRequestCompatibility(provider) ? { requestHandler: new ByokRequestCompatibility(toolCatalog) } : {}),
+        };
+    } else {
+        clientOptions = {
+            ...options,
+            ...(env ? { env } : {}),
+            // Do not let ambient COPILOT_SDK_DEFAULT_CONNECTION opt a multi-tenant
+            // worker into the experimental process-global in-process transport.
+            // Stdio uses the pinned SDK runtime and honors COPILOT_CLI_PATH.
+            connection: RuntimeConnection.forStdio(),
+            ...(needsByokRequestCompatibility(provider) ? { requestHandler: new ByokRequestCompatibility(toolCatalog) } : {}),
+        };
+    }
+    if (cliHooksDisabled()) {
+        const home = (options.env ?? process.env).COPILOT_HOME?.trim();
+        if (!home) {
+            throw new Error("PILOTSWARM_CLI_DISABLE_HOOKS=1 needs COPILOT_HOME for every CLI, so that no account's own ~/.copilot is rewritten.");
+        }
+        return new HooksOffCopilotClient(clientOptions, home);
+    }
+    return new CopilotClient(clientOptions);
+}
+
+/**
+ * With `PILOTSWARM_CLI_DISABLE_HOOKS=1`: puts the CLI home's settings files
+ * in their fixed form before the CLI starts and before every session create
+ * or resume, and turns off the working folder's hooks for every session.
+ */
+class HooksOffCopilotClient extends CopilotClient {
+    private readonly cliHome: string;
+
+    constructor(options: CopilotClientOptions, cliHome: string) {
+        super(options);
+        this.cliHome = cliHome;
+    }
+
+    override async start(): Promise<void> {
+        await resetCliHomeSettings(this.cliHome);
+        return super.start();
+    }
+
+    override async createSession(config: SessionConfig): Promise<CopilotSession> {
+        await resetCliHomeSettings(this.cliHome);
+        return super.createSession({ ...config, enableFileHooks: false });
+    }
+
+    override async resumeSession(sessionId: string, config: ResumeSessionConfig): Promise<CopilotSession> {
+        await resetCliHomeSettings(this.cliHome);
+        return super.resumeSession(sessionId, { ...config, enableFileHooks: false });
+    }
+}
+
+/**
+ * `PILOTSWARM_CLI_SECRET_ENV_VARS`: environment variables (comma-separated
+ * names) that every CLI keeps from agents' shells, MCP servers and hooks,
+ * such as `COPILOT_SDK_AUTH_TOKEN`, the token the SDK hands the CLI. The CLI
+ * does not redact them from what it prints. Only the Copilot CLI program
+ * takes `--secret-env-vars`; the SDK's bundled runtime refuses it, so with
+ * names set every CLI starts as that program. Undefined when unset.
+ */
+export function cliSecretEnvVars(settings: NodeJS.ProcessEnv = process.env): string[] | undefined {
+    const names = [...new Set(String(settings.PILOTSWARM_CLI_SECRET_ENV_VARS ?? "")
+        .split(",").map((name) => name.trim()).filter(Boolean))];
+    for (const name of names) {
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+            throw new Error(`PILOTSWARM_CLI_SECRET_ENV_VARS: "${name}" is not an environment variable name`);
+        }
+    }
+    return names.length > 0 ? names : undefined;
+}
+
+/**
+ * Session options for the Copilot CLI program: it offers its own bundled
+ * skills through the `skill` tool, so every session lists none of them
+ * (`includedBuiltinSkills: []`). The deployment's skills stay available.
+ * Unchanged with the SDK's bundled runtime.
+ */
+export function withCliProgramSessionOptions<T extends object>(config: T): T {
+    return cliSecretEnvVars() ? { ...config, includedBuiltinSkills: [] } : config;
+}
+
+let programPaths: Map<string, string> | undefined;
+
+/**
+ * The Copilot CLI program for this platform: the binary in the platform
+ * package of `@github/copilot` that its npm launcher starts.
+ */
+export function copilotCliProgramPath(platform: NodeJS.Platform = process.platform, arch: string = process.arch): string {
+    const key = `${platform}-${arch}`;
+    const known = programPaths?.get(key);
+    if (known) return known;
+    let fromLauncher: NodeJS.Require | undefined;
+    try {
+        fromLauncher = createRequire(createRequire(import.meta.url).resolve("@github/copilot/package.json"));
+    } catch {
+        // Reported below with the platform package's name.
+    }
+    const variants = platform === "linux" ? (usesMusl() ? ["linuxmusl", "linux"] : ["linux"]) : [platform];
+    for (const variant of variants) {
+        try {
+            const resolved = fromLauncher?.resolve(`@github/copilot-${variant}-${arch}`);
+            if (resolved) {
+                (programPaths ??= new Map()).set(key, resolved);
+                return resolved;
+            }
+        } catch {
+            // Try the next variant.
+        }
+    }
+    throw new Error(`PILOTSWARM_CLI_SECRET_ENV_VARS needs the Copilot CLI program, @github/copilot-${variants[0]}-${arch}, which is not installed.`);
+}
+
+function usesMusl(): boolean {
+    const report = (process.report?.getReport?.() ?? {}) as { header?: { glibcVersionRuntime?: string } };
+    return !report.header?.glibcVersionRuntime;
+}
+
+function definedValues(source: NodeJS.ProcessEnv): Record<string, string> {
+    const env: Record<string, string> = {};
+    for (const [name, value] of Object.entries(source)) {
+        if (value !== undefined) env[name] = value;
+    }
+    return env;
+}
+
+const WINDOWS_CLI_ENV_BASELINE = [
+    "PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "SYSTEMDRIVE", "COMSPEC", "TEMP", "TMP", "USERPROFILE", "HOMEDRIVE",
+    "HOMEPATH", "APPDATA", "LOCALAPPDATA", "PROGRAMDATA", "ALLUSERSPROFILE", "PUBLIC", "PROGRAMFILES",
+    "PROGRAMFILES(X86)", "PROGRAMW6432", "COMMONPROGRAMFILES", "COMMONPROGRAMFILES(X86)", "COMMONPROGRAMW6432",
+    "PSMODULEPATH", "PROCESSOR_ARCHITECTURE", "PROCESSOR_IDENTIFIER", "NUMBER_OF_PROCESSORS", "OS", "COMPUTERNAME",
+    "USERNAME", "USERDOMAIN",
+];
+const POSIX_CLI_ENV_BASELINE = ["PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG", "LC_*", "TERM"];
+// COPILOT_HOME holds session state, the SDK picks its CLI by COPILOT_CLI_PATH, and the
+// Copilot CLI program runs the unpacked copy of itself in COPILOT_PKG_CACHE_HOME.
+const COPILOT_CLI_ENV_SETTINGS = ["COPILOT_HOME", "COPILOT_CUSTOM_INSTRUCTIONS_DIRS", "COPILOT_CLI_PATH", "COPILOT_PKG_CACHE_HOME"];
+
+/**
+ * `PILOTSWARM_SCRUB_CLI_ENV=1`: a CLI starts with only the names of `source`
+ * that the platform needs, the Copilot settings and the deployment's own
+ * tool settings in `PILOTSWARM_CLI_ENV_ALLOWLIST` (comma-separated; a
+ * trailing `*` matches a prefix), compared case-insensitively. Agents' shells
+ * and MCP servers then inherit none of the worker's other variables, its
+ * credentials included. The SDK adds its own token after this. Returns
+ * undefined, so nothing changes, when the setting is off.
+ */
+export function scrubbedCliEnvironment(
+    source: NodeJS.ProcessEnv,
+    settings: NodeJS.ProcessEnv = process.env,
+    platform: NodeJS.Platform = process.platform,
+): Record<string, string> | undefined {
+    if (settings.PILOTSWARM_SCRUB_CLI_ENV !== "1") return undefined;
+    const patterns = [
+        ...(platform === "win32" ? WINDOWS_CLI_ENV_BASELINE : POSIX_CLI_ENV_BASELINE),
+        ...COPILOT_CLI_ENV_SETTINGS,
+        ...cliEnvAllowlist(settings.PILOTSWARM_CLI_ENV_ALLOWLIST),
+    ];
+    const exact = new Set(patterns.filter((pattern) => !pattern.endsWith("*")));
+    const prefixes = patterns.filter((pattern) => pattern.endsWith("*")).map((pattern) => pattern.slice(0, -1));
+    const env: Record<string, string> = {};
+    for (const [name, value] of Object.entries(source)) {
+        if (value === undefined) continue;
+        const key = name.toUpperCase();
+        if (exact.has(key) || prefixes.some((prefix) => key.startsWith(prefix))) env[name] = value;
+    }
+    return env;
+}
+
+function cliEnvAllowlist(raw: string | undefined): string[] {
+    if (!raw?.trim()) return [];
+    return raw.split(",").map((entry) => entry.trim()).filter(Boolean).map((entry) => {
+        if (!/^[A-Za-z0-9_()]+\*?$/.test(entry)) {
+            throw new Error(`PILOTSWARM_CLI_ENV_ALLOWLIST: "${entry}" is neither a variable name nor a name prefix followed by *`);
+        }
+        return entry.toUpperCase();
     });
 }
 

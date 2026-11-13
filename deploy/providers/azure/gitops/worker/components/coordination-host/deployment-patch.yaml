@@ -1,0 +1,135 @@
+# The coordination host's pods. Strategic merge into the base Deployment:
+# init containers, containers, env entries and volumes merge by name, volume
+# mounts by mount path, and envFrom, which has no merge key, is replaced whole,
+# which drops the base's secretRef.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: copilot-runtime-worker
+spec:
+  template:
+    spec:
+      # Prefer another node for each replica; never leave one unscheduled for it.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: pilotswarm
+              app.kubernetes.io/component: worker
+      initContainers:
+        # The Copilot CLI's home: the folder stays root's, the worker's group
+        # may add files and the sticky bit keeps it from removing or renaming
+        # anything it doesn't own. Read-only, root-owned placeholders hold the
+        # names the CLI reads from its home, with the same contents as on the
+        # Windows workers (deploy/providers/azure/windows/README.md), and the
+        # two settings files have the fixed contents PILOTSWARM_CLI_DISABLE_HOOKS=1
+        # checks (packages/sdk/src/cli-hooks.ts). Only session-state is the worker's.
+        - name: init-copilot-home
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              home=/home/node/.copilot
+              chown 0:1000 "$home"
+              chmod 1775 "$home"
+              mkdir -p "$home/session-state"
+              chown 1000:1000 "$home/session-state"
+              chmod 0700 "$home/session-state"
+              printf '{\n  "disableAllHooks": true\n}\n' > "$home/settings.json"
+              printf '// User settings belong in settings.json.\n// This file is managed automatically.\n{\n  "firstLaunchAt": "1970-01-01T00:00:00.000Z"\n}\n' > "$home/config.json"
+              : > "$home/copilot-instructions.md"
+              : > "$home/providers.json"
+              printf '{"mcpServers":{}}' > "$home/mcp-config.json"
+              printf '{"lspServers":{}}' > "$home/lsp-config.json"
+              for name in permissions-config.json mcp-oauth-config.json; do
+                printf '{}' > "$home/$name"
+              done
+              for name in settings.json config.json copilot-instructions.md mcp-config.json lsp-config.json permissions-config.json mcp-oauth-config.json providers.json; do
+                chown 0:0 "$home/$name"
+                chmod 0444 "$home/$name"
+              done
+              for name in instructions skills agents extensions pkg hooks installed-plugins mcp-oauth-config mcp-secrets; do
+                mkdir -p "$home/$name"
+                chown 0:0 "$home/$name"
+                chmod 0555 "$home/$name"
+              done
+      containers:
+        - name: worker
+          env:
+            # The capacity requester (deploy/providers/azure/linux-worker/README.md),
+            # and the disk controller's CA, which the deploy step puts in the
+            # cluster.
+            - name: PILOTSWARM_EXTENSION_MODULES
+              value: /app/deploy/providers/azure/linux-worker/capacity-requester.mjs
+            - name: NODE_EXTRA_CA_CERTS
+              value: /etc/pilotswarm/disk-controller-ca/ca.crt
+            # What the Windows workers run with, for the activities that run
+            # here: the title generator, the system agents, every turn's
+            # bookkeeping, and the sessions that people start in the Portal.
+            - name: PILOTSWARM_LIMIT_TITLE_SESSION_TOOLS
+              value: "1"
+            - name: PILOTSWARM_LIMIT_SYSTEM_SESSION_TOOLS
+              value: "1"
+            - name: PILOTSWARM_SCRUB_CLI_ENV
+              value: "1"
+            - name: PILOTSWARM_CLI_DISABLE_HOOKS
+              value: "1"
+            - name: PILOTSWARM_AGENT_PACKAGES
+              value: "0"
+            - name: PILOTSWARM_SKIP_DB_MIGRATIONS
+              value: "1"
+            - name: PILOTSWARM_SESSION_MESSAGE_SCOPE
+              value: owner
+            - name: PILOTSWARM_PERSONAL_SECRETS
+              value: external
+            - name: PILOTSWARM_REQUIRE_FINE_GRAINED_GH_PAT
+              value: "1"
+            # External personal secrets start the Copilot CLI program, which
+            # keeps the token from agents, from the copy the image unpacked as
+            # root (deploy/Dockerfile.worker, COPILOT_PKG_CACHE_HOME).
+            - name: PILOTSWARM_CLI_SECRET_ENV_VARS
+              value: COPILOT_SDK_AUTH_TOKEN
+            - name: COPILOT_PKG_CACHE_HOME
+              value: /app/copilot-pkg
+            - name: COPILOT_HOME
+              value: /home/node/.copilot
+            - name: SESSION_STATE_DIR
+              value: /home/node/.copilot/session-state
+            - name: PILOTSWARM_EVENT_RETENTION_MINUTES
+              value: "43200"
+            - name: PILOTSWARM_DISABLE_K8S_SCALING
+              value: "1"
+            # The system agents' and Portal sessions' turns share the activity
+            # slots with every turn's bookkeeping and with capacity requests.
+            - name: PILOTSWARM_WORKER_CONCURRENCY
+              value: "8"
+            - name: PILOTSWARM_ORCHESTRATION_CONCURRENCY
+              value: "4"
+          # No secretRef: the database URL is passwordless, and Blob and
+          # Foundry take the host's own identity.
+          envFrom:
+            - configMapRef:
+                name: worker-env
+            - configMapRef:
+                name: coordination-host-env
+          resources:
+            limits:
+              memory: 4Gi
+          volumeMounts:
+            - mountPath: /mnt/secrets-store
+              $patch: delete
+            - name: disk-controller-ca
+              mountPath: /etc/pilotswarm/disk-controller-ca
+              readOnly: true
+      volumes:
+        - name: secrets-store
+          $patch: delete
+        - name: disk-controller-ca
+          configMap:
+            name: pilotswarm-disk-controller-ca
+            items:
+              - key: ca.crt
+                path: ca.crt

@@ -1,0 +1,112 @@
+# The disk controller (deploy/providers/azure/disk-controller/server.mjs).
+#
+# One replica owns the drive pool and the Windows VM lifecycle. `Recreate`
+# stops the old pod before the new one starts, so two controllers never act at
+# once; the state lives in blobs, written with ETag compare-and-swap. A new pod
+# waits PS_DISK_CONTROLLER_STARTUP_GRACE_SECONDS (60) for the VMs' heartbeats
+# before it treats a silent VM as crashed, and answers attach and credential
+# requests with "busy" until then.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pilotswarm-disk-controller
+  labels:
+    app.kubernetes.io/name: pilotswarm
+    app.kubernetes.io/component: disk-controller
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: pilotswarm
+      app.kubernetes.io/component: disk-controller
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: pilotswarm
+        app.kubernetes.io/component: disk-controller
+        azure.workload.identity/use: "true"
+    spec:
+      serviceAccountName: pilotswarm-disk-controller
+      automountServiceAccountToken: false
+      # The controller closes its listeners within 20 seconds of SIGTERM.
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: disk-controller
+          # Placeholder image reference; the overlay fills the whole reference.
+          image: __IMAGE__
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: worker
+              containerPort: 3003
+            - name: dispatcher
+              containerPort: 3004
+            - name: coordination
+              containerPort: 3005
+          envFrom:
+            - configMapRef:
+                name: disk-controller-env
+          env:
+            - name: PS_DISK_CONTROLLER_TLS_FILE
+              value: /mnt/disk-controller-tls/disk-controller-tls
+          # exec probes: they need no network path from the node, which the
+          # NetworkPolicies do not open. Ready once the state is loaded (the
+          # health route answers 503 until then); alive while the dispatcher
+          # port accepts connections.
+          startupProbe:
+            exec:
+              command:
+                - node
+                - -e
+                - "require('net').connect(3004, '127.0.0.1').on('connect', () => process.exit(0)).on('error', () => process.exit(1))"
+            periodSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            exec:
+              command:
+                - node
+                - -e
+                - "require('https').get({ host: '127.0.0.1', port: 3004, path: '/disk-pool/v1/healthz', rejectUnauthorized: false, timeout: 4000 }, (res) => process.exit(res.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1)).on('timeout', () => process.exit(1))"
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            exec:
+              command:
+                - node
+                - -e
+                - "require('net').connect(3004, '127.0.0.1').on('connect', () => process.exit(0)).on('error', () => process.exit(1))"
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: tls
+              mountPath: /mnt/disk-controller-tls
+              readOnly: true
+      volumes:
+        - name: tls
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: pilotswarm-disk-controller-tls
+      restartPolicy: Always

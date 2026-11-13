@@ -39,6 +39,7 @@ test("real manifest loads and matches the canonical service shape", () => {
     "worker",
     "repo-cache",
     "portal",
+    "disk-controller",
   ]);
   assert.equal(m.services.worker.kind, "app");
   assert.equal(m.services["repo-cache"].kind, "app");
@@ -62,10 +63,12 @@ test("derived constants match prior hardcoded shape (regression contract)", () =
     "worker",
     "repo-cache",
     "portal",
+    "disk-controller",
   ]);
 
   // SERVICE_IMAGE_INFO: only app services.
-  assert.deepEqual(Object.keys(SERVICE_IMAGE_INFO).sort(), ["portal", "repo-cache", "worker"]);
+  assert.deepEqual(Object.keys(SERVICE_IMAGE_INFO).sort(), ["disk-controller", "portal", "repo-cache", "worker"]);
+  assert.equal(SERVICE_IMAGE_INFO["disk-controller"].dockerfile, "deploy/Dockerfile.disk-controller");
   assert.equal(SERVICE_IMAGE_INFO.worker.dockerImageRepo, "pilotswarm-worker");
   assert.equal(SERVICE_IMAGE_INFO.portal.dockerfile, "deploy/Dockerfile.portal");
   assert.equal(SERVICE_IMAGE_INFO["repo-cache"].dockerImageRepo, "pilotswarm-repo-cache");
@@ -75,6 +78,7 @@ test("derived constants match prior hardcoded shape (regression contract)", () =
   assert.deepEqual(SERVICE_TO_MODULES.worker, ["base-infra", "worker"]);
   assert.deepEqual(SERVICE_TO_MODULES.portal, ["base-infra", "portal"]);
   assert.deepEqual(SERVICE_TO_MODULES["repo-cache"], ["base-infra", "repo-cache"]);
+  assert.deepEqual(SERVICE_TO_MODULES["disk-controller"], ["base-infra", "disk-controller"]);
   assert.deepEqual(SERVICE_TO_MODULES["base-infra"], ["base-infra"]);
   assert.deepEqual(SERVICE_TO_MODULES.horizondb, ["horizondb"]);
   assert.deepEqual(SERVICE_TO_MODULES["global-infra"], ["global-infra"]);

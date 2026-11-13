@@ -1,0 +1,21 @@
+# The coordination port, 3005: only `POST /v1/coordination/demand`, the
+# capacity requests of the coordination host's pods, which trust the
+# controller's private CA and verify this Service's cluster DNS name
+# (pilotswarm-disk-controller-coordination.<namespace>.svc).
+apiVersion: v1
+kind: Service
+metadata:
+  name: pilotswarm-disk-controller-coordination
+  labels:
+    app.kubernetes.io/name: pilotswarm
+    app.kubernetes.io/component: disk-controller
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: pilotswarm
+    app.kubernetes.io/component: disk-controller
+  ports:
+    - name: https
+      protocol: TCP
+      port: 3005
+      targetPort: 3005

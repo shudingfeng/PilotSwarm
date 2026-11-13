@@ -309,6 +309,19 @@ test("the workspace tools are declared only for workspace sessions and agents th
         "the other parameters are unchanged");
 });
 
+test("with children's workspaces off, spawn_agent offers no workspace, even where the workspace tools are on", (t) => {
+    const saved = process.env.PILOTSWARM_DISABLE_CHILD_WORKSPACE_INHERITANCE;
+    t.after(() => {
+        if (saved === undefined) delete process.env.PILOTSWARM_DISABLE_CHILD_WORKSPACE_INHERITANCE;
+        else process.env.PILOTSWARM_DISABLE_CHILD_WORKSPACE_INHERITANCE = saved;
+    });
+    const spawnProps = (tools) => Object.keys(tools.find((tool) => tool.name === "spawn_agent").parameters.properties);
+    process.env.PILOTSWARM_DISABLE_CHILD_WORKSPACE_INHERITANCE = "1";
+    assert.equal(spawnProps(ManagedSession.subAgentToolDefs({ workspaceTools: true })).includes("workspace"), false);
+    process.env.PILOTSWARM_DISABLE_CHILD_WORKSPACE_INHERITANCE = "0";
+    assert.equal(spawnProps(ManagedSession.subAgentToolDefs({ workspaceTools: true })).includes("workspace"), true, "only 1 turns it off");
+});
+
 test("the deny hook refuses every tool once a workspace change is requested or pending, and is absent otherwise (review R3)", async () => {
     const inner = { onPreToolUse: async () => ({ modifiedArgs: { x: 1 } }) };
     assert.equal(withWorkspaceChangeDeny(inner, null), inner, "no hook without workspace tools");

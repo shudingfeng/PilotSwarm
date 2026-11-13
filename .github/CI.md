@@ -290,6 +290,53 @@ configure their own providers without adopting Microsoft's CI infrastructure.
 Ordinary merges do not deploy the test environment. Deployment remains an
 explicit **Deploy Azure stamp** Action.
 
+## Windows worker pool
+
+The optional Windows worker pool ([Windows workers](../docs/developer/deploy/windows-workers.md))
+needs no cloud credentials to test:
+
+- **PR checks / Basic checks** runs `npm run test:deploy-scripts` on Linux. Besides
+  the deploy scripts' own tests, among them the database role Job's, the
+  coordination host's staging and the CA rotation's, the suite runs the tests
+  of the Azure provider packages: the Key Vault secret store, the disk
+  controller, the coordination host module and the Windows services and
+  scripts, all against fakes.
+- **The database role Job against PostgreSQL**
+  (`deploy/scripts/test/db-role-job-postgres.test.mjs`) is in the suite but
+  skipped unless `PS_TEST_DB_ROLE_JOB_DATABASE_URL` is set, which neither
+  workflow nor `scripts/run-tests.sh` does: it creates schemas and roles as a
+  superuser, and a run's own database need not allow that. Run it against
+  such a PostgreSQL server when you change the Job.
+- **Deploy scripts tests** (`deploy-scripts-tests.yml`) runs the same suite
+  whenever `deploy/providers/azure/deploy-steps/`, `secret-store/`,
+  `disk-controller/`, `linux-worker/` or `windows/`,
+  `packages/sdk/examples/devdrive-workspaces/` or
+  `deploy/Dockerfile.disk-controller` changes, as well as the paths it already
+  watched.
+- **The SDK unit tests,** which include the Dev Drive extension's
+  (`devdrive-workspace-provider.test.mjs`), run in both the Linux and the
+  Windows jobs of PR checks.
+- **A fine-grained GitHub token, live**
+  (`packages/sdk/test/local/fine-grained-token-live.test.js`) is in the local
+  suite but skipped unless `PS_TEST_FINE_GRAINED_GH_PAT` holds a fine-grained
+  token with only the Copilot Requests permission, which no workflow sets. Run
+  it with such a token when you change the fine-grained token gate or the
+  Copilot CLI program's start. The other Copilot CLI program tests need no
+  credentials.
+- **The Windows scripts' tests** parse every PowerShell script when the runner
+  has PowerShell 7. Their Windows-only checks (Windows PowerShell 5.1, the disk
+  script's process search, the drain and the seed's `-Verify` run for real) run
+  only on Windows: the Windows job of PR checks runs
+  `node --test deploy/providers/azure/windows/test/*.test.mjs` after the SDK
+  unit tests.
+
+No workflow deploys a pool. **Deploy Azure stamp** requires `EDGE_MODE=public`
+and an external database, and the pool needs `afd` or `private` and the stamp's
+own PostgreSQL server, so its preflight refuses `WIN_WORKERS_ENABLED=true`. No
+test reaches Azure, a scale set or a data disk; the
+[Windows image README](../deploy/providers/azure/windows/README.md#what-only-a-real-vm-can-verify)
+lists what only a real VM can verify.
+
 ## Release and post-release deployment
 
 Prepare matching package versions, internal dependencies, lockfile and changelog

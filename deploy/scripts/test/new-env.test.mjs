@@ -4,12 +4,14 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 import { renderLocalEnv, deriveTargets, INPUTS, scaffoldFoundryDeploymentsJson } from "../new-env.mjs";
-import { REPO_ROOT } from "../lib/common.mjs";
+import { REPO_ROOT, parseEnvFile } from "../lib/common.mjs";
+import { validateWinWorkersCombo } from "../lib/overlay-contracts.mjs";
 
 const SCRIPT = join(REPO_ROOT, "deploy", "scripts", "new-env.mjs");
 const LOCAL_DIR = join(REPO_ROOT, "deploy", "envs", "local");
@@ -93,6 +95,50 @@ test("renderLocalEnv produces expected substitutions", () => {
   assert.match(out, /^DEPLOY_POSTGRES=true$/m);
   assert.match(out, /^PILOTSWARM_BLOB_USE_MANAGED_IDENTITY=1$/m);
   assert.match(out, /^DATABASE_URL_SECRET_NAME=$/m);
+});
+
+// The rendered file as deploy.mjs reads it: a later line wins.
+function readRendered(text) {
+  const dir = mkdtempSync(join(tmpdir(), "ps-new-env-"));
+  try {
+    writeFileSync(join(dir, ".env"), text);
+    return parseEnvFile(join(dir, ".env"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+const POOL_INPUTS = Object.freeze({
+  name: "foo", subscription: "sub-id", tenantId: "22222222-2222-2222-2222-222222222222", location: "westus3", regionShort: "wus3",
+});
+const POOL_REQUIREMENTS = ["WIN_WORKER_COORDINATION_HOST", "PILOTSWARM_OWNER_ROUTING", "AUTHZ_ENFORCE_OWNERSHIP"];
+
+test("with the pool, the scaffolder also turns on the coordination host, owner routing and enforced ownership, which the deploy requires", () => {
+  const off = deriveTargets(POOL_INPUTS);
+  for (const key of POOL_REQUIREMENTS) assert.ok(!(key in off), `${key} without the pool`);
+  const targets = deriveTargets({ ...POOL_INPUTS, winWorkersEnabled: "yes", winWorkerAlertEmails: "ops@example.com" });
+  assert.deepEqual(Object.fromEntries(POOL_REQUIREMENTS.map((key) => [key, targets[key]])),
+    { WIN_WORKER_COORDINATION_HOST: "true", PILOTSWARM_OWNER_ROUTING: "1", AUTHZ_ENFORCE_OWNERSHIP: "true" });
+
+  const env = readRendered(renderLocalEnv({
+    name: "foo", targets, portalConfig: { PORTAL_AUTH_ENTRA_CLIENT_ID: "11111111-1111-1111-1111-111111111111" },
+  }));
+  assert.equal(env.AUTHZ_ENFORCE_OWNERSHIP, "true", "the portal config block, which comes last, keeps it on");
+  assert.equal(env.WIN_WORKER_COORDINATION_HOST, "true");
+  assert.equal(env.PILOTSWARM_OWNER_ROUTING, "1");
+  assert.deepEqual(validateWinWorkersCombo({ edgeMode: "afd", tlsSource: "letsencrypt", env }), [], "the scaffolded pool deploys");
+});
+
+test("a dispatcher in the portal config gets enforced ownership too; without it or the pool the setting stays as before", () => {
+  const targets = deriveTargets(POOL_INPUTS);
+  const dispatcher = readRendered(renderLocalEnv({ name: "foo", targets, portalConfig: { DISPATCHER_SP_OBJECT_ID: "33333333-3333-3333-3333-333333333333" } }));
+  assert.equal(dispatcher.AUTHZ_ENFORCE_OWNERSHIP, "true");
+  assert.deepEqual(validateWinWorkersCombo({ edgeMode: "afd", tlsSource: "letsencrypt", env: dispatcher }), []);
+  const chosen = readRendered(renderLocalEnv({
+    name: "foo", targets, portalConfig: { DISPATCHER_SP_OBJECT_ID: "33333333-3333-3333-3333-333333333333", AUTHZ_ENFORCE_OWNERSHIP: "false" },
+  }));
+  assert.equal(chosen.AUTHZ_ENFORCE_OWNERSHIP, "false", "an operator's own value stays, and the deploy refuses it");
+  assert.equal(readRendered(renderLocalEnv({ name: "foo", targets })).AUTHZ_ENFORCE_OWNERSHIP, "__PS_UNSET__");
 });
 
 test("scaffolder creates local/<name>/.env (happy path)", () => {

@@ -81,7 +81,9 @@ What you get in a clone:
   pushes to `main`, `master` and `release/*` are refused.
 
 A sub-agent can work in the same clone or in its own:
-`spawn_agent({ task, workspace })`.
+`spawn_agent({ task, workspace })`. A deployment can give sub-agents no
+workspace at all (`PILOTSWARM_DISABLE_CHILD_WORKSPACE_INHERITANCE=1`); they
+then work outside every workspace.
 
 **Push before you stop.** A clone that no session uses for a while is
 removed, and uncommitted or unpushed work goes with it. The reference
@@ -263,7 +265,7 @@ turn them on.
 
 | You see | What it means | What to do |
 |---|---|---|
-| The session waits, and the workspace shows "unavailable" | The folder could not be reached before the turn. Your message is held, not lost | It retries by itself (after 30 s, 2 min, 5 min, then every 15 min). **Retry now** retries at once |
+| The session waits, and the workspace shows "unavailable" | The folder could not be reached before the turn. Your message is held, not lost | It retries by itself (after 30 s, 2 min, 5 min, then every 15 min; sooner for a busy folder when the deployment uses the fast busy policy). **Retry now** retries at once |
 | `WORKSPACE_FOLDER_MISSING` | The folder is gone, for example a clone you removed | Make it again, or set another workspace |
 | `WORKSPACE_PATH_INVALID` | The folder is not allowed, for example another person's folder, or a link out of the root | Use your own folder, or a folder you are allowed to use |
 | `WORKSPACE_BUSY` | A background shell or agent task is running, and the change would stop it | Wait for it, or stop it, then ask again |

@@ -227,8 +227,8 @@ export class HttpApiTransport {
         return this.api.call("createSessionForAgent", { agentName, ...options });
     }
 
-    async deleteSession(sessionId) {
-        return this.api.call("deleteSession", { sessionId });
+    async deleteSession(sessionId, reason, options = {}) {
+        return this.api.call("deleteSession", { sessionId, reason, ...options });
     }
 
     async renameSession(sessionId, title) {
@@ -506,6 +506,14 @@ export class HttpApiTransport {
         return this.api.call("setCurrentUserGitHubCopilotKey", {
             key: typeof key === "string" ? key : null,
         });
+    }
+
+    async getMyDispatcherDelegation() {
+        return this.api.call("getMyDispatcherDelegation");
+    }
+
+    async setMyDispatcherDelegation({ enabled } = {}) {
+        return this.api.call("setMyDispatcherDelegation", { enabled: enabled === true });
     }
 
     async setSystemGitHubCopilotKey({ key } = {}) {

@@ -171,6 +171,45 @@ export async function runMigrations(
     }
 }
 
+/**
+ * `PILOTSWARM_SKIP_DB_MIGRATIONS=1`: this process never changes the schema.
+ * For workers whose database role can't, while another process (a
+ * deployment's migration job) runs the migrations first.
+ */
+export function dbMigrationsSkipped(env: NodeJS.ProcessEnv = process.env): boolean {
+    return env.PILOTSWARM_SKIP_DB_MIGRATIONS === "1";
+}
+
+/**
+ * Instead of migrating: checks that every migration in `migrations` is
+ * recorded, and throws, naming the first missing one, when the schema is
+ * behind this code, so a worker started before the migrations fails at once
+ * rather than on its first query. Later migrations from newer code are fine.
+ */
+export async function assertMigrationsApplied(
+    pool: any,
+    schema: string,
+    migrations: MigrationEntry[],
+    label: string,
+): Promise<void> {
+    let applied = new Set<string>();
+    try {
+        const { rows } = await pool.query(`SELECT version FROM "${schema}".schema_migrations`);
+        applied = new Set(rows.map((row: any) => row.version));
+    } catch (err: any) {
+        // 42P01 undefined_table, 3F000 invalid_schema_name: nothing is migrated.
+        if (err?.code !== "42P01" && err?.code !== "3F000") throw err;
+    }
+    const missing = migrations.filter((migration) => !applied.has(migration.version));
+    if (missing.length > 0) {
+        const more = missing.length > 1 ? ` and ${missing.length - 1} more` : "";
+        throw new Error(
+            `${label} schema "${schema}" lacks migration ${missing[0].version} (${missing[0].name})${more}. `
+            + "PILOTSWARM_SKIP_DB_MIGRATIONS=1 keeps this process from migrating, so run the migrations first.",
+        );
+    }
+}
+
 /** Stable 32-bit hash of a schema name combined with a per-system seed. */
 function hashSchemaName(schema: string, seed: number): number {
     let hash = seed;

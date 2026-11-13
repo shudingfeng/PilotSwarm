@@ -178,7 +178,7 @@ should not silently be re-classified through an email allowlist.## Explicit Role
 The portal matches the JWT `roles` claim by case-insensitive equality
 against exactly two values: `admin` and `user`. There is no aliasing,
 suffix-strip, or override env var — these are the prescriptive canonical
-role values, and the setup script creates exactly these two roles on the
+role values, and `-CreateAppRoles` creates exactly these two roles on the
 app registration.
 
 Admin-before-user precedence is preserved: if a principal's token carries
@@ -189,6 +189,56 @@ role), define a new app role and check the JWT `roles` claim for it
 explicitly in code. Do **not** try to repurpose the built-in admin/user
 buckets for finer-grained roles — extra granularity belongs in new app
 roles checked explicitly, not aliased onto admin/user.
+
+## Roles for Application Identities
+
+`Setup-PortalAuth.ps1 -WorkerRoles` prepares the app registration for
+application identities (service principals, including managed identities)
+that call the deployment's own services. It is off by default; without it,
+the script creates and updates app registrations as before.
+
+| Display name | Value         | Allowed member types | Typical holder |
+| ------------ | ------------- | -------------------- | -------------- |
+| Worker       | `worker`      | Applications         | A worker pool's managed identity |
+| Deployer     | `deployer`    | Applications         | A deployment pipeline's identity |
+| Coordinator  | `coordinator` | Applications         | A coordination service's identity |
+
+The switch also:
+
+- lets applications hold `user` (`"allowedMemberTypes": ["User", "Application"]`),
+  for example an automation service principal that creates sessions for
+  users. `admin` stays users-only.
+- sets `api.requestedAccessTokenVersion` to `2`. Entra then issues v2.0
+  access tokens for the app to every caller, users included. The portal
+  validates v2.0 tokens (issuer `https://login.microsoftonline.com/<tenant-id>/v2.0`,
+  audience = the client ID); anything else that validates this app's
+  tokens must accept them too.
+
+The portal still admits only `admin` and `user`. A token whose `roles`
+claim holds only `worker`, `deployer` or `coordinator` takes the
+role-authoritative branch and is denied (see *Precedence Semantics*); a
+service that accepts these roles checks the claim itself.
+
+To add the roles to an existing app registration:
+
+```bash
+pwsh -NoProfile -ExecutionPolicy Bypass \
+  -File deploy/scripts/auth/Setup-PortalAuth.ps1 \
+  -ExistingAppId <client-id> -WorkerRoles
+```
+
+Rerunning is safe: roles that exist keep their IDs, which role assignments
+refer to; missing roles are added; no role is removed or disabled.
+
+Assign the roles with `Set-PortalAuthAssignments.ps1`: `-WorkerAssignments`,
+`-DeployerAssignments` and `-CoordinatorAssignments` take service principals
+by object ID or application (client) ID, and so does `-UserAssignments`
+once `user` allows applications. Granting an app role to a service
+principal needs an Entra administrator — Cloud Application Administrator or
+Application Administrator — rather than an owner of the app. Assign service
+principals directly: Entra doesn't put a role in a service principal's token
+when the role comes through a group. A managed identity's tokens are
+cached, so a new assignment can take hours to show up in them.
 
 ## Staged Rollout (Fallback Path)
 

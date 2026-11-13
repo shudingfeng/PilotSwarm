@@ -1,0 +1,69 @@
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+# Env-driven replacements for every disk-controller overlay, from the overlay's
+# `disk-controller-env` ConfigMap (built from its `.env`). Listed last in each
+# overlay, after the edge and TLS components whose patches add the Ingress's
+# TLS entry.
+
+replacements:
+  - source:
+      kind: ConfigMap
+      name: disk-controller-env
+      fieldPath: data.IMAGE
+    targets:
+      - select:
+          kind: Deployment
+          name: pilotswarm-disk-controller
+        fieldPaths:
+          - spec.template.spec.containers.[name=disk-controller].image
+
+  - source:
+      kind: ConfigMap
+      name: disk-controller-env
+      fieldPath: data.WORKLOAD_IDENTITY_CLIENT_ID
+    targets:
+      - select:
+          kind: ServiceAccount
+          name: pilotswarm-disk-controller
+        fieldPaths:
+          - metadata.annotations.[azure.workload.identity/client-id]
+      - select:
+          kind: SecretProviderClass
+          name: pilotswarm-disk-controller-tls
+        fieldPaths:
+          - spec.parameters.clientID
+
+  - source:
+      kind: ConfigMap
+      name: disk-controller-env
+      fieldPath: data.KV_NAME
+    targets:
+      - select:
+          kind: SecretProviderClass
+          name: pilotswarm-disk-controller-tls
+        fieldPaths:
+          - spec.parameters.keyvaultName
+
+  - source:
+      kind: ConfigMap
+      name: disk-controller-env
+      fieldPath: data.AZURE_TENANT_ID
+    targets:
+      - select:
+          kind: SecretProviderClass
+          name: pilotswarm-disk-controller-tls
+        fieldPaths:
+          - spec.parameters.tenantId
+
+  - source:
+      kind: ConfigMap
+      name: disk-controller-env
+      fieldPath: data.PORTAL_HOSTNAME
+    targets:
+      - select:
+          kind: Ingress
+          name: pilotswarm-disk-controller-dispatcher
+        fieldPaths:
+          - spec.rules.0.host
+          - spec.tls.0.hosts.0

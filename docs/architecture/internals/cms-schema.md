@@ -35,7 +35,9 @@ deleted session's Workflows. Migration `0089`
 (`migrations/workflow-session-names-0089.ts`) names the session-owned
 definitions' tables `session_workflow_*` (definitions, revisions, operations,
 seen, notes), the pin columns `session_definition_id` and `session_revision`, and
-the trigger `workflow_owner_session_ended`, in one transaction. Every statement
+the trigger `workflow_owner_session_ended`, in one transaction. Migration `0090`
+(`migrations/dispatcher-delegation-0090.ts`) adds each user's dispatcher-delegation
+opt-in, `users.allow_dispatcher_delegation`, and its two stored procedures. Every statement
 is idempotent; fresh and existing databases converge to the same shape.
 
 ## Table: `sessions`
@@ -116,7 +118,7 @@ connection and also looks every 5 s while a turn runs.
 | `session_groups` / `session_group_owners` | session groups + per-user ownership (groups are private per-user organization) |
 | `user_session_group_placements` | migration 0034: `(user_id, root_session_id) → group_id` — each viewer's private placement of a session tree in one of their own groups; composite FK into `session_group_owners` makes cross-user placement structurally impossible |
 | `session_child_outcomes` | terminal outcomes of sub-agents for parent digests |
-| `users` / `session_owners` | principals, per-user profile/keys, session ownership |
+| `users` / `session_owners` | principals, per-user profile/keys, the dispatcher-delegation opt-in (`allow_dispatcher_delegation`, migration `0090`), session ownership |
 
 ## The catalog client
 

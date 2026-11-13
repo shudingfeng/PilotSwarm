@@ -1,0 +1,45 @@
+# The dispatcher's way in: the dispatcher's path prefixes on the portal's host,
+# through the portal's edge (App Gateway or the app-routing NGINX), to the
+# dispatcher port. It is an Ingress of its own because an Ingress's annotations
+# apply to every backend it names, so the portal's backend and probe settings
+# stay as they are. Its paths join the portal's HTTPS listener, so it carries
+# the portal Ingress's listener and certificate settings (class, private IP,
+# redirect, the whole TLS entry and, for a Key Vault certificate, the App
+# Gateway certificate), which the edge and TLS components add. It never carries
+# cert-manager's cluster-issuer annotation, so the portal's certificate is not
+# issued twice.
+#
+# `GET /disk-pool/v1/healthz` is not routed: App Gateway sends its probe to the
+# pod directly, and an internet request for that path reaches the portal.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: pilotswarm-disk-controller-dispatcher
+  labels:
+    app.kubernetes.io/name: pilotswarm
+    app.kubernetes.io/component: disk-controller
+  annotations: {}
+spec:
+  ingressClassName: __INGRESS_CLASS__
+  tls:
+    - secretName: __TLS_SECRET_NAME__
+      hosts:
+        - __PORTAL_HOSTNAME__
+  rules:
+    - host: __PORTAL_HOSTNAME__
+      http:
+        paths:
+          - path: /disk-pool/v1/disks/
+            pathType: Prefix
+            backend:
+              service:
+                name: pilotswarm-disk-controller-dispatcher
+                port:
+                  number: 3004
+          - path: /disk-pool/v1/owners/
+            pathType: Prefix
+            backend:
+              service:
+                name: pilotswarm-disk-controller-dispatcher
+                port:
+                  number: 3004

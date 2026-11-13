@@ -619,6 +619,61 @@ describe("workspace turn", () => {
         }
     });
 
+    it("with children's workspaces off, an omitted or null workspace gives the child none and a record is refused before any child exists", { timeout: TIMEOUT }, async () => {
+        const env = getEnv();
+        const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ps-ws-no-child-")));
+        fs.mkdirSync(path.join(root, "repo-x"));
+        fs.mkdirSync(path.join(root, "repo-y"));
+        const provider = createFakeWorkspaceProvider({ roots: [{ name: "a", path: root }] });
+        // Keyed on the prompt and the sub-agent preamble, not on turn numbers,
+        // so a reminder the CLI adds as an extra user message changes nothing.
+        const spawns = [
+            { name: "spawn_agent", args: { task: "child-omitted: say done" } },
+            { name: "spawn_agent", args: { task: "child-null: say done", workspace: null } },
+            { name: "spawn_agent", args: { task: "child-record: say done", workspace: { root: "a", folder: "repo-y" } } },
+        ];
+        const respond = (body, position) => {
+            if (systemText(body).includes("SUB-AGENT CONTEXT")) return { content: "done" };
+            if (!position.lastUserText.includes("spawn the three")) return { content: "ok" };
+            if (position.step === 0) return { tools: spawns };
+            return { content: `spawned:${JSON.stringify(position.toolResults)}` };
+        };
+        const saved = process.env.PILOTSWARM_DISABLE_CHILD_WORKSPACE_INHERITANCE;
+        process.env.PILOTSWARM_DISABLE_CHILD_WORKSPACE_INHERITANCE = "1";
+        try {
+            await withScriptedModel(env, { respond, worker: { workspaceProvider: provider } }, async ({ client, model, qualifiedModel }) => {
+                const parentId = randomUUID();
+                const parent = await client.createSession({ sessionId: parentId, model: qualifiedModel, workspace: { root: "a", folder: "repo-x" } });
+                const answer = await parent.sendAndWait("spawn the three", TIMEOUT);
+                const results = JSON.parse(answer.slice("spawned:".length));
+                assertEqual(results.filter((text) => text.includes("Sub-agent spawned successfully")).length, 2, `two spawns: ${answer}`);
+                const refused = results.filter((text) => text.includes("WORKSPACE_PATH_INVALID"));
+                assertEqual(refused.length, 1, `the record is refused: ${answer}`);
+                const spawnTool = model.sessionRequests()[0].body.tools.find((tool) => tool.function?.name === "spawn_agent");
+                assertEqual(Object.hasOwn(spawnTool.function.parameters.properties, "workspace"), false,
+                    "the model is not offered a workspace for its children");
+
+                const catalog = await createCatalog(env);
+                try {
+                    const spawned = (await catalog.getSessionEvents(parentId)).filter((e) => e.eventType === "session.agent_spawned");
+                    assertEqual(spawned.length, 2, "the refused spawn created no child");
+                    for (const event of spawned) {
+                        const childId = event.data.childSessionId;
+                        const changes = (await catalog.getSessionEvents(childId)).filter((e) => e.eventType === "session.workspace_changed");
+                        assertEqual(changes.length, 0, `${event.data.task}: no workspace at all, not even the parent's`);
+                        assertEqual(provider.callsFor("ensureAttached", { sessionId: childId }).length, 0);
+                    }
+                } finally {
+                    await catalog.close?.();
+                }
+            });
+        } finally {
+            if (saved === undefined) delete process.env.PILOTSWARM_DISABLE_CHILD_WORKSPACE_INHERITANCE;
+            else process.env.PILOTSWARM_DISABLE_CHILD_WORKSPACE_INHERITANCE = saved;
+            fs.rmSync(root, { recursive: true, force: true });
+        }
+    });
+
     it("a retried turn in a workspace session gets the partial-changes note; a plain session's retry does not (F6)", { timeout: TIMEOUT }, async () => {
         const env = getEnv();
         const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ps-ws-f6-")));

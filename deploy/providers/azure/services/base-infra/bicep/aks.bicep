@@ -60,7 +60,7 @@ param aksControlPlaneIdentityResourceId string
 @description('Principal (object) ID of the AKS control-plane UAMI. Used for the Managed Identity Operator role assignment on the kubelet UAMI.')
 param aksControlPlaneIdentityPrincipalId string
 
-@description('Optional stamp-owned static public IP used for AKS egress to HorizonDB.')
+@description('Optional stamp-owned static public IP for AKS egress, applied in every edge mode. Firewalls and the network security perimeter admit only this address (HorizonDB in public mode, PostgreSQL and the perimeter with AZURE_POLICY_RESTRICTED=true, PostgreSQL with the Windows worker pool).')
 param outboundPublicIpId string = ''
 
 @description('System node pool VM size.')
@@ -204,10 +204,13 @@ resource aks 'Microsoft.ContainerService/managedClusters@2024-05-01' = {
       ]
       loadBalancerSku: 'standard'
       outboundType: 'loadBalancer'
-    }, edgeMode == 'public' ? union({
+    }, edgeMode == 'public' ? {
       // Without a custom subnet, use Azure CNI Overlay on the AKS-managed VNet.
       networkPluginMode: 'overlay'
-    }, empty(outboundPublicIpId) ? {} : {
+    } : {}, empty(outboundPublicIpId) ? {} : {
+      // A stamp-owned egress IP in any edge mode: main.bicep passes one only
+      // for public mode with HorizonDB, with AZURE_POLICY_RESTRICTED=true or with the
+      // Windows worker pool.
       loadBalancerProfile: {
         outboundIPs: {
           publicIPs: [
@@ -215,7 +218,7 @@ resource aks 'Microsoft.ContainerService/managedClusters@2024-05-01' = {
           ]
         }
       }
-    }) : {})
+    })
     securityProfile: {
       workloadIdentity: {
         enabled: true

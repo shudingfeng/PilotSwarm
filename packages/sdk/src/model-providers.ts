@@ -16,6 +16,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import type { ExternalSecretRef } from "./personal-secret-store.js";
 
 // ─── Types ───────────────────────────────────────────────────────
 
@@ -165,6 +166,21 @@ export interface ModelProviderConfig {
      */
     githubToken?: string;
     /**
+     * Where a provider row's GitHub token is kept when it lives in the
+     * deployment's secret store (PILOTSWARM_PERSONAL_SECRETS=external): a
+     * reference, never the token. Set only by the provider catalog for a
+     * provider row; a model-providers file cannot set it.
+     */
+    externalSecret?: ExternalSecretRef;
+    /**
+     * With PILOTSWARM_PERSONAL_SECRETS=external, a personal provider whose
+     * GitHub token is still in its database row, saved before the setting was
+     * turned on. Workers don't use that token: the provider's turns fail
+     * until its owner updates the key, which moves it to the secret store.
+     * Set only by the provider catalog; a model-providers file cannot set it.
+     */
+    databaseKeyIgnored?: true;
+    /**
      * API endpoint URL. Required for non-github providers.
      * For Azure: base URL without /deployments/ (e.g. https://resource.openai.azure.com/openai)
      * For OpenAI: https://api.openai.com/v1
@@ -249,6 +265,14 @@ export interface ResolvedProvider {
     modelName: string;
     /** Resolved GitHub token (type=github only). */
     githubToken?: string;
+    /**
+     * Set instead of `githubToken` when the token lives in the deployment's
+     * secret store: each turn resolves it through the worker's personal
+     * credential resolver, and nothing else stands in for it.
+     */
+    externalSecret?: ExternalSecretRef;
+    /** See ModelProviderConfig.databaseKeyIgnored: no token, and nothing stands in for it. */
+    databaseKeyIgnored?: true;
     /**
      * True when this provider authenticates as the worker rather than with a
      * key, so `sdkProvider` carries no `apiKey` and is incomplete on its own.
@@ -413,13 +437,22 @@ export class ModelProviderRegistry {
     private _defaultModel: string | undefined;
     private _allDescriptors: ModelDescriptor[] = [];
 
-    constructor(config: ModelProvidersFile, opts: { keepUncredentialed?: boolean } = {}) {
+    constructor(config: ModelProvidersFile, opts: { keepUncredentialed?: boolean; externalSecrets?: boolean } = {}) {
         const configuredDefaultModel = config.defaultModel;
         this._defaultModel = configuredDefaultModel;
 
         // Checked before the credential filter below, so a bad entry fails
         // the load whether or not its key happens to be set.
         for (const p of config.providers) validateProviderHeaders(p);
+        // A secret-store reference belongs to a provider row. Only the
+        // runtime registry, built from those rows, may carry one.
+        if (!opts.externalSecrets) {
+            const named = config.providers.find((p) => p.externalSecret !== undefined || p.databaseKeyIgnored !== undefined);
+            if (named) {
+                const field = named.externalSecret !== undefined ? "externalSecret" : "databaseKeyIgnored";
+                throw new Error(`Provider "${named.id}": ${field} is not a model-providers setting.`);
+            }
+        }
 
         // Filter to providers whose credentials are actually available.
         // GitHub providers are kept even without an env token because a
@@ -563,6 +596,8 @@ export class ModelProviderRegistry {
                 type: "github",
                 modelName: desc.modelName,
                 githubToken: resolveEnvValue(provider.githubToken),
+                ...(provider.externalSecret ? { externalSecret: { ...provider.externalSecret } } : {}),
+                ...(provider.databaseKeyIgnored ? { databaseKeyIgnored: true as const } : {}),
             };
         }
 

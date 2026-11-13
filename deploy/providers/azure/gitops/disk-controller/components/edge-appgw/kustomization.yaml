@@ -1,0 +1,80 @@
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+# Edge mode afd: App Gateway with AGIC, behind Front Door.
+#
+# The dispatcher Ingress joins the portal's listener on the App Gateway, so it
+# copies the portal Ingress's listener settings from the portal's edge-appgw
+# component: the class, `use-private-ip`, `ssl-redirect`, the TLS entry with
+# the same sentinel Secret name, and `appgw-ssl-certificate` for a Key Vault
+# certificate (tls-letsencrypt removes it again). It copies none of the portal's
+# backend or probe annotations: they name the portal's host, which the
+# controller's certificate does not carry, so the probe would fail and every
+# dispatcher call would get 502.
+#
+# App Gateway opens its own TLS connection to the pod:
+#   - backend-hostname and health-probe-hostname: the dispatcher Service's
+#     cluster DNS name, which the controller's leaf names (its common name too).
+#     It must match the overlay's namespace;
+#   - health-probe-path and -port: the health route on the dispatcher port,
+#     which answers 200 without a token;
+#   - appgw-trusted-root-certificate: the App Gateway trusted roots that hold
+#     the controller's trusted CAs, comma-separated: the current CA's, and
+#     during a CA rotation the next or the previous one's too. The Windows
+#     worker deploy step finds the root that holds each CA, whatever its name,
+#     or uploads one named after the CA's content, before these manifests are
+#     published (an App Gateway update that names a missing root fails), and
+#     lists them in the overlay's APPGW_TRUSTED_ROOT_CERTS.
+#
+# The NetworkPolicy admits the dispatcher port from App Gateway's subnet only.
+
+resources:
+  - network-policy-dispatcher.yaml
+
+patches:
+  - target:
+      kind: Ingress
+      name: pilotswarm-disk-controller-dispatcher
+    patch: |-
+      apiVersion: networking.k8s.io/v1
+      kind: Ingress
+      metadata:
+        name: pilotswarm-disk-controller-dispatcher
+        annotations:
+          appgw.ingress.kubernetes.io/use-private-ip: "true"
+          appgw.ingress.kubernetes.io/ssl-redirect: "true"
+          appgw.ingress.kubernetes.io/backend-protocol: "https"
+          appgw.ingress.kubernetes.io/backend-hostname: pilotswarm-disk-controller-dispatcher.pilotswarm.svc
+          appgw.ingress.kubernetes.io/health-probe-hostname: pilotswarm-disk-controller-dispatcher.pilotswarm.svc
+          appgw.ingress.kubernetes.io/health-probe-path: "/disk-pool/v1/healthz"
+          appgw.ingress.kubernetes.io/health-probe-port: "3004"
+          appgw.ingress.kubernetes.io/appgw-trusted-root-certificate: __APPGW_TRUSTED_ROOT_CERTS__
+          appgw.ingress.kubernetes.io/appgw-ssl-certificate: __PORTAL_TLS_CERT_NAME__
+      spec:
+        ingressClassName: azure-application-gateway
+        tls:
+          - secretName: pilotswarm-portal-tls-appgw-ref
+            hosts:
+              - __PORTAL_HOSTNAME__
+
+replacements:
+  - source:
+      kind: ConfigMap
+      name: disk-controller-env
+      fieldPath: data.APPGW_TRUSTED_ROOT_CERTS
+    targets:
+      - select:
+          kind: Ingress
+          name: pilotswarm-disk-controller-dispatcher
+        fieldPaths:
+          - metadata.annotations.[appgw.ingress.kubernetes.io/appgw-trusted-root-certificate]
+  - source:
+      kind: ConfigMap
+      name: disk-controller-env
+      fieldPath: data.PORTAL_TLS_CERT_NAME
+    targets:
+      - select:
+          kind: Ingress
+          name: pilotswarm-disk-controller-dispatcher
+        fieldPaths:
+          - metadata.annotations.[appgw.ingress.kubernetes.io/appgw-ssl-certificate]

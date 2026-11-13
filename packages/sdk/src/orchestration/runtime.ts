@@ -17,6 +17,7 @@ import {
     MAX_ITERATIONS_PER_EXECUTION,
     createInitialState,
     deriveOptions,
+    sessionRouting,
     type DurableSessionRuntime,
 } from "./state.js";
 
@@ -145,7 +146,7 @@ export function* resolveTopLevelAgentConfig(runtime: DurableSessionRuntime): Gen
         }
         if (agentDef.crawler === true) state.config.isCrawler = true;
         if (agentDef.harvester === true) state.config.isHarvester = true;
-        runtime.session = createSessionProxy(runtime.ctx, input.sessionId, state.affinityKey, state.config, "workflow-intake-v1");
+        runtime.session = createSessionProxy(runtime.ctx, input.sessionId, state.affinityKey, state.config, "workflow-intake-v1", sessionRouting(options));
     }
 }
 
@@ -173,7 +174,7 @@ export function* createRuntime(
     state.lastCommandVersion = readCounter(ctx, COMMAND_VERSION_KEY);
 
     const manager = createSessionManagerProxy(ctx, "workflow-intake-v1", { childResultProvenance: true });
-    const session = createSessionProxy(ctx, input.sessionId, state.affinityKey, state.config, "workflow-intake-v1");
+    const session = createSessionProxy(ctx, input.sessionId, state.affinityKey, state.config, "workflow-intake-v1", sessionRouting(options));
 
     const runtime: DurableSessionRuntime = { ctx, input, versions, manager, session, state, options };
 

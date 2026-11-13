@@ -48,6 +48,8 @@ jobs:
         run: Copy-Item .model_providers.example.json .model_providers.json
       - shell: bash
         run: npm run test:unit --workspace=pilotswarm-sdk
+      - name: Windows worker image tests
+        run: node --test deploy/providers/azure/windows/test/*.test.mjs
       - name: Validation campaign unit tests
         run: |
           npm run test:campaign:unit

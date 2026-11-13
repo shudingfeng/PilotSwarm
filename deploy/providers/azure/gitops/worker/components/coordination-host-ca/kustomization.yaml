@@ -1,0 +1,22 @@
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+# The disk controller's CA bundle on the coordination host's pod template,
+# while a CA rotation has the controller trust two CAs: the deploy tool adds
+# this component after `coordination-host` and writes the SHA-256 of the
+# bundle into the annotation below (deploy/scripts/lib/coordination-host.mjs).
+# The host reads NODE_EXTRA_CA_CERTS only when it starts, so a changed bundle
+# must roll its pods; the CA rotation's promote checks the annotation. With
+# one CA the component is left out, and the pod template stays as it was.
+
+patches:
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: copilot-runtime-worker
+      spec:
+        template:
+          metadata:
+            annotations:
+              pilotswarm.dev/disk-controller-ca-sha256: __DISK_CONTROLLER_CA_SHA256__

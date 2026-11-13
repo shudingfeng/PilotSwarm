@@ -143,6 +143,79 @@ param tenantId string = ''
 @description('Portal short hostname (e.g. psmystamp-wus3-portal), threaded from the deploy-time PORTAL_RESOURCE_NAME env var. Used as the A-record label in the VPN-mode private DNS zone so VPN clients resolve the SAME hostname the AppGw listener serves (matching the AKV cert subject portalResourceName.sslCertificateDomainSuffix set in portal/bicep/main.bicep). Empty default keeps non-VPN stamps byte-equivalent.')
 param portalResourceName string = ''
 
+// ----- AZURE_POLICY_RESTRICTED profile (additive, optional) ----------------------------
+// For subscriptions whose Azure Policy requires a network security perimeter
+// and denies Storage shared keys and deployment scripts. deploy/scripts/lib/
+// render-params.mjs passes these parameters only with AZURE_POLICY_RESTRICTED=true;
+// their defaults leave the stamp unchanged.
+
+@description('AZURE_POLICY_RESTRICTED profile (EDGE_MODE=afd): a network security perimeter for the stamp Key Vault and storage account, explicit subnet NSGs, a blob private endpoint, the pinned cluster egress IP in every edge mode, Entra-only PostgreSQL behind an egress-only firewall, no shared-key Storage access, and no deployment script: deploy/providers/azure/deploy-steps/policy-restricted.mjs probes for the App Gateway instead.')
+param policyRestricted bool = false
+
+@description('AZURE_POLICY_RESTRICTED profile: public IPv4 CIDR prefixes that the perimeter admits besides the cluster egress IP and the stamp subscription (PERIMETER_OPERATOR_IP_PREFIXES).')
+param perimeterOperatorIpPrefixes array = []
+
+@description('AZURE_POLICY_RESTRICTED profile: whether the App Gateway already exists, from the deploy step\'s probe. Without the profile, check-appgw-exists.bicep answers this.')
+param appGwExists bool = false
+
+// ----- Windows worker pool (additive, optional) ------------------------------
+// deploy/scripts/lib/render-params.mjs passes these parameters only with
+// WIN_WORKERS_ENABLED=true, from the env file and from the Windows worker
+// deploy step (deploy/providers/azure/deploy-steps/win-workers.mjs); their
+// defaults leave the stamp unchanged.
+
+@description('Windows worker pool (EDGE_MODE afd or private): the gallery, the scale set and its standby pool, the disk controller\'s identity, vaults and state account, the worker subnet with its NAT gateway and NSG, private endpoints, Entra-only PostgreSQL behind an egress-only firewall, container-scoped blob grants and the pool\'s security alerts.')
+param winWorkersEnabled bool = false
+
+@description('Windows worker pool: X, the most VMs (WIN_WORKER_COUNT).')
+@minValue(1)
+param winWorkerCount int = 5
+
+@description('Windows worker pool: Y, the scale set\'s capacity when it is created (WIN_WORKER_MIN_RUNNING).')
+@minValue(0)
+param winWorkerMinRunning int = 1
+
+@description('Windows worker pool: deallocated VMs the standby pool keeps ready (WIN_WORKER_STANDBY_MIN).')
+@minValue(0)
+param winWorkerStandbyMin int = 1
+
+@description('Windows worker pool: the VMs\' size (WIN_WORKER_VM_SIZE).')
+param winWorkerVmSize string = 'Standard_D16ds_v5'
+
+@description('Windows worker pool: the gallery image version (WIN_WORKER_IMAGE_VERSION). Empty: no scale set or standby pool yet.')
+param winWorkerImageVersion string = ''
+
+@description('Windows worker pool: whether the scale set exists, from the deploy step. True leaves it to the deploy step\'s model PATCH, so a deploy never writes its capacity.')
+param winWorkerScaleSetExists bool = false
+
+@description('Windows worker pool: the VMs\' shared local administrator password, from the deploy-only vault; passed only when the scale set is created.')
+@secure()
+param winWorkerAdminPassword string = ''
+
+@description('Windows worker pool: the VMs\' userData (base64), rendered by render-params.mjs.')
+param winWorkerUserData string = ''
+
+@description('Windows worker pool: the configuration version in that userData, for the disk controller.')
+param winWorkerConfigVersion string = ''
+
+@description('Windows worker pool: email receivers of the pool\'s alerts (WIN_WORKER_ALERT_EMAILS).')
+param winWorkerAlertEmails array = []
+
+@description('Windows worker pool: name (GUID) of the custom role definition "PilotSwarm Disk Pool Controller", which the subscription owner creates.')
+param diskPoolControllerRoleId string = ''
+
+@description('Windows worker pool: name (GUID) of the custom role definition "PilotSwarm Worker Subnet Join".')
+param workerSubnetJoinRoleId string = ''
+
+@description('Windows worker pool: name (GUID) of the custom role definition "PilotSwarm Personal Secret Writer".')
+param personalVaultWriterRoleId string = ''
+
+@description('Windows worker pool: object ID of the standby pool resource provider\'s service principal.')
+param standbyPoolPrincipalId string = ''
+
+@description('Windows worker pool: the Linux worker becomes the coordination host (WIN_WORKER_COORDINATION_HOST=true). It gets its own identity, federated with the worker\'s service account instead of the portal\'s identity, with container-scoped Blob and Foundry grants, and the alert on capacity requests the disk controller leaves unanswered.')
+param winWorkerCoordinationHost bool = false
+
 // ==============================================================================
 // Derived names
 // ==============================================================================
@@ -186,6 +259,38 @@ var keyVaultName = '${alphaPrefix}kv'
 var applicationGatewayName = '${resourceNamePrefix}-appgw'
 var logAnalyticsName = '${resourceNamePrefix}-log'
 var foundryAccountName = '${resourceNamePrefix}-aif'
+var perimeterName = '${resourceNamePrefix}-nsp'
+var logAnalyticsNspName = '${resourceNamePrefix}-log-nsp'
+// Windows worker pool. Key Vault and storage account names stay within 24
+// characters for any prefix the scaffolder makes (ps + up to 15).
+var personalKeyVaultName = '${alphaPrefix}kvpers'
+var deployKeyVaultName = '${alphaPrefix}kvdep'
+var controllerStorageAccountName = '${alphaPrefix}poolsa'
+var winWorkerDcrName = '${resourceNamePrefix}-win-worker-dcr'
+
+// The cluster's pinned egress IP. HorizonDB's firewall (public mode) and the
+// AZURE_POLICY_RESTRICTED profile's perimeter and PostgreSQL firewall admit only it, and
+// so does the Windows worker pool's PostgreSQL firewall.
+var clusterEgressIpEnabled = (edgeMode == 'public' && horizonDbEnabled) || policyRestricted || winWorkersEnabled
+
+// PostgreSQL takes Entra sign-in only from the stamp's egress addresses with
+// the AZURE_POLICY_RESTRICTED profile or the Windows worker pool.
+var postgresEgressOnly = policyRestricted || winWorkersEnabled
+
+// The private endpoint subnet and the main storage account's blob private
+// endpoint: the AZURE_POLICY_RESTRICTED profile and the Windows worker pool.
+var privateEndpointsEnabled = policyRestricted || winWorkersEnabled
+
+// The main storage account's blob private endpoint, at a fixed address in
+// pe-subnet (vnet.bicep) so network rules can name it.
+var storageBlobPrivateEndpointIp = '10.20.33.4'
+
+// Windows worker pool: the controller's state account's blob private endpoint
+// and the personal vault's, beside it; and the controller's worker port, the
+// internal load balancer address that its manifests pin in aks-subnet.
+var controllerStorageBlobPrivateEndpointIp = '10.20.33.5'
+var personalKeyVaultPrivateEndpointIp = '10.20.33.6'
+var diskControllerWorkerPortIp = '10.20.15.250'
 
 // ==============================================================================
 // UAMIs (must exist before AKS so kubelet identity can be bound).
@@ -196,6 +301,8 @@ module Uami './uami.bicep' = {
   params: {
     location: location
     resourceNamePrefix: resourceNamePrefix
+    winWorkersEnabled: winWorkersEnabled
+    coordinationHostEnabled: winWorkerCoordinationHost
   }
 }
 
@@ -219,6 +326,11 @@ module Vnet './vnet.bicep' = if (edgeMode != 'public') {
     dnsServers: vpnGatewayEnabled ? [
       '10.20.19.4'
     ] : []
+    policyRestricted: policyRestricted
+    winWorkersEnabled: winWorkersEnabled
+    diskControllerWorkerPortIp: diskControllerWorkerPortIp
+    storageBlobPrivateEndpointIp: storageBlobPrivateEndpointIp
+    vpnClientAddressPool: vpnClientAddressPool
   }
 }
 
@@ -238,10 +350,12 @@ module ApproverRgReaderRbac './approver-rg-reader-rbac.bicep' = {
 // ==============================================================================
 // Probe whether the AppGw already exists in the RG. Drives the AGIC config
 // preservation flag in `application-gateway.bicep`. Skipped in private
-// mode — there is no AppGw.
+// mode — there is no AppGw. Skipped with AZURE_POLICY_RESTRICTED too: the probe is a
+// deployment script, which needs Storage shared keys, so the deploy step
+// probes instead and passes `appGwExists`.
 // ==============================================================================
 
-module ApplicationGatewayExistsCheck './check-appgw-exists.bicep' = if (edgeMode == 'afd') {
+module ApplicationGatewayExistsCheck './check-appgw-exists.bicep' = if (edgeMode == 'afd' && !policyRestricted) {
   name: '${resourceNamePrefix}-check-appgw-${dTime}'
   params: {
     location: location
@@ -270,7 +384,7 @@ module AppGateway './application-gateway.bicep' = if (edgeMode == 'afd') {
     wafMode: wafMode
     availabilityZones: availabilityZones
     userAssignedIdentityId: Uami.outputs.appGwIdentityResourceId
-    appGwExists: ApplicationGatewayExistsCheck!.outputs.exists
+    appGwExists: policyRestricted ? appGwExists : ApplicationGatewayExistsCheck!.outputs.exists
     logAnalyticsWorkspaceResourceId: LogAnalytics.outputs.workspaceId
     appgwWafCustomRules: appgwWafCustomRules
     vpnGatewayEnabled: vpnGatewayEnabled
@@ -311,9 +425,12 @@ module AksControlPlaneRbac './aks-controlplane-rbac.bicep' = if (edgeMode != 'pu
   }
 }
 
-// HorizonDB public access is restricted to this stable AKS egress address.
-// The IP is owned by the stamp resource group, not by the AKS node resource group.
-resource horizonEgressIp 'Microsoft.Network/publicIPAddresses@2024-05-01' = if (edgeMode == 'public' && horizonDbEnabled) {
+// The cluster's pinned egress IP (clusterEgressIpEnabled): HorizonDB in public
+// mode, and the AZURE_POLICY_RESTRICTED profile and the Windows worker pool in every edge
+// mode. The IP is owned by
+// the stamp resource group, not by the AKS node resource group. It keeps its
+// first name, so a stamp that already has it keeps its address.
+resource horizonEgressIp 'Microsoft.Network/publicIPAddresses@2024-05-01' = if (clusterEgressIpEnabled) {
   name: '${resourceNamePrefix}-hdb-egress'
   location: location
   sku: {
@@ -329,7 +446,7 @@ resource networkContributorRoleDef 'Microsoft.Authorization/roleDefinitions@2022
   name: '4d97b98b-1d4f-4787-a291-c67834d212e7'
 }
 
-resource horizonEgressIpRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (edgeMode == 'public' && horizonDbEnabled) {
+resource horizonEgressIpRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (clusterEgressIpEnabled) {
   name: guid(horizonEgressIp!.id, 'hdb-egress-network-contributor')
   scope: horizonEgressIp!
   properties: {
@@ -432,13 +549,15 @@ module Aks './aks.bicep' = {
     kubeletIdentityPrincipalId: Uami.outputs.kubeletIdentityPrincipalId
     aksControlPlaneIdentityResourceId: Uami.outputs.aksControlPlaneIdentityResourceId
     aksControlPlaneIdentityPrincipalId: Uami.outputs.aksControlPlaneIdentityPrincipalId
-    outboundPublicIpId: (edgeMode == 'public' && horizonDbEnabled) ? horizonEgressIp!.id : ''
+    outboundPublicIpId: clusterEgressIpEnabled ? horizonEgressIp!.id : ''
     availabilityZones: availabilityZones
     logAnalyticsWorkspaceResourceId: LogAnalytics.outputs.workspaceId
     userPoolMinCount: userPoolMinCount
     repoCachePoolEnabled: repoCachePoolEnabled
   }
-  dependsOn: edgeMode == 'public' ? (horizonDbEnabled ? [horizonEgressIpRole] : []) : [AksControlPlaneRbac]
+  dependsOn: edgeMode == 'public'
+    ? (clusterEgressIpEnabled ? [horizonEgressIpRole] : [])
+    : (clusterEgressIpEnabled ? [AksControlPlaneRbac, horizonEgressIpRole] : [AksControlPlaneRbac])
 }
 
 // ==============================================================================
@@ -471,6 +590,12 @@ module UamiFederation './uami-federation.bicep' = {
     csiIdentityName: Uami.outputs.csiIdentityName
     oidcIssuerUrl: Aks.outputs.oidcIssuerUrl
     serviceAccountNamespace: serviceAccountNamespace
+    // Empty without the Windows worker pool: no credential is added.
+    diskControllerIdentityName: Uami.outputs.diskControllerIdentityName
+    // With the pool, the CSI identity gets no worker-fedcred.
+    winWorkersEnabled: winWorkersEnabled
+    // Empty without the coordination host.
+    coordinationHostIdentityName: Uami.outputs.coordinationIdentityName
   }
 }
 
@@ -503,6 +628,10 @@ module Storage './storage.bicep' = {
     workerWorkloadPrincipalId: Uami.outputs.csiIdentityPrincipalId
     localDeploymentPrincipalId: localDeploymentPrincipalId
     localDeploymentPrincipalType: localDeploymentPrincipalType
+    policyRestricted: policyRestricted
+    winWorkersEnabled: winWorkersEnabled
+    winWorkerPrincipalId: Uami.outputs.winWorkerIdentityPrincipalId
+    coordinationHostPrincipalId: Uami.outputs.coordinationIdentityPrincipalId
   }
 }
 
@@ -518,7 +647,9 @@ module Postgres './postgres.bicep' = if (deployPostgres) {
     aadAdminPrincipalId: Uami.outputs.csiIdentityPrincipalId
     aadAdminPrincipalName: Uami.outputs.csiIdentityName
     aadAdminPrincipalType: 'ServicePrincipal'
-    aadOnly: edgeMode == 'public'
+    aadOnly: edgeMode == 'public' || postgresEgressOnly
+    clusterEgressIpAddress: postgresEgressOnly ? horizonEgressIp!.properties.ipAddress : ''
+    winWorkerEgressIpAddress: winWorkersEnabled ? Vnet!.outputs.winWorkersNatIpAddress : ''
   }
 }
 
@@ -536,7 +667,167 @@ module KeyVault './keyvault.bicep' = {
     localDeploymentPrincipalId: localDeploymentPrincipalId
     localDeploymentPrincipalType: localDeploymentPrincipalType
     templateDeploymentEnabled: horizonDbEnabled
+    policyRestricted: policyRestricted
   }
+}
+
+// ==============================================================================
+// AZURE_POLICY_RESTRICTED profile: the network security perimeter around the stamp Key
+// Vault and the main storage account, and the perimeter's log workspace.
+// Skipped without the profile. The account's blob private endpoint comes with
+// the profile or the Windows worker pool.
+// ==============================================================================
+
+// A perimeter resource's diagnostic logs must go to a destination in the same
+// perimeter, so the perimeter gets its own workspace. The main workspace stays
+// outside the perimeter, unchanged.
+module LogAnalyticsNsp '../../common/bicep/log-analytics.bicep' = if (policyRestricted) {
+  name: '${resourceNamePrefix}-log-nsp-${dTime}'
+  params: {
+    location: location
+    workspaceName: logAnalyticsNspName
+    retentionInDays: logAnalyticsRetentionDays
+  }
+}
+
+module Nsp './nsp.bicep' = if (policyRestricted) {
+  name: '${resourceNamePrefix}-nsp-${dTime}'
+  params: {
+    location: location
+    perimeterName: perimeterName
+    enforcedResourceIds: [
+      KeyVault.outputs.keyVaultId
+      Storage.outputs.storageAccountId
+    ]
+    logAnalyticsWorkspaceId: LogAnalyticsNsp!.outputs.workspaceId
+    // union() also drops an operator prefix that repeats the egress /32.
+    inboundAddressPrefixes: union([
+      '${horizonEgressIp!.properties.ipAddress}/32'
+    ], perimeterOperatorIpPrefixes)
+    // Windows worker pool: the deploy-only vault joins the stamp profile like
+    // the stamp vault; the personal vault and the controller's state account
+    // admit nothing from outside the perimeter.
+    additionalEnforcedResourceIds: winWorkersEnabled ? [
+      DeployKeyVault!.outputs.keyVaultId
+    ] : []
+    privateOnlyResourceIds: winWorkersEnabled ? [
+      PersonalKeyVault!.outputs.keyVaultId
+      ControllerStorage!.outputs.storageAccountId
+    ] : []
+  }
+}
+
+// Requests from inside the region reach Storage from private addresses that
+// the perimeter's IP rules can't match, so the cluster (Flux and the workers)
+// reaches Blob through this private endpoint. The Windows workers reach Blob
+// only through it: their subnet's NSG admits no other VNet address.
+module BlobPrivateDnsZone './private-dns-zone.bicep' = if (privateEndpointsEnabled) {
+  name: '${resourceNamePrefix}-blob-pdns-${dTime}'
+  params: {
+    zoneName: 'privatelink.blob.${environment().suffixes.storage}'
+    vnetId: Vnet!.outputs.vnetId
+  }
+}
+
+module StorageBlobPrivateEndpoint './private-endpoint.bicep' = if (privateEndpointsEnabled) {
+  name: '${resourceNamePrefix}-sa-blob-pe-${dTime}'
+  params: {
+    location: location
+    name: '${storageAccountName}-blob-pe'
+    subnetId: Vnet!.outputs.privateEndpointSubnetId
+    privateLinkResourceId: Storage.outputs.storageAccountId
+    groupId: 'blob'
+    memberName: 'blob'
+    privateIpAddress: storageBlobPrivateEndpointIp
+    privateDnsZoneId: BlobPrivateDnsZone!.outputs.zoneId
+  }
+}
+
+// ==============================================================================
+// Windows worker pool: vaults, the disk controller's state account and their
+// private endpoints. Skipped without the pool.
+// ==============================================================================
+
+// The disk controller's CA key and the workers' administrator password, for
+// the deploying principal only.
+module DeployKeyVault './deploy-keyvault.bicep' = if (winWorkersEnabled) {
+  name: '${resourceNamePrefix}-akv-deploy-${dTime}'
+  params: {
+    location: location
+    keyVaultName: deployKeyVaultName
+    policyRestricted: policyRestricted
+    deployPrincipalId: localDeploymentPrincipalId
+    deployPrincipalType: localDeploymentPrincipalType
+  }
+}
+
+// Owners' personal tokens: the portal writes, only the controller reads.
+module PersonalKeyVault './personal-keyvault.bicep' = if (winWorkersEnabled) {
+  name: '${resourceNamePrefix}-akv-personal-${dTime}'
+  params: {
+    location: location
+    keyVaultName: personalKeyVaultName
+    policyRestricted: policyRestricted
+    controllerPrincipalId: Uami.outputs.diskControllerIdentityPrincipalId
+    portalPrincipalId: Uami.outputs.csiIdentityPrincipalId
+    personalVaultWriterRoleId: personalVaultWriterRoleId
+  }
+}
+
+module VaultPrivateDnsZone './private-dns-zone.bicep' = if (winWorkersEnabled) {
+  name: '${resourceNamePrefix}-vault-pdns-${dTime}'
+  params: {
+    // privatelink.vaultcore.azure.net in the public cloud.
+    zoneName: 'privatelink${replace(environment().suffixes.keyvaultDns, '.vault.', '.vaultcore.')}'
+    vnetId: Vnet!.outputs.vnetId
+  }
+}
+
+module PersonalKeyVaultPrivateEndpoint './private-endpoint.bicep' = if (winWorkersEnabled) {
+  name: '${resourceNamePrefix}-akv-personal-pe-${dTime}'
+  params: {
+    location: location
+    name: '${personalKeyVaultName}-pe'
+    subnetId: Vnet!.outputs.privateEndpointSubnetId
+    privateLinkResourceId: PersonalKeyVault!.outputs.keyVaultId
+    groupId: 'vault'
+    memberName: 'default'
+    privateIpAddress: personalKeyVaultPrivateEndpointIp
+    privateDnsZoneId: VaultPrivateDnsZone!.outputs.zoneId
+  }
+  // One private endpoint at a time in pe-subnet.
+  dependsOn: [
+    ControllerStorageBlobPrivateEndpoint
+  ]
+}
+
+// The controller's state, apart from the main account's account-wide grants.
+module ControllerStorage './controller-storage.bicep' = if (winWorkersEnabled) {
+  name: '${resourceNamePrefix}-sa-pool-${dTime}'
+  params: {
+    location: location
+    storageAccountName: controllerStorageAccountName
+    policyRestricted: policyRestricted
+    controllerPrincipalId: Uami.outputs.diskControllerIdentityPrincipalId
+  }
+}
+
+module ControllerStorageBlobPrivateEndpoint './private-endpoint.bicep' = if (winWorkersEnabled) {
+  name: '${resourceNamePrefix}-sa-pool-blob-pe-${dTime}'
+  params: {
+    location: location
+    name: '${controllerStorageAccountName}-blob-pe'
+    subnetId: Vnet!.outputs.privateEndpointSubnetId
+    privateLinkResourceId: ControllerStorage!.outputs.storageAccountId
+    groupId: 'blob'
+    memberName: 'blob'
+    privateIpAddress: controllerStorageBlobPrivateEndpointIp
+    privateDnsZoneId: BlobPrivateDnsZone!.outputs.zoneId
+  }
+  // One private endpoint at a time in pe-subnet.
+  dependsOn: [
+    StorageBlobPrivateEndpoint
+  ]
 }
 
 // ==============================================================================
@@ -638,6 +929,76 @@ module KvCertOfficerRbac './kv-cert-officer-rbac.bicep' = {
 }
 
 // ==============================================================================
+// Windows worker pool: the workers' data collection rule, the gallery, the
+// scale set with its standby pool, the controller's grants, and the pool's
+// logs and alerts. Skipped without the pool.
+// ==============================================================================
+
+module WinWorkerDcr './win-worker-dcr.bicep' = if (winWorkersEnabled) {
+  name: '${resourceNamePrefix}-win-worker-dcr-${dTime}'
+  params: {
+    location: location
+    name: winWorkerDcrName
+    logAnalyticsWorkspaceId: LogAnalytics.outputs.workspaceId
+  }
+}
+
+module WinWorkers './win-workers.bicep' = if (winWorkersEnabled) {
+  name: '${resourceNamePrefix}-win-workers-${dTime}'
+  params: {
+    location: location
+    resourceNamePrefix: resourceNamePrefix
+    imageVersion: winWorkerImageVersion
+    vmSize: winWorkerVmSize
+    maxVms: winWorkerCount
+    initialCapacity: winWorkerMinRunning
+    standbyMin: winWorkerStandbyMin
+    scaleSetExists: winWorkerScaleSetExists
+    adminPassword: winWorkerAdminPassword
+    userData: winWorkerUserData
+    workerIdentityName: Uami.outputs.winWorkerIdentityName
+    controllerPrincipalId: Uami.outputs.diskControllerIdentityPrincipalId
+    vnetName: Vnet!.outputs.vnetName
+    workerSubnetName: Vnet!.outputs.winWorkersSubnetName
+    diskPoolControllerRoleId: diskPoolControllerRoleId
+    workerSubnetJoinRoleId: workerSubnetJoinRoleId
+    standbyPoolPrincipalId: standbyPoolPrincipalId
+    foundryAccountName: foundryEnabled ? Foundry!.outputs.accountName : ''
+    coordinationHostPrincipalId: Uami.outputs.coordinationIdentityPrincipalId
+  }
+}
+
+module WinWorkerAlerts './win-worker-alerts.bicep' = if (winWorkersEnabled) {
+  name: '${resourceNamePrefix}-win-worker-alerts-${dTime}'
+  params: {
+    location: location
+    resourceNamePrefix: resourceNamePrefix
+    mainWorkspaceId: LogAnalytics.outputs.workspaceId
+    // A perimeter resource's diagnostic logs must stay in the perimeter.
+    securityWorkspaceId: policyRestricted ? LogAnalyticsNsp!.outputs.workspaceId : LogAnalytics.outputs.workspaceId
+    alertEmails: winWorkerAlertEmails
+    namespace: serviceAccountNamespace
+    aksClusterName: Aks.outputs.aksClusterName
+    storageAccountName: Storage.outputs.storageAccountName
+    controllerStorageAccountName: ControllerStorage!.outputs.storageAccountName
+    stampKeyVaultName: KeyVault.outputs.keyVaultName
+    deployKeyVaultName: DeployKeyVault!.outputs.keyVaultName
+    personalKeyVaultName: PersonalKeyVault!.outputs.keyVaultName
+    controllerPrincipalId: Uami.outputs.diskControllerIdentityPrincipalId
+    // The controller's and the portal's grants on the scopes the role
+    // assignment rules watch; the rules exempt exactly these.
+    ownRoleGrants: concat(PersonalKeyVault!.outputs.roleGrants, ControllerStorage!.outputs.roleGrants, WinWorkers!.outputs.roleGrants)
+    deployPrincipalId: localDeploymentPrincipalId
+    customRoleIds: [
+      diskPoolControllerRoleId
+      workerSubnetJoinRoleId
+      personalVaultWriterRoleId
+    ]
+    coordinationHost: winWorkerCoordinationHost
+  }
+}
+
+// ==============================================================================
 // FluxConfigs — owned per-service.
 // ==============================================================================
 //
@@ -686,7 +1047,7 @@ output approverIdentityResourceId string = Uami.outputs.approverIdentityResource
 // AKS VNet resource id — consumed by Portal Bicep in private mode for
 // the Private DNS Zone vnet link (`aksVnetId` param). Empty in public mode.
 output aksVnetId string = edgeMode == 'public' ? '' : Vnet!.outputs.vnetId
-output aksOutboundIp string = (edgeMode == 'public' && horizonDbEnabled) ? horizonEgressIp!.properties.ipAddress : ''
+output aksOutboundIp string = clusterEgressIpEnabled ? horizonEgressIp!.properties.ipAddress : ''
 
 // Edge topology mode — echoed back so the orchestrator (deploy.mjs / the enterprise path)
 // can fan it into per-service params + skip AFD origin wiring in private.
@@ -710,3 +1071,27 @@ output vpnGatewayId string = vpnGatewayEnabled ? VpnGateway!.outputs.vpnGatewayI
 output vpnGatewayPublicIp string = vpnGatewayEnabled ? VpnGateway!.outputs.vpnGatewayPublicIp : ''
 output vpnClientAddressPool string = vpnGatewayEnabled ? vpnClientAddressPool : ''
 output vpnPrivateDnsZoneId string = (vpnGatewayEnabled && edgeMode == 'afd') ? PortalPrivateDns!.outputs.dnsZoneId : ''
+
+// ----- Windows worker pool outputs (empty strings when disabled) -----------
+// deploy-bicep.mjs aliases them for the disk controller's overlay and the
+// Windows worker deploy step.
+output winWorkerGalleryImageId string = winWorkersEnabled ? WinWorkers!.outputs.galleryImageId : ''
+output winWorkerScaleSetId string = winWorkersEnabled ? WinWorkers!.outputs.scaleSetId : ''
+output winWorkerStandbyPoolId string = winWorkersEnabled ? WinWorkers!.outputs.standbyPoolId : ''
+output winWorkerDcrId string = winWorkersEnabled ? WinWorkerDcr!.outputs.dataCollectionRuleId : ''
+output winWorkerConfigVersion string = winWorkersEnabled ? winWorkerConfigVersion : ''
+output winWorkerIdentityName string = Uami.outputs.winWorkerIdentityName
+output winWorkerIdentityClientId string = Uami.outputs.winWorkerIdentityClientId
+output winWorkerIdentityPrincipalId string = Uami.outputs.winWorkerIdentityPrincipalId
+output diskControllerIdentityClientId string = Uami.outputs.diskControllerIdentityClientId
+output diskControllerIdentityPrincipalId string = Uami.outputs.diskControllerIdentityPrincipalId
+output diskPoolStateUrl string = winWorkersEnabled ? ControllerStorage!.outputs.stateContainerUrl : ''
+output personalKeyVaultUri string = winWorkersEnabled ? PersonalKeyVault!.outputs.keyVaultUri : ''
+output deployKeyVaultName string = winWorkersEnabled ? DeployKeyVault!.outputs.keyVaultName : ''
+output winWorkerEgressIp string = winWorkersEnabled ? Vnet!.outputs.winWorkersNatIpAddress : ''
+
+// The coordination host's identity (empty without it): the Linux worker's
+// workload identity and database user, and the database job's member.
+output coordinationIdentityName string = Uami.outputs.coordinationIdentityName
+output coordinationIdentityClientId string = Uami.outputs.coordinationIdentityClientId
+output coordinationIdentityPrincipalId string = Uami.outputs.coordinationIdentityPrincipalId

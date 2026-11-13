@@ -96,15 +96,17 @@ its stream. See [live-plane architecture](../architecture/live-plane.md).
 
 Operations tagged **[admin]** require the `admin` role. Session operations are
 also authorized by access class: read/write may be delegated by visibility or
-targeted grants; manage/destroy/share remain owner/admin only. Inaccessible
-sessions return not-found to avoid an existence oracle.
+targeted grants; manage/destroy/share remain owner/admin only (the deployment's
+dispatcher may also complete, cancel and delete sessions delegated to it — see
+[Dispatcher delegation](#dispatcher-delegation)). Inaccessible sessions return
+not-found to avoid an existence oracle.
 
 ### Sessions
 
 | Operation | Route | Parameters | Summary |
 |---|---|---|---|
 | listSessions | `GET /api/v1/sessions` | — | List session summaries. |
-| createSession | `POST /api/v1/sessions` | model (body), reasoningEffort (body), contextTier (body), groupId (body), visibility (body), workspace (body) | Create a session. Owner is the authenticated principal; visibility defaults to the deployment default. `groupId` is an initial placement into one of **your** groups — `403` if the group is missing or not yours. `workspace` (`{ root, folder? }`) sets its working folder. |
+| createSession | `POST /api/v1/sessions` | model (body), reasoningEffort (body), contextTier (body), groupId (body), visibility (body), workspace (body), onBehalfOfOwner (body) | Create a session. Owner is the authenticated principal; visibility defaults to the deployment default. `groupId` is an initial placement into one of **your** groups — `403` if the group is missing or not yours. `workspace` (`{ root, folder? }`) sets its working folder. `onBehalfOfOwner: { subject, provider? }` is for the deployment's dispatcher only, while ownership is enforced: the named user owns the private session — and `groupId` must be one of theirs — and the dispatcher gets a write share (see [Dispatcher delegation](#dispatcher-delegation)). |
 | readWorkflow | `GET /api/v1/sessions/:sessionId/workflow` | sessionId (path), runId (query), cursor (query, JSON), executionId (query), limit (query, JSON), kvRevision (query, JSON), kvKey (query), agentVersions (query, JSON), definitionRevision (query, JSON), stepInput (query, JSON) | Read a durable Workflow session without changing it: definition state, current revision and its diagnostics (no YAML), graph, runs, and one run (`runId`, default the live run) with the newest page of its node executions, typed input inbox and outbox (and a test run's intercepted effects), the rows still open that a page does not hold (`openExecutions`, `openInbox`, `openOutbox`, `test.openInterceptions`), and `run.pages`: each section's `limit` and `nextCursor`. A run that a control action touched has `run.lastControl` (`{ operation, by, at, reason? }`): who last paused, resumed, stopped or cancelled it or set its variables (`by`: `a person` with their portal `name` when known, `another session` with its `sessionId`, or `system` with its `name`). `cursor` (a `nextCursor` given back as it was) reads that section's next, older page (`{ items, nextCursor }`); `executionId` reads one node execution of the run with its whole output or runtime error (`execution.result`, within 256 KiB); `limit` (1 to 200) sets the rows per page; `kvRevision` reads that kept revision of the run's variables (each with its size and sha256, whole up to 256 KiB in all, otherwise 200-character previews) and `kvKey` with it one variable, whole; `agentVersions` (`true`, alone) reads the agent versions that publishing the current revision would lock now (`{ revision, definitionHash, resolves, locked, agents, problem }`: each named agent state's agent, package, version and exact revision, or the problem that would refuse the publication), resolved as publication resolves them; it locks nothing; `definitionRevision` (an integer, alone) reads that revision of the definition (`definitionRevision: { revision, definitionHash, valid, diagnostics, current, published, yaml, formatted }`: its YAML as saved and properly formatted, for comparing versions), only for a caller who may change the workflow (`403` otherwise), `404 DEFINITION_REVISION_NOT_FOUND` for a revision it does not have. `stepInput` (`{ state, input? }`, alone; owner decision q6) reads an agent step's input fields in the current draft and where each takes its value from (`stepInput: { state, revision, definitionHash, schemaDeclared, fields: [{ name, declared, required, type, description, current }], runInputs, inputShape, inputText }`, `current.source` one of `run_input`, `previous_step`, `variable`, `fixed`, `keep`); with `input` (field -> `{ source, name | path | value }`, a field left out is removed) it also gives `proposed: { yaml, changed, valid, diagnostics }`, the draft's YAML with only that step's input lines changed, to save with `replace_definition` at `revision`; only for a caller who may change the workflow (`403` otherwise), `400 WORKFLOW_READ_INVALID` for a published workflow, a step that is not an agent step or not written as a block mapping, or an invalid choice. Pages are separate reads, not a snapshot. Access `session:read`: not-found unless the session is readable. `404 WORKFLOW_NOT_FOUND` for a session that is not a durable Workflow, `404 RUN_NOT_FOUND` for a run that is not one of its runs, `404 EXECUTION_NOT_FOUND` for an execution that is not one of the run's, `404 KV_REVISION_NOT_FOUND` for a revision the run does not have, `400 WORKFLOW_CURSOR_INVALID` for a cursor that is not one a read of this workflow returned (or names another run than `runId`), `400 WORKFLOW_READ_INVALID` for an invalid `limit` or `executionId`, or a cursor with an `executionId`, `400 INVALID_REQUEST` for an invalid `runId`, including one that is not a single string (a list, a repeated parameter, a number): it is sent and read as invalid, never as an id coerced from it, and for a `cursor` or `limit` that is not JSON. Inactive: only a deployment that takes a person's workflow commands (`updateWorkflow`) adds `personCommands` to the view: the operations this workflow takes from people (only `pause`, `stop` and `cancel` in a workflow agent state's subtree, with a `restriction` that names its controlling agent), whether the shown run takes a graceful stop (`run.stop`), whether the caller may send them (`viewer`: `updateWorkflow`'s own `session:manage` decision), and, for a draft the caller may change, its current revision's YAML (`draft`: left out for anyone else); it grants nothing. |
 | listSessionWorkflowDefinitions | `GET /api/v1/sessions/:sessionId/workflow-definitions` | sessionId (path), includeDeleted (query, JSON) | Stage 2.1: a session's Workflow Definitions, each with `definitionId`, `name`, `currentRevision`, `newestValidRevision`, its revisions (number, `valid`, version, who saved it and when; no YAML) and the Workflows started from it (`workflowSessionId`, `revision`, `runStatus`). `includeDeleted: true` lists deleted ones too. Access `session:read`. `404 SESSION_NOT_FOUND` for a Workflow session. Stage 2.2: each revision has `lastTest` (`{ testId, verdict: passed \| failed \| running, at }`) when the session tested it. A person's copy of a package's definition has `source: "copy"` and `copiedFrom` (`{ definitionId, name, revision, package: { packageId, packageName, semver, sha256 } }`). |
 | readSessionWorkflowDefinition | `GET /api/v1/sessions/:sessionId/workflow-definition` | sessionId (path), definitionId (query), name (query), revision (query, JSON) | Stage 2.1: one definition, by `definitionId` (a deleted one too) or `name` (its live one), with `revision`'s YAML and diagnostics (default the newest). Stage 2.1b: with that revision's `graph` (as `readWorkflow` draws it; `null` for a revision with errors), `personCommands` (whether the deployment takes a person's save, start and delete) and `viewer` (`{ allowed, reason }`: whether this caller may send them, the `session:manage` gate). A caller who may not gets no `yaml`, the input schema and diagnostics without the values and words their author wrote, and no agent state's inline prompt (`graph.states[].about.prompt`; a state's `about.description` stays), as `readWorkflow`'s reader view. Access `session:read`. `404 DEFINITION_NOT_FOUND`, `404 REVISION_NOT_FOUND`. |
@@ -114,10 +116,10 @@ sessions return not-found to avoid an existence oracle.
 | copySessionWorkflowDefinition | `POST /api/v1/sessions/:sessionId/workflow-definitions/copy` | sessionId (path), definitionId, revision, operationId (body) | Stage 2.3: a person's **Make a copy** of a package's locked definition: its revision (default the newest) is saved as the session's own, editable definition at revision 1, named as its YAML names it; the session reads a note on its next turn. `409 DEFINITION_EXISTS` when the session already has that name. Access `session:manage`. Taken on every deployment, as `saveSessionWorkflowDefinition`. |
 | updateSessionWorkflowPackage | `POST /api/v1/sessions/:sessionId/workflow-definitions/update-package` | sessionId (path), definitionId, operationId (body) | Stage 2.3: a person takes the package's newer version of a locked definition for the session's next Workflow; it becomes the next revision, and running Workflows keep theirs. Access `session:manage`. Taken on every deployment, as `saveSessionWorkflowDefinition`. |
 | updateWorkflow | `POST /api/v1/sessions/:sessionId/workflow/commands` | sessionId (path), command (body), originatingSessionId (body) | A person's command to a durable Workflow session: `command` is the `update_workflow` tool's command (`operation`, `operation_id` and the operation's arguments: `replace_definition`, `publish`, `publish_and_start`, `start`, `set_vars`, `pause`, `resume`, `cancel`, `stop`, and the test operations while workflow test mode is on), run by the tool's own implementation; the answer is its receipt. The recorded actor is the signed-in caller, never a field of the command. Access `session:manage` (owner or admin), enforced even while the ownership switch is off. Every deployment takes it (`501 WORKFLOW_COMMANDS_UNAVAILABLE` only from a client created without a person's commands). A workflow in a workflow agent state's subtree takes only `pause`, `stop` and `cancel` (`403 WORKFLOW_HUMAN_INPUT_DENIED`). `originatingSessionId` (optional): the session the command comes from, when a caller passes one on for an agent; a definition operation from a session inside a Workflow is refused (`403 WORKFLOW_DEFINITION_TOOLS_REFUSED`). `404 WORKFLOW_NOT_FOUND` for a session that is not a durable Workflow; other refusals keep the tool's codes with an HTTP status (400 invalid, 409 conflict, 422 a value its contract refuses, 429 a limit) and their `details` (for example field errors). |
-| createSessionForWorkflow | `POST /api/v1/sessions/for-workflow` | ref, model, reasoningEffort, contextTier, groupId, visibility (body) | Stage 2.3: a session made for a package's Workflow Definition (`ref`: `<package>/<name>`): the definition attached and locked at the package's version, instructions to coordinate it from its interface card, its title naming it, and a first message asking the session to greet the person and ask for the inputs it needs. `model` defaults to the deployment's. The session list shows it with `workflowRef`. The definition is attached at exactly the package version the instructions were written from; when another version became active between the two, or the package is gone, no session is left (`409 PACKAGE_VERSION_CHANGED`, `404 PACKAGE_WORKFLOW_NOT_FOUND`). `404 PACKAGE_WORKFLOW_NOT_FOUND`. Same `groupId` placement rule as createSession. |
-| createSessionForAgent | `POST /api/v1/sessions/for-agent` | agentName (body), model (body), reasoningEffort (body), contextTier (body), title (body), splash (body), splashMobile (body), initialPrompt (body), groupId (body), visibility (body), workspace (body) | Create a session bound to a named agent. Same `groupId` placement rule as createSession. `workspace` as createSession's. |
+| createSessionForWorkflow | `POST /api/v1/sessions/for-workflow` | ref, model, reasoningEffort, contextTier, groupId, visibility, onBehalfOfOwner (body) | Stage 2.3: a session made for a package's Workflow Definition (`ref`: `<package>/<name>`): the definition attached and locked at the package's version, instructions to coordinate it from its interface card, its title naming it, and a first message asking the session to greet the person and ask for the inputs it needs. `model` defaults to the deployment's. The session list shows it with `workflowRef`. The definition is attached at exactly the package version the instructions were written from; when another version became active between the two, or the package is gone, no session is left (`409 PACKAGE_VERSION_CHANGED`, `404 PACKAGE_WORKFLOW_NOT_FOUND`). `404 PACKAGE_WORKFLOW_NOT_FOUND`. Same `groupId` placement rule as createSession. On a deployment that names a dispatcher, `onBehalfOfOwner` is refused (`400 INVALID_REQUEST`): no Workflow starts in a session created on behalf of a user. Without one it is ignored. |
+| createSessionForAgent | `POST /api/v1/sessions/for-agent` | agentName (body), model (body), reasoningEffort (body), contextTier (body), title (body), splash (body), splashMobile (body), initialPrompt (body), groupId (body), visibility (body), workspace (body), onBehalfOfOwner (body) | Create a session bound to a named agent. Same `groupId` placement and `onBehalfOfOwner` rules as createSession. `workspace` as createSession's. |
 | getSession | `GET /api/v1/sessions/:sessionId` | sessionId (path) | Get one session view (live orchestration status). |
-| deleteSession | `DELETE /api/v1/sessions/:sessionId` | sessionId (path) | Cancel and soft-delete a session. |
+| deleteSession | `DELETE /api/v1/sessions/:sessionId` | sessionId (path), reason (query), force (query, boolean), settleTimeoutMs (query, number) | Cancel and soft-delete a session. With `force`, a delete that has not settled within `settleTimeoutMs` (0 to 65000, default 65000; 0 sends no command) deletes the session's subtree directly, from the leaves up with the session last, and fails naming what failed, so a retry can finish. `reason` is recorded with `force` only; a plain delete keeps its default reason. A session that no worker has started yet never runs afterwards. Only the owner, an admin or the delegated dispatcher may pass `force` (`403` otherwise, whatever `AUTHZ_ENFORCE_OWNERSHIP` says). A forced delete of a session that is already deleted finishes what is left of its subtree. With `AUTHZ_ENFORCE_OWNERSHIP=true` only the tree's owner and admins may do that, and the delegated dispatcher while a live session is left in the tree; everyone else gets `404`, as for any deleted session. Without enforcement the call passes, like any call on a session the portal can't find. |
 | sendMessage | `POST /api/v1/sessions/:sessionId/messages` | sessionId (path), prompt (body), options (body) | Send a prompt (options: { enqueueOnly?, clientMessageIds? }). |
 | sendAnswer | `POST /api/v1/sessions/:sessionId/answers` | sessionId (path), answer (body), options (body) | Answer a pending question. `options.expectedQuestion: { question, iteration? }` binds to the observed `pendingQuestion`; omitted options bind to the current question when enqueued. A stale binding preserves the text as an ordinary message. |
 | sendSessionEvent | `POST /api/v1/sessions/:sessionId/events` | sessionId (path), eventName (body), data (body) | Send a custom event into the session. |
@@ -135,8 +137,8 @@ group membership is per-viewer state, not a property of the session. See
 | Operation | Route | Access | Summary |
 |---|---|---|---|
 | getSessionAccess | `GET /api/v1/sessions/:sessionId/access` | readable session | Effective visibility, relation, owner, write/manage flags, and `viewerGroupId` (the caller's own placement of the tree root — never another viewer's). |
-| setSessionVisibility | `PUT /api/v1/sessions/:sessionId/visibility` | owner/admin | Set `private`, `shared_read`, or `shared_write` on the whole session tree. |
-| grantSessionShare | `POST /api/v1/sessions/:sessionId/shares` | owner/admin | Grant one principal targeted `read` or `write` access. |
+| setSessionVisibility | `PUT /api/v1/sessions/:sessionId/visibility` | owner/admin | Set `private`, `shared_read`, or `shared_write` on the whole session tree. A tree the dispatcher created for its owner refuses `shared_write` (`403 DELEGATED_SESSION_READ_ONLY`). |
+| grantSessionShare | `POST /api/v1/sessions/:sessionId/shares` | owner/admin | Grant one principal targeted `read` or `write` access. A tree the dispatcher created for its owner takes no `write` share but the dispatcher's (`403 DELEGATED_SESSION_READ_ONLY`). |
 | revokeSessionShare | `POST /api/v1/sessions/:sessionId/shares/revoke` | owner/admin | Revoke one targeted grant. |
 | listSessionShares | `GET /api/v1/sessions/:sessionId/shares` | owner/admin | List targeted grants and grantee metadata. |
 | listAuthzAudit | `GET /api/v1/management/authz-audit` | owner/admin | Owners read audit entries for one owned session; admins can read fleet-wide. |
@@ -323,6 +325,12 @@ data or reveals anyone else's grouping.
 | setProviderHold **[admin]** | `PUT /api/v1/management/providers/:name/hold` | name (path), untilUtc?, release? (body) | Hold or release new turns against a provider. |
 | listPausedSessions | `GET /api/v1/providers/paused` | — | Sessions waiting on a provider, limit, allowance, or hold; fleet-wide for admins, own sessions otherwise. |
 
+With `PILOTSWARM_PERSONAL_SECRETS=external`, `createMyProvider` and
+`updateMyProviderCredential` hand a GitHub-type key to the deployment's secret
+store and save only a reference to it; other personal types are refused, and a
+store that fails answers `503` with code `PROVIDER_SECRET_STORE_UNAVAILABLE`.
+See [Personal Keys in an External Secret Store](../developer/reference/configuration.md#personal-keys-in-an-external-secret-store).
+
 Trusted session creation resolves `explicit → user default → cluster default →
 first usable provider/model`, validates capabilities, and writes the exact
 qualified model before orchestration starts. System sessions resolve
@@ -340,6 +348,8 @@ while the selected daily chart offers 14-, 30-, and 90-day history ranges.
 |---|---|---|---|
 | getCurrentUserProfile | `GET /api/v1/me/profile` | — | Profile of the authenticated principal. |
 | setCurrentUserProfileSettings | `PATCH /api/v1/me/profile/settings` | settings (body) | Replace profile settings. |
+| getMyDispatcherDelegation | `GET /api/v1/me/dispatcher-delegation` | — | `{ enabled, dispatcherConfigured }`: whether you let the deployment's dispatcher create and end sessions for you, and whether the deployment has one. |
+| setMyDispatcherDelegation | `PUT /api/v1/me/dispatcher-delegation` | enabled (body, boolean) | Turn your dispatcher delegation on or off; returns the same shape. Off keeps the dispatcher's shares but refuses it on your sessions until you turn it back on. |
 | setCurrentUserGitHubCopilotKey **[legacy]** | `PUT /api/v1/me/github-copilot-key` | key (body) | Legacy rollback API. New users add a private GitHub Copilot runtime provider in Admin Console. |
 
 ### System
@@ -348,6 +358,61 @@ while the selected daily chart offers 14-, 30-, and 90-day history ranges.
 |---|---|---|---|
 | getLogConfig | `GET /api/v1/system/log-config` | — | Log tail availability. |
 | getWorkerCount | `GET /api/v1/system/workers` | — | Live worker count. |
+
+## Dispatcher delegation
+
+A deployment may name a **dispatcher** with `DISPATCHER_SP_OBJECT_ID` (see
+[Configuration](../developer/reference/configuration.md#dispatcher-delegation)):
+an application that signs in with its own token and creates and ends sessions
+for the users who allow it. Unset, none of this applies and `onBehalfOfOwner`
+is ignored, as it was before it existed.
+
+- **Opt-in.** `getMyDispatcherDelegation` / `setMyDispatcherDelegation` read
+  and change the signed-in caller's own choice, never another user's. It is off
+  until the user turns it on.
+- **Creating.** `createSession` and `createSessionForAgent` accept
+  `onBehalfOfOwner: { subject, provider? }` (`provider` defaults to the
+  caller's) from the dispatcher only; any other caller, an admin included, gets
+  `403 FORBIDDEN`. Without `AUTHZ_ENFORCE_OWNERSHIP=true` the dispatcher gets
+  `403 OWNERSHIP_NOT_ENFORCED`, audited, before any lookup, and a user who has
+  not opted in gives `403 DELEGATION_REVOKED`. The named user owns the
+  session; its visibility must be `private` or omitted (`400` otherwise); the
+  dispatcher receives a targeted `write` share. The portal records the
+  delegated creation in the session's creation config and, with
+  `PILOTSWARM_OWNER_ROUTING=1`, the owner's routing tag; no request parameter
+  sets either. `createSessionForWorkflow` refuses `onBehalfOfOwner` (`400`).
+- **Sharing.** The tree of such a session is shared for reading only:
+  `setSessionVisibility` refuses `shared_write`, and `grantSessionShare`
+  refuses `write` for anyone but the recorded dispatcher, for every caller,
+  admins included (`403 DELEGATED_SESSION_READ_ONLY`, audited). `read` shares
+  and `shared_read` work as on any session.
+- **Ending.** On a session it holds that write share on, while the owner's
+  opt-in is on, the dispatcher may also call `completeSession`,
+  `cancelSession` and `deleteSession` (including `force` and
+  `settleTimeoutMs`). With ownership enforced, a forced delete of a session
+  that is already deleted passes only while a live session is left in its
+  tree, because the share is read through that session; with none left it
+  answers `404`.
+- **Revocation.** While the owner's opt-in is off, the dispatcher gets
+  `403 DELEGATION_REVOKED` on that owner's sessions it could otherwise reach
+  (sessions it never had still answer `404`), those sessions leave its
+  `listSessions` and `listSessionsPage` results, and its WebSocket
+  subscriptions on them end with
+  `error { scope, sessionId, code: "DELEGATION_REVOKED" }` before the next
+  event. The shares are kept: turning the opt-in back on restores the same
+  access.
+- **Audit.** Each delegated creation and end of work records its
+  authorization audit entry (decision `delegated`) before the response. When
+  that write fails, the call fails with `503 AUDIT_UNAVAILABLE` and does not
+  happen (a session just created is deleted again).
+
+With `AUTHZ_ENFORCE_OWNERSHIP=false`, `onBehalfOfOwner` is refused (above) and
+revocation is only audited (`would_deny`), like every other session rule in
+that mode; the read-only sharing of a delegated tree, `force` and the audited
+end of work apply in both modes.
+The exception is a forced delete of a session that is already deleted: in
+that mode it passes unchecked, recorded only as `would_deny`, like any call
+on a session the portal can't find.
 
 ## Long polling
 

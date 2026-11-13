@@ -238,9 +238,22 @@ test("a fast trace shutdown failure waits for slower metrics flush before resolv
     assert.deepEqual(order, ["trace failed", "metrics flushed"]);
 });
 
+/**
+ * Run the example worker's shutdown, from its signal handlers to its exit, in
+ * a new context with these fakes. A signal, or worker.requestExit(), starts
+ * the drain; the worker exits once waitForShutdown() settles.
+ */
+function runWorkerShutdown(context) {
+    const source = readFileSync(new URL("../../packages/sdk/examples/worker.js", import.meta.url), "utf8");
+    const start = source.indexOf("let shuttingDown = false;");
+    assert.notEqual(start, -1, "worker.js keeps its shutdown block");
+    return runInNewContext(`(async () => {\n${source.slice(start)}\n})()`, context);
+}
+
 test("worker signals flush telemetry after drain and exit successfully when telemetry flush fails", async () => {
     const metricsFlushed = Promise.withResolvers();
     const traceFailed = Promise.withResolvers();
+    const drained = Promise.withResolvers();
     const handlers = {};
     const logs = [];
     const order = [];
@@ -250,38 +263,47 @@ test("worker signals flush telemetry after drain and exit successfully when tele
         { shutdown: async () => { await metricsFlushed.promise; order.push("metrics flushed"); } },
         { shutdown: () => { traceFailed.resolve(); throw new Error("PRIVATE_TRACE_ERROR"); } },
     ], () => false, () => logs.push("[otel] Telemetry shutdown failed."));
-    const source = readFileSync(new URL("../../packages/sdk/examples/worker.js", import.meta.url), "utf8");
-    const block = source.slice(source.indexOf("async function shutdown(signal)"), source.indexOf("// Block forever"));
-    runInNewContext(block, {
-        worker: { gracefulShutdown: async () => { order.push("drained"); } },
+    const main = runWorkerShutdown({
+        worker: {
+            gracefulShutdown: async () => { order.push("drained"); drained.resolve(0); },
+            waitForShutdown: () => drained.promise,
+        },
         shutdownTelemetry: flush, process: fakeProcess,
         console: { log() {}, error: message => logs.push(message) },
     });
     assert.deepEqual(Object.keys(handlers).sort(), ["SIGINT", "SIGTERM"]);
-    const signalPromise = handlers.SIGTERM();
+    handlers.SIGTERM();
     await traceFailed.promise;
     await Promise.resolve();
     await Promise.resolve();
     assert.deepEqual(order, ["drained"]);
     metricsFlushed.resolve();
-    await signalPromise;
+    await main;
     assert.deepEqual(order, ["drained", "metrics flushed", "exit 0"]);
     assert.equal(fakeProcess.exitCode, undefined);
     assert.deepEqual(logs, ["[otel] Telemetry shutdown failed."]);
 });
 
 test("a failed worker drain still flushes telemetry and keeps the drain failure", async () => {
+    const failed = Promise.withResolvers();
     const handlers = {};
     const order = [];
     const fakeProcess = { on: (signal, handler) => { handlers[signal] = handler; }, exit: code => { order.push(`exit ${code}`); } };
-    const source = readFileSync(new URL("../../packages/sdk/examples/worker.js", import.meta.url), "utf8");
-    const block = source.slice(source.indexOf("async function shutdown(signal)"), source.indexOf("// Block forever"));
-    runInNewContext(block, {
-        worker: { gracefulShutdown: async () => { order.push("drain failed"); throw new Error("test drain failure"); } },
+    const main = runWorkerShutdown({
+        worker: {
+            gracefulShutdown: async () => {
+                order.push("drain failed");
+                const error = new Error("test drain failure");
+                failed.reject(error);
+                throw error;
+            },
+            waitForShutdown: () => failed.promise,
+        },
         shutdownTelemetry: async () => { order.push("telemetry flushed"); },
         process: fakeProcess, console: { log() {} },
     });
-    await assert.rejects(handlers.SIGTERM(), /test drain failure/);
+    handlers.SIGTERM();
+    await assert.rejects(main, /test drain failure/);
     assert.deepEqual(order, ["drain failed", "telemetry flushed"]);
 });
 

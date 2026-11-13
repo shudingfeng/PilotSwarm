@@ -36,10 +36,13 @@ param localDeploymentPrincipalType string = 'User'
 @description('Allow ARM to resolve a HorizonDB bootstrap password from this vault. Only needed for HorizonDB stamps.')
 param templateDeploymentEnabled bool = false
 
+@description('AZURE_POLICY_RESTRICTED profile: public access decided by the network security perimeter (nsp.bicep). False keeps the vault unchanged.')
+param policyRestricted bool = false
+
 resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
   name: keyVaultName
   location: location
-  properties: {
+  properties: union({
     sku: {
       family: 'A'
       name: 'standard'
@@ -54,7 +57,9 @@ resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
       bypass: 'AzureServices'
       defaultAction: 'Allow'
     }
-  }
+  }, policyRestricted ? {
+    publicNetworkAccess: 'SecuredByPerimeter'
+  } : {})
 }
 
 var kvSecretsUserRoleId = '4633458b-17de-408a-b874-0445c86b69e6'

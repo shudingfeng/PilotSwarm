@@ -1,0 +1,14 @@
+{
+  "name": "pilotswarm-azure-secret-store",
+  "private": true,
+  "type": "module",
+  "description": "Azure Key Vault store for PilotSwarm personal secrets, loaded by the portal through PILOTSWARM_PERSONAL_SECRET_STORE_MODULE.",
+  "license": "MIT",
+  "engines": {
+    "node": "^24.22.1 || >=26.12.1"
+  },
+  "dependencies": {
+    "@azure/identity": "^4.14.1",
+    "@azure/keyvault-secrets": "^4.11.2"
+  }
+}

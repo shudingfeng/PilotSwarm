@@ -54,6 +54,16 @@ RUN rm -rf \
     && npm run build --workspace=pilotswarm-horizon-store \
     && npm run build --workspace=pilotswarm
 
+# The Azure Key Vault store for personal secrets is a package of its own, with
+# its own lockfile, so the Azure SDKs it needs stay out of the workspace
+# install. Every portal image carries it, without its tests, and it does
+# nothing until PILOTSWARM_PERSONAL_SECRET_STORE_MODULE names it
+# (deploy/providers/azure/secret-store/README.md).
+COPY deploy/providers/azure/secret-store/package.json deploy/providers/azure/secret-store/package-lock.json ./deploy/providers/azure/secret-store/
+RUN npm ci --omit=dev --prefix deploy/providers/azure/secret-store
+COPY deploy/providers/azure/secret-store/ ./deploy/providers/azure/secret-store/
+RUN rm -rf deploy/providers/azure/secret-store/test
+
 FROM node:24.22.1-trixie-slim
 
 # git: canvas apps run the git commands their manifest declares through the
@@ -110,6 +120,9 @@ COPY --from=build /app/packages/app/web/dist/ ./packages/app/web/dist/
 # MCP server (prebuilt dist — same layout the npm package ships). Runs from
 # this image with a command override; see deploy/k8s/mcp-deployment.yaml.
 COPY --from=build /app/packages/app/mcp/dist/ ./packages/app/mcp/dist/
+
+# The Key Vault personal secret store with its dependencies (see the build stage).
+COPY --from=build /app/deploy/providers/azure/secret-store/ ./deploy/providers/azure/secret-store/
 
 # AKS legacy-bootstrap catalog. Never copy the private gitignored local catalog
 # into a released/deployed image; runtime provider state lives in CMS after the

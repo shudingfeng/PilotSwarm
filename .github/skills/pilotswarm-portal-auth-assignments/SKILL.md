@@ -1,6 +1,6 @@
 ---
 name: pilotswarm-portal-auth-assignments
-description: "Use when adding or removing users / groups from the 'admin' or 'user' app roles on a PilotSwarm portal Entra app. Wraps deploy/scripts/auth/Set-PortalAuthAssignments.ps1 — idempotent, re-runnable, resolves UPNs / object ids / group display names. Required after `Setup-PortalAuth.ps1 -CreateAppRoles` when admission is role-driven. Other skills/agents that need to grant or revoke portal access should delegate here instead of generating the Graph calls themselves."
+description: "Use when adding or removing users / groups from the 'admin' or 'user' app roles on a PilotSwarm portal Entra app, or service principals from the roles applications can hold ('worker', 'deployer', 'coordinator', and 'user' after Setup-PortalAuth.ps1 -WorkerRoles). Wraps deploy/scripts/auth/Set-PortalAuthAssignments.ps1 — idempotent, re-runnable, resolves UPNs / object ids / group display names / service principal ids. Required after `Setup-PortalAuth.ps1 -CreateAppRoles` when admission is role-driven. Other skills/agents that need to grant or revoke portal access should delegate here instead of generating the Graph calls themselves."
 ---
 
 ## Select the execution path
@@ -75,6 +75,17 @@ Each entry in `-AdminAssignments` / `-UserAssignments` can be:
 - **Object ID (GUID)** — tried as User first, then Group
 - **Group display name** — `"Portal Beta Users"` (quote anything with
   spaces)
+- **Service principal object ID or application (client) ID** — for the
+  roles applications can hold: `-WorkerAssignments`,
+  `-DeployerAssignments`, `-CoordinatorAssignments`, and
+  `-UserAssignments` once `user` allows applications
+  (`Setup-PortalAuth.ps1 -WorkerRoles`). For a managed identity, use its
+  object (principal) ID or client ID.
+
+The script looks up only the principal kinds a role allows: users and
+groups for `"allowedMemberTypes": ["User"]`, service principals for
+`["Application"]`. So `admin` never resolves a service principal, and
+`worker` never resolves a user.
 
 Comma-separate multiple values on the command line:
 
@@ -100,6 +111,12 @@ a tenant admin to add the deployer as an SP owner:
 az ad app owner add --id <appId> --owner-object-id <user-objectId>
 ```
 
+Assigning a role to a **service principal** (the `worker`, `deployer`
+and `coordinator` roles, or `user` for an application) needs an Entra
+administrator: Cloud Application Administrator or Application
+Administrator. Owning the app is not enough for these assignments, so an
+administrator runs them.
+
 ## Invocation
 
 Always invoke `pwsh` directly:
@@ -122,6 +139,14 @@ pwsh -NoProfile -ExecutionPolicy Bypass \
   -File deploy/scripts/auth/Set-PortalAuthAssignments.ps1 \
   -EnvName <stamp> \
   -AdminAssignments <upn> -Remove
+
+# Roles for application identities (run as an Entra administrator)
+pwsh -NoProfile -ExecutionPolicy Bypass \
+  -File deploy/scripts/auth/Set-PortalAuthAssignments.ps1 \
+  -EnvName <env> \
+  -WorkerAssignments <object-id> \
+  -DeployerAssignments <object-id> \
+  -CoordinatorAssignments <object-id>
 ```
 
 `-EnvName` auto-resolves `-AppId` from
@@ -158,6 +183,9 @@ portal or token-claim pipeline.
 | `Could not resolve '<x>'` | UPN typo, user not in tenant, or group name doesn't match | Verify with `az ad user show --id <upn>` or `az ad group list --display-name <name>` |
 | `Authorization_RequestDenied` on POST | Caller lacks app-role assignment permission | See "Permissions required" above |
 | `Could not load service principal for app` | App exists but SP was never created | Run `az ad sp create --id <appId>` then retry |
+| `App '...' has no role with value 'worker'` (or `deployer` / `coordinator`) | App was set up without `-WorkerRoles` | Run `Setup-PortalAuth.ps1 -ExistingAppId <id> -WorkerRoles`, then retry |
+| `Could not resolve '<x>' to a ServicePrincipal` | Not a service principal's object or client ID, or a UPN / group given for a role only applications can hold | Use the identity's object (principal) ID or client ID |
+| `Authorization_RequestDenied` when assigning a service principal | Caller is an app owner but not an Entra administrator | Have a Cloud Application Administrator or Application Administrator run it |
 
 ## What this skill is NOT for
 

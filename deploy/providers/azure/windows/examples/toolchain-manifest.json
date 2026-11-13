@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "notes": "Example toolchain: Git for Windows (with Git LFS), PowerShell 7 and one MCP server installed ahead of time.",
+  "installers": [
+    {
+      "name": "git",
+      "url": "https://github.com/git-for-windows/git/releases/download/v2.56.1.windows.1/Git-2.56.1-64-bit.exe",
+      "sha256": "c330c72e10b408cc39994bfefdb63542b0d93d21699325c3e0bd874af8a5a559",
+      "type": "exe",
+      "arguments": ["/VERYSILENT", "/NORESTART", "/NOCANCEL", "/SP-", "/SUPPRESSMSGBOXES"]
+    },
+    {
+      "name": "powershell",
+      "url": "https://github.com/PowerShell/PowerShell/releases/download/v7.7.0/PowerShell-7.7.0-win-x64.zip",
+      "sha256": "7c74e03b20a75b59715847439d046a6214b1863ee79b187872980f139bb4a05f",
+      "type": "zip",
+      "destination": "C:\\Program Files\\PowerShell\\7",
+      "addToPath": true
+    }
+  ],
+  "commands": [
+    {
+      "name": "git-lfs-filters",
+      "command": ["C:\\Program Files\\Git\\cmd\\git.exe", "lfs", "install", "--system", "--skip-repo"]
+    }
+  ],
+  "mcpServers": [
+    {
+      "name": "filesystem",
+      "package": "@modelcontextprotocol/server-filesystem",
+      "version": "2026.8.31"
+    }
+  ],
+  "defenderExclusions": {
+    "paths": ["Q:\\Repos", "Q:\\.cache"],
+    "processes": []
+  }
+}

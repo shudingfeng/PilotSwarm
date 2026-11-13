@@ -17,6 +17,8 @@
       ADO via OBO) belongs on per-purpose worker apps, not the portal app.
     - Optional 'groups' claim on idToken, accessToken, and saml2Token
     - App roles (admin / user) — assignable to Users; created when -CreateAppRoles is set
+    - App roles for application identities (worker / deployer / coordinator)
+      and v2.0 access tokens — OPT-IN with -WorkerRoles
     - Owner: current signed-in Azure CLI user (override with -Owner)
     - Service principal created by default (needed for tenant consent + assignments)
     - -AssignmentRequired (OPT-IN, off by default) sets
@@ -42,6 +44,7 @@
     - "Create a new app" (default)
     - "Add a redirect URI to an existing app" via -ExistingAppId — this is
       the typical pattern when one app reg serves multiple stamps.
+      With -WorkerRoles this mode also adds the worker roles to the app.
 
 .PARAMETER ServiceTreeId
     Required when creating a new app. Written as its
@@ -68,6 +71,8 @@
     If provided, the script will NOT create a new app. Instead it appends
     the resolved redirect URI to the existing app's spa.redirectUris list
     (deduplicated). Useful for sharing one app reg across many stamps.
+    With -WorkerRoles, it also adds the worker roles to the app, and a
+    redirect URI is optional.
 
 .PARAMETER Owner
     Object ID of the user to set as application owner. Defaults to the
@@ -115,6 +120,41 @@
     PORTAL_AUTHZ_ADMIN_GROUPS / PORTAL_AUTHZ_USER_GROUPS allowlists
     are bypassed entirely when the JWT carries any roles[] claim;
     only populate them when running without -CreateAppRoles.
+
+.PARAMETER WorkerRoles
+    OPT-IN. Off by default, so existing app registrations don't change.
+    Prepares the app for application identities (service principals,
+    including managed identities) that call the deployment's own services:
+
+    - Sets api.requestedAccessTokenVersion to 2. Entra then issues v2.0
+      access tokens for this app to every caller, users included. The
+      portal validates v2.0 tokens (issuer
+      https://login.microsoftonline.com/<tenant-id>/v2.0, audience = the
+      client ID); anything else that validates this app's tokens must
+      accept them too.
+    - Adds three app roles that only applications can hold
+      (allowedMemberTypes ["Application"]): 'worker' (for example a worker
+      pool's managed identity), 'deployer' (for example a deployment
+      pipeline's identity) and 'coordinator' (for example a coordination
+      service's identity). The portal admits only 'admin' and 'user', so a
+      token that carries only these roles gets no portal access; the
+      services that accept them check the roles claim themselves.
+    - Lets applications hold 'user' (allowedMemberTypes ["User",
+      "Application"]), for example an automation service principal that
+      creates sessions for users. 'admin' stays users-only.
+
+    Rerunning is safe. Roles the app already has keep their IDs (role
+    assignments refer to them), missing roles are added, and no role is
+    removed or disabled. To add the roles to an existing app, pass
+    -ExistingAppId. When creating an app with a display name that already
+    exists, az ad app create updates that app, and its roles keep their
+    IDs as well.
+
+    Assign the roles with Set-PortalAuthAssignments.ps1 (-WorkerAssignments,
+    -DeployerAssignments, -CoordinatorAssignments, and -UserAssignments for
+    'user'). Assigning an app role to a service principal needs an Entra
+    administrator (Cloud Application Administrator or Application
+    Administrator); owning the app is not enough.
 
 .PARAMETER OutputFile
     Path to write a JSON summary { tenantId, clientId, objectId, redirectUri }.
@@ -164,6 +204,21 @@
     Adds the newstamp's portal endpoint as a new SPA redirect URI on the
     existing shared app.
 
+.EXAMPLE
+    .\Setup-PortalAuth.ps1 -ServiceTreeId <your-service-tree-id> `
+        -EnvName prod -CreateAppRoles -WorkerRoles
+
+    Creates a new app with v2.0 access tokens and five app roles: 'admin'
+    (users), 'user' (users and applications), and 'worker', 'deployer' and
+    'coordinator' (applications).
+
+.EXAMPLE
+    .\Setup-PortalAuth.ps1 -ExistingAppId <existing-app-client-id> -WorkerRoles
+
+    Adds whichever of 'worker', 'deployer' and 'coordinator' the existing
+    app lacks, lets applications hold its 'user' role and switches it to
+    v2.0 access tokens. Existing roles keep their IDs; nothing is removed.
+
 .NOTES
     Prerequisites:
     - Azure CLI installed and logged in (az login) as a tenant member with
@@ -192,6 +247,7 @@ param(
     [Parameter(Mandatory=$false)][switch]$SkipGroupsClaim = $false,
     [Parameter(Mandatory=$false)][switch]$CreateAppRoles = $false,
     [Parameter(Mandatory=$false)][switch]$AssignmentRequired = $false,
+    [Parameter(Mandatory=$false)][switch]$WorkerRoles = $false,
     [Parameter(Mandatory=$false)][string]$OutputFile
 )
 
@@ -320,6 +376,98 @@ function Build-AppRolesJson {
 "@
 }
 
+function Get-WorkerAppRoles {
+    # Roles for application identities that call the deployment's own services.
+    # The portal admits only 'admin' and 'user'; a service that accepts one of
+    # these roles checks the roles claim itself.
+    $definitions = @(
+        @{ value = "worker"; displayName = "Worker"; description = "Workers that call this PilotSwarm deployment's services, such as a worker pool's managed identity." },
+        @{ value = "deployer"; displayName = "Deployer"; description = "Identities that deploy and operate this PilotSwarm deployment, such as a deployment pipeline's identity." },
+        @{ value = "coordinator"; displayName = "Coordinator"; description = "Coordination services that call this PilotSwarm deployment's services, such as a coordination service's managed identity." }
+    )
+    foreach ($d in $definitions) {
+        [ordered]@{
+            id                 = [System.Guid]::NewGuid().ToString()
+            allowedMemberTypes = @("Application")
+            description        = $d.description
+            displayName        = $d.displayName
+            isEnabled          = $true
+            value              = $d.value
+        }
+    }
+}
+
+function Copy-AppRole {
+    # Keeps only the properties Graph accepts on write ('origin' is read-only).
+    param($Role)
+    $enabled = $true
+    if ($null -ne $Role.isEnabled) { $enabled = [bool]$Role.isEnabled }
+    return [ordered]@{
+        id                 = [string]$Role.id
+        allowedMemberTypes = @(@($Role.allowedMemberTypes) | Where-Object { $_ } | ForEach-Object { [string]$_ })
+        description        = $Role.description
+        displayName        = $Role.displayName
+        isEnabled          = $enabled
+        value              = [string]$Role.value
+    }
+}
+
+function Merge-AppRoles {
+    <#
+    Returns @{ roles; added; widened }: every role in -Existing, followed by
+    each -Wanted role whose value is missing (compared case-insensitively),
+    with 'user' also open to applications. Existing roles keep their IDs and
+    stay in the list: role assignments refer to the IDs, and Entra refuses to
+    drop an enabled role. 'widened' means an existing 'user' role changed.
+    #>
+    param([object[]]$Existing, [object[]]$Wanted)
+    $roles = New-Object System.Collections.Generic.List[object]
+    foreach ($role in @($Existing)) { if ($role) { $roles.Add((Copy-AppRole $role)) } }
+    $existingCount = $roles.Count
+    $added = @()
+    foreach ($role in @($Wanted)) {
+        if (@($roles | Where-Object { $_.value -ieq $role.value }).Count -eq 0) {
+            $roles.Add((Copy-AppRole $role))
+            $added += [string]$role.value
+        }
+    }
+    $widened = $false
+    for ($i = 0; $i -lt $roles.Count; $i++) {
+        $role = $roles[$i]
+        if ($role.value -ieq "user" -and $role.allowedMemberTypes -notcontains "Application") {
+            $role.allowedMemberTypes = @($role.allowedMemberTypes) + "Application"
+            if ($i -lt $existingCount) { $widened = $true }
+        }
+    }
+    return @{ roles = $roles.ToArray(); added = $added; widened = $widened }
+}
+
+function ConvertTo-JsonText {
+    param($Value)
+    if ($null -eq $Value) { return "null" }
+    return (ConvertTo-Json -InputObject ([string]$Value) -Compress)
+}
+
+function ConvertTo-AppRolesJson {
+    param([object[]]$Roles)
+    # Literal JSON, as in Build-OptionalClaimsJson: ConvertTo-Json writes empty
+    # and one-element arrays differently in PowerShell 5.1 and 7.
+    $items = foreach ($role in $Roles) {
+        $types = @(@($role.allowedMemberTypes) | ForEach-Object { ConvertTo-JsonText $_ }) -join ", "
+        $enabled = if ($role.isEnabled) { "true" } else { "false" }
+        $fields = @(
+            "`"id`": $(ConvertTo-JsonText $role.id)",
+            "`"allowedMemberTypes`": [$types]",
+            "`"description`": $(ConvertTo-JsonText $role.description)",
+            "`"displayName`": $(ConvertTo-JsonText $role.displayName)",
+            "`"isEnabled`": $enabled",
+            "`"value`": $(ConvertTo-JsonText $role.value)"
+        )
+        "  {`n    " + ($fields -join ",`n    ") + "`n  }"
+    }
+    return "[`n" + (@($items) -join ",`n") + "`n]"
+}
+
 function Build-PlatformPatchBodyJson {
     param([string[]]$RedirectUris)
     # Literal JSON to guarantee redirectUris is always a JSON array, even when empty
@@ -423,12 +571,19 @@ if ([string]::IsNullOrWhiteSpace($OutputFile) -and -not [string]::IsNullOrWhiteS
 
 # Decide mode
 if (-not [string]::IsNullOrWhiteSpace($ExistingAppId)) {
+    $hasRedirectUris = -not ($null -eq $RedirectUri -or $RedirectUri.Count -eq 0)
     Write-Host ""
-    Write-Host "Mode: ADD REDIRECT URI to existing app" -ForegroundColor Cyan
+    if ($WorkerRoles) {
+        Write-Host "Mode: ADD WORKER ROLES (and any redirect URIs) to existing app" -ForegroundColor Cyan
+    } else {
+        Write-Host "Mode: ADD REDIRECT URI to existing app" -ForegroundColor Cyan
+    }
     Write-Host "  Existing App ID: $ExistingAppId"
-    Write-Host "  New redirect URI(s):"
-    foreach ($u in @($RedirectUri)) { Write-Host "    - $u" }
-    if ($null -eq $RedirectUri -or $RedirectUri.Count -eq 0) {
+    if ($hasRedirectUris -or -not $WorkerRoles) {
+        Write-Host "  New redirect URI(s):"
+        foreach ($u in @($RedirectUri)) { Write-Host "    - $u" }
+    }
+    if (-not $hasRedirectUris -and -not $WorkerRoles) {
         throw "-RedirectUri (or -EnvName for auto-discovery) is required when -ExistingAppId is set."
     }
 
@@ -437,19 +592,40 @@ if (-not [string]::IsNullOrWhiteSpace($ExistingAppId)) {
     $DisplayName = $existing.displayName
     $ServiceTreeId = $existing.serviceManagementReference
     $objectId = $existing.id
-    $currentUris = @()
-    if ($existing.spa -and $existing.spa.redirectUris) { $currentUris = @($existing.spa.redirectUris) }
-    $toAdd = @($RedirectUri | Where-Object { $currentUris -notcontains $_ })
-    if ($toAdd.Count -eq 0) {
-        Write-Host "All redirect URIs already present - no change." -ForegroundColor Yellow
-    } else {
-        $newUris = @(($currentUris + $RedirectUri) | Select-Object -Unique)
-        $escapedUris = $newUris | ForEach-Object {
-            '"' + ($_.Replace('\', '\\').Replace('"', '\"')) + '"'
+    if ($hasRedirectUris) {
+        $currentUris = @()
+        if ($existing.spa -and $existing.spa.redirectUris) { $currentUris = @($existing.spa.redirectUris) }
+        $toAdd = @($RedirectUri | Where-Object { $currentUris -notcontains $_ })
+        if ($toAdd.Count -eq 0) {
+            Write-Host "All redirect URIs already present - no change." -ForegroundColor Yellow
+        } else {
+            $newUris = @(($currentUris + $RedirectUri) | Select-Object -Unique)
+            $escapedUris = $newUris | ForEach-Object {
+                '"' + ($_.Replace('\', '\\').Replace('"', '\"')) + '"'
+            }
+            $urisArrJson = "[" + ($escapedUris -join ",") + "]"
+            $body = "{`"spa`":{`"redirectUris`":$urisArrJson}}"
+            Invoke-GraphPatch -ObjectId $objectId -BodyJson $body -Description "Append SPA redirect URI(s)"
         }
-        $urisArrJson = "[" + ($escapedUris -join ",") + "]"
-        $body = "{`"spa`":{`"redirectUris`":$urisArrJson}}"
-        Invoke-GraphPatch -ObjectId $objectId -BodyJson $body -Description "Append SPA redirect URI(s)"
+    }
+
+    if ($WorkerRoles) {
+        $merged = Merge-AppRoles -Existing @($existing.appRoles) -Wanted @(Get-WorkerAppRoles)
+        $patchParts = @()
+        if ($existing.api.requestedAccessTokenVersion -ne 2) {
+            Write-Host "  Setting requestedAccessTokenVersion = 2 (v2.0 access tokens)"
+            $patchParts += '"api":{"requestedAccessTokenVersion":2}'
+        }
+        if ($merged.added.Count -gt 0 -or $merged.widened) {
+            if ($merged.added.Count -gt 0) { Write-Host "  Adding app role(s): $($merged.added -join ', ')" }
+            if ($merged.widened) { Write-Host "  Letting applications hold the 'user' role" }
+            $patchParts += "`"appRoles`":" + (ConvertTo-AppRolesJson -Roles $merged.roles)
+        }
+        if ($patchParts.Count -eq 0) {
+            Write-Host "Worker roles and v2.0 access tokens already present - no change." -ForegroundColor Yellow
+        } else {
+            Invoke-GraphPatch -ObjectId $objectId -BodyJson ("{" + ($patchParts -join ",") + "}") -Description "Apply worker roles and v2.0 access tokens"
+        }
     }
 
     $clientId = $existing.appId
@@ -462,6 +638,9 @@ if (-not [string]::IsNullOrWhiteSpace($ExistingAppId)) {
     Write-Host "  Service Tree ID     : $ServiceTreeId"
     Write-Host "  Groups claim        : $(if ($SkipGroupsClaim) { 'NO' } else { 'YES (idToken+accessToken+saml2Token)' })"
     Write-Host "  App roles           : $(if ($CreateAppRoles) { 'YES (admin + user)' } else { 'NO' })"
+    if ($WorkerRoles) {
+        Write-Host "  Worker roles        : YES (worker + deployer + coordinator; 'user' also for applications; v2.0 access tokens)"
+    }
     Write-Host "  Assignment required : $(if ($AssignmentRequired) { 'YES (only assigned users can sign in)' } else { 'NO (any tenant user can sign in)' })"
     Write-Host ""
 
@@ -484,7 +663,31 @@ if (-not [string]::IsNullOrWhiteSpace($ExistingAppId)) {
             "--optional-claims", "@$optFile"
         )
 
-        if ($CreateAppRoles) {
+        if ($WorkerRoles) {
+            # az ad app create updates an app that already has this display name
+            # instead of creating a second one, so that app's roles keep their IDs.
+            $sameNameJson = az ad app list --display-name $DisplayName 2>$null
+            if ($LASTEXITCODE -ne 0) { throw "Could not look up apps named '$DisplayName' (az ad app list)." }
+            $sameNameApps = @()
+            if ($sameNameJson) { $sameNameApps = $sameNameJson | ConvertFrom-Json }
+            $sameName = @(@($sameNameApps) | Where-Object { $_ -and $_.displayName -ceq $DisplayName })
+            $existingRoles = @()
+            if ($sameName.Count -eq 1) {
+                Write-Host "  An app named '$DisplayName' already exists (appId $($sameName[0].appId)); updating it, existing roles keep their IDs." -ForegroundColor Yellow
+                $existingRoles = @($sameName[0].appRoles)
+            }
+            $wantedRoles = @()
+            if ($CreateAppRoles) {
+                $portalRoles = Build-AppRolesJson | ConvertFrom-Json
+                $wantedRoles += @($portalRoles)
+            }
+            $wantedRoles += @(Get-WorkerAppRoles)
+            $merged = Merge-AppRoles -Existing $existingRoles -Wanted $wantedRoles
+            $rolesFile = [System.IO.Path]::GetTempFileName(); $tempFiles += $rolesFile
+            (ConvertTo-AppRolesJson -Roles $merged.roles) | Out-File -FilePath $rolesFile -Encoding UTF8 -NoNewline
+            $createArgs += "--app-roles", "@$rolesFile"
+            $createArgs += "--requested-access-token-version", "2"
+        } elseif ($CreateAppRoles) {
             $appRolesJson = Build-AppRolesJson
             $rolesFile = [System.IO.Path]::GetTempFileName(); $tempFiles += $rolesFile
             $appRolesJson | Out-File -FilePath $rolesFile -Encoding UTF8 -NoNewline
@@ -581,6 +784,13 @@ if ($CreateAppRoles) {
     Write-Host "  4. Run the deploy flow as usual"
 } else {
     Write-Host "  3. Run the deploy flow as usual"
+}
+if ($WorkerRoles) {
+    Write-Host "  Then, once the service principals exist, assign 'worker', 'deployer' and 'coordinator'"
+    Write-Host "  (and 'user' to an application that acts for users):"
+    Write-Host "        deploy/scripts/auth/Set-PortalAuthAssignments.ps1 -AppId $clientId -WorkerAssignments <object-id> [-DeployerAssignments ...] [-CoordinatorAssignments ...]"
+    Write-Host "     Assigning an app role to a service principal needs a Cloud Application Administrator or"
+    Write-Host "     Application Administrator; owning the app is not enough."
 }
 Write-Host ""
 Write-Host "  Admin consent is NOT required — the portal declares no API permissions; sign-in uses OIDC standard scopes (openid, profile)."

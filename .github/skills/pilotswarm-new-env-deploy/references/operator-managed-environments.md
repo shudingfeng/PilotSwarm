@@ -459,15 +459,19 @@ End-to-end bring-up:
 npm run deploy -- all <name>
 ```
 
-The `all` aggregate runs the canonical sequence filtered by EDGE_MODE ×
-TLS_SOURCE:
+The `all` aggregate runs the canonical sequence, skipping the services the
+env file doesn't enable:
 
 ```
-global-infra → base-infra → horizondb → pls-anchor → cert-manager → cert-manager-issuers → worker → portal
+global-infra → base-infra → horizondb → pls-anchor → cert-manager → cert-manager-issuers → worker → repo-cache → portal → disk-controller
 ```
 
 - `global-infra` and `pls-anchor` skip when `EDGE_MODE != afd`.
+- `horizondb` skips unless `HORIZONDB_ENABLED=true`.
 - `cert-manager` and `cert-manager-issuers` skip when `TLS_SOURCE != letsencrypt`.
+- `repo-cache` skips unless `WORKSPACES_ENABLED=true`.
+- `disk-controller` skips unless `WIN_WORKERS_ENABLED=true`.
+- With `WIN_WORKER_COORDINATION_HOST=true`, `worker` comes right after `portal`.
 
 Bicep outputs (ACR login server, storage account name, KV name, etc.)
 cascade forward across services via the alias map; you don't hand-thread

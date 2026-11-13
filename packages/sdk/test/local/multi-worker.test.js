@@ -11,13 +11,17 @@
  *   - filesystem-backed rehydration preserves conversation context across workers
  *   - multiple sessions spread across two workers
  *   - no duplicate execution of the same orchestration turn across workers
+ *   - a forced delete ends a session tree whose orchestrations no worker runs,
+ *     and a start that no worker has taken never runs
  *
  * Run: node --env-file=../../.env test/local/multi-worker.test.js
  */
 
 import { describe, it, beforeAll, afterAll } from "vitest";
+import { Client as DuroxideClient, PostgresProvider, Runtime } from "duroxide";
 import { createTestEnv, preflightChecks, useSuiteEnv } from "../helpers/local-env.js";
-import { withClient, withTwoWorkers, PilotSwarmClient, PilotSwarmWorker } from "../helpers/local-workers.js";
+import { withClient, withTwoWorkers, createManagementClient, PilotSwarmClient, PilotSwarmWorker } from "../helpers/local-workers.js";
+import { registerScriptedProvider } from "../helpers/scripted-workers.js";
 import { assert, assertEqual, assertIncludes, assertIncludesAny, assertGreaterOrEqual, assertNotNull, assertThrows } from "../helpers/assertions.js";
 import { createCatalog, waitForSessionState, validateSessionAfterTurn } from "../helpers/cms-helpers.js";
 import { ONEWORD_CONFIG, MEMORY_CONFIG } from "../helpers/fixtures.js";
@@ -25,6 +29,7 @@ import { createRuntimeFactStore } from "../helpers/fact-store-helpers.js";
 import { existsSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { FilesystemSessionStore, SessionManager } from "../../src/index.ts";
+import { DURABLE_SESSION_ORCHESTRATION_NAME, DURABLE_SESSION_ORCHESTRATION_REGISTRY } from "../../src/orchestration-registry.ts";
 
 const TIMEOUT = 180_000;
 const getEnv = useSuiteEnv(import.meta.url);
@@ -415,6 +420,186 @@ async function testTurnOneLossyReplaysWithoutStoredSession(env) {
     }
 }
 
+// ─── Tests: Sessions No Worker Runs ──────────────────────────────
+
+const short = (id) => id.slice(0, 8);
+
+async function waitUntil(check, what, timeoutMs = 30_000) {
+    const deadline = Date.now() + timeoutMs;
+    while (!(await check())) {
+        if (Date.now() > deadline) throw new Error(`Timed out waiting until ${what}`);
+        await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+}
+
+/**
+ * A client, a management client, the session catalog and duroxide, and no
+ * worker. The fixture provider only stamps the sessions: no model is called.
+ */
+async function withoutWorker(env, fn) {
+    const modelProvidersPath = await registerScriptedProvider(env, "http://127.0.0.1:9");
+    const client = new PilotSwarmClient({
+        store: env.store,
+        duroxideSchema: env.duroxideSchema,
+        cmsSchema: env.cmsSchema,
+        factsSchema: env.factsSchema,
+        modelProvidersPath,
+    });
+    await client.start();
+    const mgmt = await createManagementClient(env);
+    const catalog = await createCatalog(env);
+    const duroxide = new DuroxideClient(await PostgresProvider.connectWithSchema(env.store, env.duroxideSchema));
+    // A started session: its orchestration start is queued and its row says
+    // running.
+    const start = async (parentSessionId) => {
+        const session = await client.createSession(parentSessionId ? { parentSessionId } : undefined);
+        await session.send("Start.");
+        return session.sessionId;
+    };
+    const rows = async () => new Map((await catalog.listSessionsPage({ limit: 100, includeDeleted: true }))
+        .map((row) => [row.sessionId, row]));
+    const orchestration = async (id) => (await duroxide.getStatus(`session-${id}`)).status;
+    try {
+        await fn({ mgmt, catalog, duroxide, start, rows, orchestration });
+    } finally {
+        await catalog.close();
+        await mgmt.stop();
+        await client.stop();
+    }
+}
+
+/** Runs the session orchestrations but no activity, so no turn. */
+async function startOrchestrationsOnly(env) {
+    const provider = await PostgresProvider.connectWithSchema(env.store, env.duroxideSchema);
+    const runtime = new Runtime(provider, { workerTagFilter: "none" });
+    for (const registration of DURABLE_SESSION_ORCHESTRATION_REGISTRY) {
+        runtime.registerOrchestrationVersioned(DURABLE_SESSION_ORCHESTRATION_NAME, registration.version, registration.handler);
+    }
+    await runtime.start();
+    return runtime;
+}
+
+// ─── Test: Forced Delete Ends A Tree No Worker Runs ──────────────
+
+async function testForcedDeleteEndsTreeNoWorkerRuns(env) {
+    await withoutWorker(env, async ({ mgmt, catalog, start, rows, orchestration }) => {
+        const root = await start();
+        const target = await start(root);
+        const sibling = await start(root);
+        const child = await start(target);
+        const grandchild = await start(child);
+        const nephew = await start(sibling);
+
+        // A worker takes every session and is gone before any turn: the
+        // orchestrations wait for turns no worker runs, and a delete command
+        // never settles.
+        const runtime = await startOrchestrationsOnly(env);
+        try {
+            await waitUntil(async () => {
+                for (const id of [root, target, sibling, child, grandchild, nephew]) {
+                    if (await orchestration(id) !== "Running") return false;
+                }
+                return true;
+            }, "every orchestration runs");
+        } finally {
+            await runtime.shutdown(5_000);
+        }
+
+        const expectKept = async (ids, when) => {
+            const byId = await rows();
+            for (const id of ids) {
+                assertEqual(byId.get(id)?.deletedAt, null, `${when}: ${short(id)} is not deleted`);
+                assertEqual(await orchestration(id), "Running", `${when}: ${short(id)} orchestration`);
+            }
+        };
+        const expectDeleted = async (expected, when) => {
+            const byId = await rows();
+            for (const [id, lastError] of expected) {
+                const row = byId.get(id);
+                assert(row?.deletedAt, `${when}: ${short(id)} is soft-deleted`);
+                assertEqual(row.state, "failed", `${when}: ${short(id)} state`);
+                assertEqual(row.lastError, lastError, `${when}: ${short(id)} lastError`);
+                assertEqual(await orchestration(id), "NotFound", `${when}: ${short(id)} orchestration`);
+            }
+        };
+
+        // The child's orchestration instance can't be deleted once. The leaves
+        // go first, so its own child is gone; it and the target stay.
+        const reason = "Forced delete test";
+        const ancestorGone = `Ancestor ${target} deleted: ${reason}`;
+        const managed = mgmt._duroxideClient;
+        const deleteInstance = managed.deleteInstance;
+        let injected = false;
+        managed.deleteInstance = async function (instanceId, force) {
+            if (!injected && instanceId === `session-${child}`) {
+                injected = true;
+                throw new Error("injected: the instance store is unavailable");
+            }
+            return deleteInstance.call(this, instanceId, force);
+        };
+        try {
+            const startedAt = Date.now();
+            await assertThrows(
+                () => mgmt.deleteSession(target, reason, { force: true, settleTimeoutMs: 2_000 }),
+                `stopped at ${short(child)}: deleting its orchestration instance failed: injected`,
+                "the first forced delete",
+            );
+            assert(Date.now() - startedAt >= 2_000, "the delete command was sent, and waited for, first");
+        } finally {
+            managed.deleteInstance = deleteInstance;
+        }
+        await expectDeleted([[grandchild, ancestorGone]], "after the failure");
+        await expectKept([target, child, root, sibling, nephew], "after the failure");
+
+        // A retry finishes the tree, without waiting for a command.
+        await mgmt.deleteSession(target, reason, { force: true, settleTimeoutMs: 0 });
+        await expectDeleted([[target, reason], [child, ancestorGone], [grandchild, ancestorGone]], "after the retry");
+        await expectKept([root, sibling, nephew], "after the retry");
+
+        // A cascade that failed on a child still soft-deletes the parent: the
+        // sibling's row is gone, but its child and both orchestrations remain.
+        // The forced delete finds the child through the rows' parent links.
+        await catalog.softDeleteSession(sibling);
+        await mgmt.deleteSession(sibling, reason, { force: true });
+        await expectDeleted([[nephew, `Ancestor ${sibling} deleted: ${reason}`]], "under a soft-deleted parent");
+        assertEqual(await orchestration(sibling), "NotFound", "the soft-deleted parent's orchestration");
+        await expectKept([root], "the ancestor");
+    });
+}
+
+// ─── Test: Forced Delete Of A Start No Worker Has Taken ──────────
+
+async function testForcedDeleteOfStartNoWorkerTook(env) {
+    await withoutWorker(env, async ({ mgmt, duroxide, start, rows, orchestration }) => {
+        // Started while no worker runs: duroxide reports the queued starts as
+        // NotFound, and its deleteInstance won't delete them.
+        const root = await start();
+        const child = await start(root);
+        assertEqual(await orchestration(root), "NotFound", "a start no worker has taken");
+
+        const reason = "Forced delete test";
+        await mgmt.deleteSession(root, reason, { force: true });
+        const byId = await rows();
+        for (const [id, lastError] of [[root, reason], [child, `Ancestor ${root} deleted: ${reason}`]]) {
+            assert(byId.get(id)?.deletedAt, `${short(id)} is soft-deleted`);
+            assertEqual(byId.get(id).lastError, lastError, `${short(id)} lastError`);
+        }
+
+        // A worker that comes later ends both starts at once and runs no turn
+        // of a deleted session.
+        const runtime = await startOrchestrationsOnly(env);
+        try {
+            for (const id of [root, child]) {
+                await waitUntil(async () => await orchestration(id) === "Failed", `${short(id)}'s start ends`);
+                assertIncludes((await duroxide.getStatus(`session-${id}`)).error, "Session deleted", `${short(id)}'s start is cancelled`);
+            }
+            assertEqual((await duroxide.getQueueDepths()).workerQueue, 0, "no turn waits for a worker");
+        } finally {
+            await runtime.shutdown(5_000);
+        }
+    });
+}
+
 // ─── Runner ──────────────────────────────────────────────────────
 
 describe("Level 3: Multi-Worker Tests", () => {
@@ -437,5 +622,15 @@ describe("Level 3: Multi-Worker Tests", () => {
     });
     it("Turn 1+ Uses Lossy Replay Without Stored Session", { timeout: TIMEOUT * 2 }, async () => {
         await testTurnOneLossyReplaysWithoutStoredSession(getEnv());
+    });
+});
+
+// No worker and no model: these tests need only PostgreSQL.
+describe("Level 3: Sessions No Worker Runs", () => {
+    it("Forced Delete Ends A Tree No Worker Runs", { timeout: TIMEOUT }, async () => {
+        await testForcedDeleteEndsTreeNoWorkerRuns(getEnv());
+    });
+    it("Forced Delete Of A Start No Worker Has Taken", { timeout: TIMEOUT }, async () => {
+        await testForcedDeleteOfStartNoWorkerTook(getEnv());
     });
 });

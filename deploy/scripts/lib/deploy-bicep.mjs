@@ -8,7 +8,8 @@
 //
 // Subsequent stages (manifests, rollout) see the merged env map in-process.
 
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, isAbsolute } from "node:path";
 import { run, runJson, log, REPO_ROOT } from "./common.mjs";
 import { renderParams } from "./render-params.mjs";
@@ -80,9 +81,33 @@ const OUTPUT_ALIAS = {
   // components/edge-appgw/kustomization.yaml in place of the previously-
   // hardcoded `pilotswarm-portal-tls` literal.
   portalTlsCertName: "PORTAL_TLS_CERT_NAME",
+  // Windows worker pool (WIN_WORKERS_ENABLED=true; empty otherwise). The
+  // controller's resource settings reach its overlay through these keys
+  // (stage-manifests.mjs, diskControllerOverlayEnv), and the workers'
+  // identity and the stamp's vaults reach the Windows worker deploy step.
+  diskPoolStateUrl: "PS_DISK_POOL_STATE_URL",
+  winWorkerScaleSetId: "WIN_WORKER_SCALE_SET_ID",
+  winWorkerStandbyPoolId: "WIN_WORKER_STANDBY_POOL_ID",
+  winWorkerDcrId: "WIN_WORKER_DCR_ID",
+  winWorkerGalleryImageId: "WIN_WORKER_GALLERY_IMAGE_ID",
+  winWorkerConfigVersion: "WIN_WORKER_CONFIG_VERSION",
+  winWorkerIdentityName: "WIN_WORKER_IDENTITY_NAME",
+  winWorkerIdentityClientId: "WIN_WORKER_IDENTITY_CLIENT_ID",
+  winWorkerIdentityPrincipalId: "EXPECTED_WIN_WORKER_OID",
+  diskControllerIdentityClientId: "DISK_CONTROLLER_IDENTITY_CLIENT_ID",
+  diskControllerIdentityPrincipalId: "DISK_CONTROLLER_IDENTITY_PRINCIPAL_ID",
+  personalKeyVaultUri: "PERSONAL_KEY_VAULT_URI",
+  deployKeyVaultName: "DEPLOY_KEY_VAULT_NAME",
+  winWorkerEgressIp: "WIN_WORKER_EGRESS_IP",
+  // The coordination host's own identity (WIN_WORKER_COORDINATION_HOST=true;
+  // empty otherwise). stage-manifests.mjs stages the worker with it
+  // (lib/coordination-host.mjs), and the database job adds it as a member.
+  coordinationIdentityClientId: "COORDINATION_IDENTITY_CLIENT_ID",
+  coordinationIdentityPrincipalId: "COORDINATION_IDENTITY_PRINCIPAL_ID",
+  coordinationIdentityName: "COORDINATION_IDENTITY_NAME",
 };
 
-export async function deployBicep({ service, envName, env, region, stagingDir, moduleListOverride, force, forceModules }) {
+export async function deployBicep({ service, envName, env, region, stagingDir, moduleListOverride, force, forceModules, secureParameters }) {
   const modules = moduleListOverride ?? SERVICE_TO_MODULES[service];
   if (!modules || modules.length === 0) {
     log("info", `No Bicep modules for service '${service}'; skipping.`);
@@ -93,13 +118,33 @@ export async function deployBicep({ service, envName, env, region, stagingDir, m
 
   const forceSet = new Set(Array.isArray(forceModules) ? forceModules : []);
   for (const moduleName of modules) {
-    await deployOne({ moduleName, service, envName, env, region, stagingDir, force, forceSet });
+    await deployOne({
+      moduleName, service, envName, env, region, stagingDir, force, forceSet,
+      secureParameters: secureParameters?.[moduleName],
+    });
     if (moduleName === "horizondb") await ensureHorizonDbParameterGroup(env);
   }
   return env;
 }
 
-async function deployOne({ moduleName, service, envName, env, region, stagingDir, force, forceSet }) {
+// Secure parameters (`@secure()` in Bicep) never go into the rendered
+// parameters file, onto a command line or into a log: they pass to az through
+// a file in a private temporary folder that is removed right after the
+// deployment.
+function writeSecureParameters(parameters) {
+  const dir = mkdtempSync(join(tmpdir(), "pilotswarm-bicep-"));
+  chmodSync(dir, 0o700);
+  const path = join(dir, "secure.parameters.json");
+  const body = Object.fromEntries(Object.entries(parameters).map(([name, value]) => [name, { value }]));
+  writeFileSync(path, JSON.stringify({
+    $schema: "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+    contentVersion: "1.0.0.0",
+    parameters: body,
+  }), { mode: 0o600 });
+  return { dir, path };
+}
+
+async function deployOne({ moduleName, service, envName, env, region, stagingDir, force, forceSet, secureParameters }) {
   const scope = MODULE_SCOPE[moduleName];
   if (!scope) throw new Error(`Unknown Bicep scope for module '${moduleName}'`);
   const paramsRel = moduleParamsTemplate(moduleName);
@@ -300,7 +345,17 @@ async function deployOne({ moduleName, service, envName, env, region, stagingDir
   }
 
   log("info", `[${moduleName}] az ${baseArgs.join(" ")}`);
-  run("az", baseArgs);
+  const secure = secureParameters && Object.keys(secureParameters).length > 0 ? writeSecureParameters(secureParameters) : null;
+  try {
+    if (secure) {
+      log("info", `[${moduleName}] passing ${Object.keys(secureParameters).join(", ")} as secure parameters`);
+      run("az", [...baseArgs, "--parameters", `@${secure.path}`]);
+    } else {
+      run("az", baseArgs);
+    }
+  } finally {
+    if (secure) rmSync(secure.dir, { recursive: true, force: true });
+  }
 
   // 3) Capture outputs and merge into env map.
   const showArgs = ["deployment", scope, "show", "--name", deploymentName, "--query", "properties.outputs", "-o", "json"];

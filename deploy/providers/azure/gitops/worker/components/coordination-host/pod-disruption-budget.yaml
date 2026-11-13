@@ -1,0 +1,15 @@
+# Two replicas keep one coordination host up through a node drain or a pod
+# restart: every turn waits for the bookkeeping activities that run here.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: copilot-runtime-worker
+  labels:
+    app.kubernetes.io/name: pilotswarm
+    app.kubernetes.io/component: worker
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: pilotswarm
+      app.kubernetes.io/component: worker

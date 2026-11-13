@@ -161,7 +161,8 @@ listProviders + listModels + getModelDefaults
 
 The Admin Console is the shared owner of runtime provider lifecycle and model
 routing. Model Providers has two pages: **My Providers** (personal credentials
-and user default) and admin-only **Shared Providers** (shared credentials,
+and user default, plus the dispatcher-delegation opt-in on deployments that
+name a dispatcher) and admin-only **Shared Providers** (shared credentials,
 cluster/system defaults, and system-agent overrides). Providers use their
 immutable name everywhere; there is no separate display label. Providers &
 Budgets owns usage, limits, allowances, holds, and paused-session diagnostics.

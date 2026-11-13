@@ -76,14 +76,23 @@ the provider that lists its root.
 Before a turn (the turn preamble):
 1. PilotSwarm reads the session's record: the working folder and the extra folders.
 2. It adds the default folders, when your provider has defaultFolders.
-3. It calls ensureAttached for each folder, side by side. Deadline: 30 s each.
+3. It calls ensureAttached for each folder, side by side. Deadline: 30 s each,
+   or PILOTSWARM_WORKSPACE_ATTACH_TIMEOUT_MS on the worker.
 4. For each answer with ok: true, it checks the path in a child process.
 5. A required folder that failed: the user's message is held and retried
-   (after retryAfterMs, else 30 s, 2 min, 5 min, then every 15 min).
+   (after retryAfterMs, else 30 s, 2 min, 5 min, then every 15 min; a session
+   with the fast busy policy retries WORKSPACE_BUSY after 10 s, 20 s, 1 min,
+   then every 3 min, and leaves the worker after the first one).
    An optional extra folder that failed: left out of this turn; the model is told.
 6. The CLI gets the working folder as its cwd, the extra folders as
    additional directories, and what `adopt` allows.
 ```
+
+The deadline covers `listRoots` and `ensureAttached` together, per folder. A
+provider that needs longer, for example to mount a share or restore a folder
+on first use, can get it: set `PILOTSWARM_WORKSPACE_ATTACH_TIMEOUT_MS` on the
+workers, in milliseconds (default `30000`). The checks before a workspace
+change and before a spawn use the same deadline.
 
 `release` is called with a reason: `ended`, `moved`, `changed`, `evicted`,
 `shutdown`, `spawn_check` or `set_check`. Section 4.2 of the design lists
@@ -95,7 +104,7 @@ when each happens.
   Mount every root at the same path everywhere. A changed path misses the
   model's prompt cache and restarts the CLI session.
 - **No synchronous file calls on the mount inside a hook.** A hung file
-  server blocks the worker's event loop, and the 30 s deadline cannot stop
+  server blocks the worker's event loop, and the attach deadline cannot stop
   that. Run file calls in child processes with their own deadline.
 - **An empty mount point is not a mount.** If the share is not mounted, the
   mount point is an empty local folder, and writes land on the worker's own
@@ -110,6 +119,12 @@ when each happens.
 - **`notice` is said once.** PilotSwarm adds it to the turn's prompt and does
   not remember it. Send it once; send it again only when the same turn is
   retried (same `turnIndex`). At most 4,000 characters.
+- **One folder per session tree, if you need it.** A provider that can give
+  a folder to only one session at a time, such as a disk per tree, sets
+  `PILOTSWARM_DISABLE_CHILD_WORKSPACE_INHERITANCE=1` on its workers. A
+  sub-agent then gets no workspace, neither its parent's nor one its parent
+  names: `spawn_agent` no longer offers `workspace` and refuses one with
+  `WORKSPACE_PATH_INVALID`. Off by default.
 - **Error codes.** Use PilotSwarm's codes where they fit:
   `WORKSPACE_ROOT_UNKNOWN`, `WORKSPACE_PATH_INVALID`,
   `WORKSPACE_FOLDER_MISSING`, `WORKSPACE_NOT_MOUNTED`,
@@ -117,6 +132,81 @@ when each happens.
   `WORKSPACE_STALE_MOUNT`. Your own codes pass through unchanged. Set
   `retryAfterMs` when waiting can help; leave it out when only a person can
   fix the problem.
+
+## Taking a folder back, and shutting down
+
+A provider whose folders are scarce, such as a disk that one worker holds at a
+time, may need a folder back from a session that is idle on this worker, or
+must finish its own work when the worker stops. The worker offers:
+
+| Call | What it does |
+|---|---|
+| `worker.tryReleaseIdleWorkspace(sessionId, { reason, releaseTimeoutMs })` | Releases the session's folders here at once, as a `release` with that reason: cancels its shells, drops its CLI handle and calls your `release`, which gets `releaseTimeoutMs` (default 60 s). It never waits: `{ released: false, busy: true }` while a lock, a running turn or a background task holds the session; `{ released: false, notHeld: true }` when nothing of the session is held on this worker, so clean up whatever is left over yourself. A turn later attaches the folder again |
+| `worker.getActiveWorkloadCount()` | Resolves with the session locks held here (running turns and other session operations) plus the background shells and agent tasks of the other warm sessions. Zero means idle; a session whose tasks cannot be read counts as busy |
+| `worker.gracefulShutdown({ releaseTimeoutMs })` | Each `release` at shutdown gets `releaseTimeoutMs` (default 5 s). PilotSwarm stops waiting then; your `release` keeps running |
+| `worker.onShutdown(fn)` | Runs `fn` at the end of every graceful shutdown, once the worker has stopped, also when stopping failed: for example to wait for a `release` still running, then stop your own timers. Hooks run one at a time in the order they were registered; one that throws is logged. Returns a function that removes the hook |
+| `worker.requestExit(code, reason, { drainTimeoutMs })` | Shuts the worker down gracefully, with `drainTimeoutMs` as the drain budget instead of `PILOTSWARM_WORKER_SHUTDOWN_TIMEOUT_MS`, and asks the host to exit with `code`, for example a non-zero code so that a service manager starts the worker again. A shutdown already in progress keeps its budget, and the first request's code wins |
+| `worker.waitForShutdown()` | Resolves once a graceful shutdown has finished, hooks included, with the exit code: the first `requestExit` code, else 0. The worker never exits the process itself; `examples/worker.js` exits with this code |
+
+Without these calls, nothing changes: shutdown releases take 5 s each, and
+`examples/worker.js` exits with 0.
+
+The Dev Drive example, `packages/sdk/examples/devdrive-workspaces` (see its
+README), builds on these calls: on Windows workers each root session's work
+is on its own disk, which a VM holds one at a time. It takes a disk back from
+an idle session with `tryReleaseIdleWorkspace`, reports
+`getActiveWorkloadCount()` to its disk controller, finishes a release still
+running in an `onShutdown` hook, and, on a worker that isn't owner-only, asks
+for a restart with `requestExit` when its VM is bound to an owner. It also
+sets an admission hook (below) and
+refuses to load without `PILOTSWARM_DISABLE_CHILD_WORKSPACE_INHERITANCE=1`.
+[Windows workers](../deploy/windows-workers.md) describes the deployment it
+runs in, including how a disk is parked while its owner works elsewhere: the
+disk controller then refuses every attach of the tree with `WORKSPACE_BUSY`
+and a 15-minute `retryAfterMs`, and asks the VM that holds the disk to
+release it.
+
+## Admitting turns on a worker
+
+A worker that may run only some sessions, such as one that serves one
+person's disk or a host for system sessions only, sets an admission hook with
+`worker.setSessionAdmission(fn)`; `null` removes it. Before every turn, with
+or without a workspace, and before the session is loaded or hydrated on the
+worker, PilotSwarm calls `fn` with:
+
+| Field | Meaning |
+|---|---|
+| `sessionId` | The session whose turn is next |
+| `rootSessionId` | The root of its tree: the session itself for a root |
+| `isSystem` | `true` for a system session, a session the system user owns (the sessions that system sessions create) and any session under a system root |
+
+It acts on the answer:
+
+| Answer | What happens |
+|---|---|
+| `{ decision: "admit" }` | The turn runs |
+| `{ decision: "busy", message?, retryAfterMs? }` | The turn is held as when a required folder is busy, with the code `WORKSPACE_BUSY`: the user's message is kept and retried after the longer of `retryAfterMs` and the busy schedule (30 s, 2 min, 5 min, then every 15 min; with the fast busy policy 10 s, 20 s, 1 min, then every 3 min). With session state in blob storage, two busy answers in a row on one worker (one, with the fast busy policy) release the session from that worker, so the next attempt may run elsewhere |
+| `{ decision: "deny", message? }` | The turn fails with `message` and is not retried |
+
+The busy schedule starts over when a turn gets past the gates: for a session
+with a workspace, when a turn gets past its workspace check. A session without
+one keeps its place in the schedule after a turn runs, so that each later busy
+answer waits at least as long as the one before, and two busy answers on one
+worker, however far apart, release it from that worker. On orchestration
+1.0.84 and later, a session without a workspace that has an owner tag or the
+fast busy policy starts over when a turn runs.
+
+A hook that throws or answers anything else, or a session that the worker
+cannot read from the catalog, fails the turn with an error that is retried,
+so a turn never runs unchecked. A host for system sessions only:
+
+```js
+worker.setSessionAdmission(({ isSystem }) => isSystem
+    ? { decision: "admit" }
+    : { decision: "deny", message: "This host runs only system sessions." });
+```
+
+Without a hook, every turn runs as before.
 
 ## Recipe: a shared folder
 
@@ -267,6 +357,25 @@ identity provider) avoids a new empty folder when an email changes.
 Pick the level that fits who uses the deployment. Level 1 guards against
 mistakes, not against a person who wants to read another person's files.
 
+### Workers per person
+
+[Owner routing](../reference/configuration.md#owner-routing-optional) gives
+each person workers of their own, for example when a worker holds that
+person's folders or credentials. With `PILOTSWARM_OWNER_ROUTING=1` the portal
+tags the sessions that the deployment's dispatcher creates for a person, and
+only workers started with the person's
+tag (`PILOTSWARM_WORKER_OWNER_TAG`) run their turns, workspace checks and
+releases. Sessions that people start themselves stay untagged. With
+`PILOTSWARM_WORKER_OWNER_ONLY=1` as well, such a worker runs
+nothing else: no untagged work (system sessions' turns, titles, the steps
+around every turn), no capability-tagged activity and no capacity request,
+work whose input can come from every user. Another worker without these
+settings must run that work: it needs no person's folders or credentials, but
+without it the person's sessions wait. The
+[Windows workers](../deploy/windows-workers.md) guide shows a complete
+deployment: Windows VMs that each serve one person, and a Linux coordination
+host that runs everything else.
+
 ## The portal's Workspace tab
 
 The portal's Workspace tab lets a session's owner browse, edit, upload and
@@ -351,5 +460,9 @@ Remove that entry to keep commands off.
   `test/local/workspace-loads.test.js`.
 - **A fake provider** for PilotSwarm's side of the contract:
   `test/helpers/fake-workspace-provider.mjs`.
+- **Take-backs and shutdown** without a database: a never-started
+  `PilotSwarmWorker` runs `tryReleaseIdleWorkspace`, check attaches and
+  shutdown releases through its own `SessionManager`; see
+  `test/unit/devdrive-workspace-provider.test.mjs`.
 - **Break each rule on purpose** and check that a test fails. A test that
   cannot fail hides the bug it was written for.

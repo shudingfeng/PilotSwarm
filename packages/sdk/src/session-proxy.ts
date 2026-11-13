@@ -1,9 +1,10 @@
-import { HANDOFF_ACTIVITY_NAMES, TURN_CONTROL_ACTIVITY_NAMES, WORKFLOW_INTAKE_TURN_ACTIVITY_NAMES, routeHandoffActivity, routedActivityName, registerHandoffActivity, registerTurnControlActivity, registerWorkflowIntakeTurnActivity, routeTurnControlActivity, routeWorkflowRequestActivity, routeWorkspaceActivity, type ActivityRoutingContract } from "./activity-routing.js";
+import { HANDOFF_ACTIVITY_NAMES, TURN_CONTROL_ACTIVITY_NAMES, WORKFLOW_INTAKE_TURN_ACTIVITY_NAMES, routeHandoffActivity, routedActivityName, registerHandoffActivity, registerTurnControlActivity, registerWorkflowIntakeTurnActivity, routeOwnerActivity, routeOwnerCapacityActivity, routeTurnControlActivity, routeWorkflowRequestActivity, routeWorkspaceActivity, type ActivityRoutingContract } from "./activity-routing.js";
+import { askOwnerCapacityRequester, isOwnerRoutingTag, NEW_ROOT_OWNER_ROUTED_TEXT, ownerTagMissingText, workflowOwnerRoutedRefusal } from "./owner-routing.js";
 import { agentSender, sessionIdOfInstance } from "./message-sender.js";
 import { spawnAgentAdmission, spawnAgentCreationBudget, WORKFLOW_CHILD_BUDGET_MAX } from "./child-budget.js";
 import { sessionTitleChangedForRecord } from "./session-title.js";
 import nodeCrypto from "node:crypto";
-import { createCopilotClient } from "./copilot-client.js";
+import { createCopilotClient, withCliProgramSessionOptions } from "./copilot-client.js";
 import {
     BoundAgentPackageUnavailableError,
     isSessionLockAcquireTimeoutError,
@@ -15,11 +16,11 @@ import { readCanvasKv, writeCanvasKv } from "./canvas-kv.js";
 import { publishCanvasApp, findCanvasApp } from "./canvas-app-catalog.js";
 import { canvasArtifactFilename, normalizeCanvasSlot, eventSlot, latestCanvasEventData, latestCanvasRev } from "./canvas-support.js";
 import type { SessionStateStore } from "./session-store.js";
-import { resolveEffectiveSpawnOwner, type SessionCatalog } from "./cms.js";
+import { resolveEffectiveSpawnOwner, SYSTEM_USER_PRINCIPAL, type SessionCatalog } from "./cms.js";
 import { recordSessionEndRequested } from "./session-end-mark.js";
 import { admissionToWait, PROVIDER_BUDGET_WAKE_PROMPT } from "./provider-budgets.js";
 import { applyWorkspaceDefaults, checkWorkspaceForSpawn, defaultsRecordOf, orchestrationSupportsWorkspaces, prepareWorkspace, prepareWorkspaceExtras, readDefaultsRecord, resolveWorkspaceDefaults, sameDefaultsRecord, WORKSPACE_PARTIAL_CHANGES_NOTE, workspaceOpenedKey } from "./workspace.js";
-import { workingFolderOf } from "./workspace-check.js";
+import { childWorkspacesDisabled, workingFolderOf } from "./workspace-check.js";
 import { changedExtraNames, sameWorkingFolder } from "./workspace-check.js";
 import { adoptionNote, sameAdoption } from "./workspace-repo-agents.js";
 import { WORKSPACE_FILES_CHANGED_EVENT, WORKSPACE_FILES_NOTED_EVENT, workspaceFileChangesNote, workspaceFileChangesToTell } from "./workspace-files.js";
@@ -33,16 +34,16 @@ import { loadAdminScope } from "../api/src/admin-scope.js";
 import { parseAgentFqn } from "./agent-fqn.js";
 import { decideSessionControl } from "./agent-manager-tools.js";
 import type { StorageConfig } from "./storage-config.js";
-import { SESSION_STATE_MISSING_PREFIX, INTAKE_ENDED_BEFORE_SEND_MESSAGE, sanitizePromptAttachmentRefs, IMAGE_ATTACHMENT_CONTENT_TYPES, ATTACHMENT_MAX_BYTES, ATTACHMENTS_MAX_TOTAL_BYTES, type AbortTurnResult, type PromptAttachmentRef, type ManagedSessionConfig, type SerializableSessionConfig, type TurnResult, type TurnOptions, type OrchestrationInput, type LateSteer, type TurnEndKind, type TurnStartRecord, type TurnControl } from "./types.js";
+import { SESSION_STATE_MISSING_PREFIX, INTAKE_ENDED_BEFORE_SEND_MESSAGE, WORKSPACE_ERROR_CODES, sanitizePromptAttachmentRefs, IMAGE_ATTACHMENT_CONTENT_TYPES, ATTACHMENT_MAX_BYTES, ATTACHMENTS_MAX_TOTAL_BYTES, type AbortTurnResult, type PromptAttachmentRef, type ManagedSessionConfig, type SerializableSessionConfig, type SessionAdmissionDecision, type TurnResult, type TurnOptions, type OrchestrationInput, type LateSteer, type TurnEndKind, type TurnStartRecord, type TurnControl } from "./types.js";
 import type { ArtifactStore } from "./session-store.js";
 import type { AgentConfig } from "./agent-loader.js";
 import { systemChildAgentUUID } from "./agent-loader.js";
 import { PilotSwarmClient } from "./client.js";
 import { PilotSwarmManagementClient, type SessionOrchestrationStats } from "./management-client.js";
-import { replyInternalSessionMessage, sendInternalSessionMessage } from "./session-messages.js";
+import { replyInternalSessionMessage, sendInternalSessionMessage, type SessionMessageScope } from "./session-messages.js";
 import { loadKnowledgeIndexFromFactStore } from "./knowledge-index.js";
 import { mergePromptSections } from "./prompt-layering.js";
-import { approvePermissionForSession } from "./permissions.js";
+import { approvePermissionForSession, denyEveryPermission } from "./permissions.js";
 import { formatSessionTimestamp, sessionTimestampMillis } from "./session-list-timestamps.js";
 import { formatSessionOwnerLabel, getSessionOwnerKind, matchesSessionOwnerFilters } from "./session-owner-utils.js";
 import { cmsRetryBestEffort, cmsRetryCritical } from "./cms-retry.js";
@@ -81,6 +82,8 @@ import { LatestValuePublisher, type LiveTurnPayload } from "./live-turn.js";
 import { STREAMING_EVENT_TYPES, keepOrchestrationTurnEvents, turnResultSizeWarning } from "./turn-result-events.js";
 import { MODEL_EVENT_TYPES_RECORDED_WHEN_LOGGING, modelEventLoggingEnabled } from "./model-event-logging.js";
 import type { NativeTasksPayload } from "./native-task-observer.js";
+import { PersonalCredentialError, readsAsAuthFailure } from "./personal-secret-store.js";
+import { redactSecrets, redactSecretsIn } from "./secret-redaction.js";
 import { spawnWorkflowFromTool } from "./workflow/spawn.js";
 import { readWorkflowFromTool, sendWorkflowInputFromTool, updateWorkflowFromTool, workflowToolErrorPayload, type WorkflowToolHost } from "./workflow/tools.js";
 import { WORKFLOW_UPDATE_DATA_LINE, isWorkflowRuntimeSender, parseWorkflowUpdateHeader, workflowRuntimeSender } from "./workflow/parent-messages.js";
@@ -872,13 +875,21 @@ export function createSessionProxy(
     affinityKey: string,
     config: SerializableSessionConfig,
     routingContract?: ActivityRoutingContract,
+    /**
+     * Owner routing (1.0.84): with an owner tag, every activity below goes
+     * only to workers that declare the tag. Older orchestrations pass none
+     * and keep their routing.
+     */
+    routing?: { ownerTag?: string },
 ) {
+    const ownerTag = typeof routing?.ownerTag === "string" && routing.ownerTag ? routing.ownerTag : undefined;
+    const owned = (task: any) => (ownerTag ? routeOwnerActivity(task, ownerTag) : task);
     return {
         runTurn(
             prompt: string,
             bootstrap?: boolean,
             turnIndex?: number,
-            turnMeta?: { parentSessionId?: string; nestingLevel?: number; requiredTool?: string; cycleOrigin?: "cron" | "cron_at"; retryCount?: number; clientMessageIds?: string[]; sender?: unknown; snapshot?: { expectedVersion?: number; turnKey: string }; attachments?: Array<{ filename: string; contentType: string; sizeBytes: number }>; transcriptEpoch?: number; epochStart?: boolean; stashedPrompts?: string[]; stashedAttachments?: Array<{ filename: string; contentType: string; sizeBytes: number }>; workspaceRevision?: number; workspaceNotice?: string; carriedSteers?: import("./types.js").LateSteer[]; intake?: IntakeTurnField },
+            turnMeta?: { parentSessionId?: string; nestingLevel?: number; requiredTool?: string; cycleOrigin?: "cron" | "cron_at"; retryCount?: number; clientMessageIds?: string[]; sender?: unknown; snapshot?: { expectedVersion?: number; turnKey: string }; attachments?: Array<{ filename: string; contentType: string; sizeBytes: number }>; transcriptEpoch?: number; epochStart?: boolean; stashedPrompts?: string[]; stashedAttachments?: Array<{ filename: string; contentType: string; sizeBytes: number }>; workspaceRevision?: number; workspaceNotice?: string; carriedSteers?: import("./types.js").LateSteer[]; ownerTag?: string; workspaceBusyFastRelease?: boolean; intake?: IntakeTurnField },
         ) {
             // Workflow intake (1.0.83): turns run as runTurnV5 /
             // runTurnEpochV5, on the turn-control path, with the workflow-
@@ -945,11 +956,19 @@ export function createSessionProxy(
                     ...(turnControl && turnMeta?.carriedSteers && turnMeta.carriedSteers.length > 0
                         ? { carriedSteers: turnMeta.carriedSteers }
                         : {}),
+                    // 1.0.84 (each only when set): what a session created
+                    // during this turn takes from it.
+                    ...(turnMeta?.ownerTag ? { ownerTag: turnMeta.ownerTag } : {}),
+                    ...(turnMeta?.workspaceBusyFastRelease ? { workspaceBusyFastRelease: true } : {}),
                     // 1.0.83: the invocation this attempt carries, composed by the worker before the prompt it sends.
                     ...(workflowIntake && turnMeta?.intake ? { intake: turnMeta.intake } : {}),
                 },
                 affinityKey,
             );
+            // Owner routing (1.0.84): the owner's tag replaces the capability
+            // tag, the workflow-request one included; only workers of this
+            // release can declare an owner tag.
+            if (ownerTag) return routeOwnerActivity(task, ownerTag);
             // Workflow intake (1.0.83): only workers that declare the
             // workflow-request capability run these turns; an older worker
             // would ignore the `intake` field and drop its items.
@@ -966,7 +985,7 @@ export function createSessionProxy(
                 : routeHandoffActivity(task, routingContract);
         },
         dehydrate(reason: string, eventData?: Record<string, unknown>) {
-            return ctx.scheduleActivityOnSession(
+            return owned(ctx.scheduleActivityOnSession(
                 "dehydrateSession",
                 {
                     sessionId,
@@ -974,51 +993,53 @@ export function createSessionProxy(
                     ...(eventData && Object.keys(eventData).length > 0 ? { eventData } : {}),
                 },
                 affinityKey,
-            );
+            ));
         },
         hydrate() {
-            return ctx.scheduleActivityOnSession(
+            return owned(ctx.scheduleActivityOnSession(
                 "hydrateSession",
                 { sessionId },
                 affinityKey,
-            );
+            ));
         },
         needsHydration() {
-            return ctx.scheduleActivityOnSession(
+            return owned(ctx.scheduleActivityOnSession(
                 "needsHydrationSession",
                 { sessionId },
                 affinityKey,
-            );
+            ));
         },
         destroy() {
-            return ctx.scheduleActivityOnSession(
+            return owned(ctx.scheduleActivityOnSession(
                 "destroySession",
                 { sessionId },
                 affinityKey,
-            );
+            ));
         },
         /** Session workspaces (1.0.80): the attach and the path check, on the worker that holds the session. */
         checkWorkspace(args: { workspace: import("./types.js").SessionWorkspace; revision: number; turnIndex: number; previous?: import("./types.js").SessionWorkspace | null }) {
-            return routeWorkspaceActivity(ctx.scheduleActivityOnSession(
+            const task = ctx.scheduleActivityOnSession(
                 "checkWorkspace",
                 { sessionId, ...args },
                 affinityKey,
-            ));
+            );
+            return ownerTag ? routeOwnerActivity(task, ownerTag) : routeWorkspaceActivity(task);
         },
         /** Session workspaces (1.0.80): cancel shells, disconnect and tell the provider, on the worker that holds the session. */
         releaseWorkspace(args: { reason: string; revision?: number; turnIndex?: number }) {
-            return routeWorkspaceActivity(ctx.scheduleActivityOnSession(
+            const task = ctx.scheduleActivityOnSession(
                 "releaseWorkspace",
                 { sessionId, ...args },
                 affinityKey,
-            ));
+            );
+            return ownerTag ? routeOwnerActivity(task, ownerTag) : routeWorkspaceActivity(task);
         },
         checkpoint() {
-            return ctx.scheduleActivityOnSession(
+            return owned(ctx.scheduleActivityOnSession(
                 "checkpointSession",
                 { sessionId },
                 affinityKey,
-            );
+            ));
         },
         /**
          * Stop-turn fast-path interrupt: lands on the worker owning the warm
@@ -1027,7 +1048,7 @@ export function createSessionProxy(
          * worker slot; otherwise the dropped-future backstop still stops it).
          */
         abortTurn(reason: string, expectedTurnIndex?: number) {
-            return ctx.scheduleActivityOnSession(
+            return owned(ctx.scheduleActivityOnSession(
                 "abortTurn",
                 {
                     sessionId,
@@ -1035,7 +1056,7 @@ export function createSessionProxy(
                     ...(expectedTurnIndex != null ? { expectedTurnIndex } : {}),
                 },
                 affinityKey,
-            );
+            ));
         },
     };
 }
@@ -1124,6 +1145,86 @@ const BOUND_AGENT_RESTORE_ANNOUNCED_SWEEP_AT = 5_000;
  */
 const WORKSPACE_WAIT_FALLBACK_SECONDS = 30;
 
+/** Owned by the system user: the sessions that system sessions create, roots included. */
+function ownedBySystemUser(owner: { provider?: string | null; subject?: string | null } | null | undefined): boolean {
+    return owner?.provider === SYSTEM_USER_PRINCIPAL.provider && owner?.subject === SYSTEM_USER_PRINCIPAL.subject;
+}
+
+/**
+ * The turn result for a session admission hook's answer: null to run the
+ * turn. `busy` is the workspace gate's busy `wait`, so the orchestration
+ * holds the prompt and retries it as for a required folder that failed; an
+ * orchestration older than 1.0.80 cannot hold a turn for that gate, so it
+ * gets an error it retries. `deny` is an error that is not retried. Any other
+ * answer is an error that is retried, so a turn never runs unchecked.
+ */
+export function sessionAdmissionTurnResult(
+    answer: SessionAdmissionDecision | null | undefined,
+    context: { workerNodeId: string; orchestrationVersion?: unknown },
+): TurnResult | null {
+    const decision = (answer as { decision?: unknown } | null | undefined)?.decision;
+    if (decision === "admit") return null;
+    const rawMessage = (answer as { message?: unknown } | null | undefined)?.message;
+    const message = typeof rawMessage === "string" && rawMessage.trim() ? rawMessage.trim() : null;
+    if (decision === "busy") {
+        const reason = message ?? "this worker cannot run the session now";
+        if (!orchestrationSupportsWorkspaces(context.orchestrationVersion)) {
+            return { type: "error", message: `Session admission: busy: ${reason}` } as TurnResult;
+        }
+        const retryAfterMs = (answer as { retryAfterMs?: unknown }).retryAfterMs;
+        return {
+            type: "wait",
+            seconds: WORKSPACE_WAIT_FALLBACK_SECONDS,
+            reason,
+            gate: "workspace",
+            code: WORKSPACE_ERROR_CODES.BUSY,
+            workerNodeId: context.workerNodeId,
+            ...(typeof retryAfterMs === "number" && Number.isFinite(retryAfterMs) && retryAfterMs >= 0 ? { retryAfterMs } : {}),
+        } as TurnResult;
+    }
+    if (decision === "deny") {
+        return { type: "error", message: `Session admission denied this turn: ${message ?? "this worker may not run the session"}`, retryable: false } as TurnResult;
+    }
+    return { type: "error", message: "Session admission could not check this turn: the hook answered neither admit, busy nor deny" } as TurnResult;
+}
+
+/**
+ * A turn result as it is stored: only the events the orchestration reads,
+ * and, when redaction is on, no secret in its text or the tool output it
+ * carries.
+ */
+export function persistedTurnResult(result: TurnResult): TurnResult {
+    return redactSecretsIn(keepOrchestrationTurnEvents(result));
+}
+
+/**
+ * External personal secrets: the turn result for a key the credential
+ * resolver did not hand over. A busy answer is the wait a busy workspace
+ * returns, so the orchestration applies the same busy policy; an
+ * orchestration older than 1.0.80 has no such hold, so it gets an error it
+ * retries instead. A refusal is an error that reads as an authentication
+ * failure, which the orchestration ends without a retry; an outage is an
+ * ordinary error, which it retries.
+ */
+export function personalCredentialTurnResult(
+    err: PersonalCredentialError,
+    workerNodeId: string,
+    orchestrationVersion?: unknown,
+): TurnResult {
+    if (err.outcome !== "busy" || !orchestrationSupportsWorkspaces(orchestrationVersion)) {
+        return { type: "error", message: err.message } as TurnResult;
+    }
+    return {
+        type: "wait",
+        seconds: WORKSPACE_WAIT_FALLBACK_SECONDS,
+        reason: err.message,
+        gate: "workspace",
+        code: "WORKSPACE_BUSY",
+        workerNodeId,
+        ...(err.retryAfterMs !== undefined ? { retryAfterMs: err.retryAfterMs } : {}),
+    } as TurnResult;
+}
+
 /**
  * Backfill a session's bound agent from the CMS catalog row.
  *
@@ -1211,13 +1312,24 @@ export function createSessionManagerProxy(
             return ctx.scheduleActivity("summarizeSession", { sessionId });
         },
         /** Spawn a child session via the PilotSwarmClient SDK. Returns the generated child session ID. */
-        spawnChildSession(parentSessionId: string, config: any, task: string, nestingLevel?: number, isSystem?: boolean, title?: string, agentId?: string, splash?: string, titleIsExplicit?: boolean, requiredTool?: string, workspaceChosen?: boolean) {
+        spawnChildSession(parentSessionId: string, config: any, task: string, nestingLevel?: number, isSystem?: boolean, title?: string, agentId?: string, splash?: string, titleIsExplicit?: boolean, requiredTool?: string, workspaceChosen?: boolean, routing?: { ownerTag?: string; workspaceBusyFastRelease?: boolean }) {
             return routeHandoffActivity(ctx.scheduleActivity(routedActivityName("spawnChildSession", routingContract), {
                 parentSessionId, config, task, nestingLevel, isSystem, title, agentId, splash, titleIsExplicit,
                 ...(requiredTool ? { requiredTool } : {}),
                 // Session workspaces (1.0.80): set only when the parent chose a record.
                 ...(workspaceChosen ? { workspaceChosen: true } : {}),
+                // Owner routing (1.0.84): the child takes the parent's tag and busy policy.
+                ...(routing?.ownerTag ? { ownerTag: routing.ownerTag } : {}),
+                ...(routing?.workspaceBusyFastRelease ? { workspaceBusyFastRelease: true } : {}),
             }), routingContract);
+        },
+        /**
+         * Owner routing (1.0.84): ask a worker with a capacity requester for
+         * capacity for this session's owner. The activity answers within
+         * about 15 seconds.
+         */
+        requestOwnerCapacity(sessionId: string, ownerTag: string) {
+            return routeOwnerCapacityActivity(ctx.scheduleActivity("requestOwnerCapacity", { sessionId, ownerTag }));
         },
     /**
      * Resolve a loaded agent config by name. Returns null if not found.
@@ -1348,7 +1460,7 @@ export function createSessionManagerProxy(
         },
         // ── Service-session distiller (1.0.68) ─────────────────
         /** Spawn the regen-distiller service session under the tree root (idempotent per attempt). */
-        runRegenSpawnDistiller(sessionId: string, epoch: number, attemptId: string, opts?: { archiveArtifactId?: string; archiveChunkIds?: string[]; handoff?: string; instructions?: string; distillerModel?: string; distillerReasoningEffort?: string; distillerContextTier?: string }) {
+        runRegenSpawnDistiller(sessionId: string, epoch: number, attemptId: string, opts?: { archiveArtifactId?: string; archiveChunkIds?: string[]; handoff?: string; instructions?: string; distillerModel?: string; distillerReasoningEffort?: string; distillerContextTier?: string; ownerTag?: string; workspaceBusyFastRelease?: boolean }) {
             return ctx.scheduleActivity("runRegenSpawnDistiller", { sessionId, epoch, attemptId, ...(opts ?? {}) });
         },
         /** Poll the distiller service session: running | completed (with response) | failed. */
@@ -1415,6 +1527,8 @@ export function registerActivities(
      * registered, and their turns are workflow request turns (owner decision 2026-11-08T15:30Z).
      */
     testOptions?: { intakeAdmissionRetryDelaysMs?: readonly number[] },
+    /** Which sessions send_session_message / reply_session_message reach. Unset is "fleet". */
+    sessionMessageScope?: SessionMessageScope,
 ) {
     // Shared config for every activity-layer internal PilotSwarmClient /
     // PilotSwarmManagementClient. Carries the FULL facts/CMS target (07 P3) so
@@ -1660,6 +1774,10 @@ export function registerActivities(
             stashedAttachments?: PromptAttachmentRef[];
             /** 1.0.81 (runTurnV4): steers carried from an earlier turn. Used from phase A4 on. */
             carriedSteers?: import("./types.js").LateSteer[];
+            /** 1.0.84: the session's owner tag, for the sessions this turn creates. */
+            ownerTag?: string;
+            /** 1.0.84: the fast workspace busy policy, for the sessions this turn creates. */
+            workspaceBusyFastRelease?: boolean;
         },
         turnUsage: RuntimeMetricUsage,
         /** 1.0.83 (runTurnV5): the invocation this attempt carries, already checked; null on every other name. */
@@ -2011,7 +2129,83 @@ export function registerActivities(
             return out;
         };
 
+        // ── the session admission hook (PilotSwarmWorker.setSessionAdmission) ──
+        //
+        // Before the run-turn lock and the lifecycle preamble, so a turn that
+        // is held or refused here neither loads nor hydrates the session on
+        // this worker. A session counts as system when it is one, the system
+        // user owns it, or its root is either.
+        const admitTurn = async (): Promise<TurnResult | null> => {
+            const admission = sessionManager.getSessionAdmission?.();
+            if (!admission) return null;
+            const unchecked = (detail: string): TurnResult => {
+                activityCtx.traceInfo(`[runTurn] session admission could not check ${input.sessionId}: ${detail}`);
+                return { type: "error", message: `Session admission could not check this turn: ${detail}` } as TurnResult;
+            };
+            if (!catalog) return unchecked("this worker has no session catalog");
+            if (!catalogSessionRow) return unchecked("the session catalog has no row for the session");
+            const rootSessionId: string = catalogSessionRow.rootSessionId ?? input.sessionId;
+            let isSystem = Boolean(catalogSessionRow.isSystem) || ownedBySystemUser(catalogSessionRow.owner);
+            if (!isSystem && rootSessionId !== input.sessionId) {
+                const root = await cmsRetryBestEffort(
+                    `runTurn.getSession admission-root session=${input.sessionId} root=${rootSessionId}`,
+                    () => catalog!.getSession(rootSessionId),
+                    (msg) => activityCtx.traceInfo(msg),
+                );
+                if (!root) return unchecked(`the session catalog has no row for its root ${rootSessionId}`);
+                isSystem = Boolean(root.isSystem) || ownedBySystemUser(root.owner);
+            }
+            let answer: SessionAdmissionDecision;
+            try {
+                answer = await admission({ sessionId: input.sessionId, rootSessionId, isSystem });
+            } catch (err: any) {
+                return unchecked(`the hook failed: ${err?.message ?? err}`);
+            }
+            const result = sessionAdmissionTurnResult(answer, {
+                workerNodeId: workerNodeId ?? os.hostname(),
+                orchestrationVersion: activityCtx?.orchestrationVersion,
+            });
+            if (result) {
+                activityCtx.traceInfo(`[runTurn] session admission answered ${String((answer as any)?.decision)} for ${input.sessionId} (system=${isSystem}): ${result.type}`);
+            }
+            return result;
+        };
+
+        // ── owner routing's backstop on a worker with a capacity requester ──
+        //
+        // Such a worker (the coordination host) runs untagged turns, and the
+        // turn of a session whose creation config holds an owner tag belongs
+        // on that owner's workers. A turn without that tag, or with another,
+        // was started by a client that didn't copy it, so it is refused here
+        // without a retry: every later turn of its orchestration carries the
+        // same tag. No other worker reads the config.
+        const checkOwnerTag = async (): Promise<TurnResult | null> => {
+            if (!sessionManager.getOwnerCapacityRequester?.() || !catalog?.getSessionCreationConfig) return null;
+            let saved: Record<string, unknown> | null;
+            try {
+                saved = await cmsRetryCritical(
+                    `runTurn.getSessionCreationConfig owner-tag session=${input.sessionId}`,
+                    () => catalog!.getSessionCreationConfig!(input.sessionId),
+                    (msg) => activityCtx.traceInfo(msg),
+                );
+            } catch (err: any) {
+                const detail = `the session catalog could not read its creation config: ${err?.message ?? err}`;
+                activityCtx.traceInfo(`[runTurn] owner routing could not check ${input.sessionId}: ${detail}`);
+                return { type: "error", message: `Owner routing could not check this turn: ${detail}` } as TurnResult;
+            }
+            const savedTag = saved?.ownerTag;
+            if (!isOwnerRoutingTag(savedTag) || input.ownerTag === savedTag) return null;
+            activityCtx.traceInfo(`[runTurn] refused ${input.sessionId}: its creation config holds an owner tag that the turn ${input.ownerTag ? "replaces" : "lacks"}`);
+            return { type: "error", message: ownerTagMissingText(input.ownerTag), retryable: false } as TurnResult;
+        };
+
         try {
+            const refused = await checkOwnerTag() ?? await admitTurn();
+            if (refused) {
+                // 1.0.83: refused before anything was sent, so an invocation this attempt carried is reported unsent.
+                finalTurnResult = withIntakeWitness(refused);
+                return finalTurnResult;
+            }
             finalTurnResult = await sessionManager.withRunTurnLock(input.sessionId, "runTurn", async () => {
         // ── Session lifecycle protocol preamble (proposal §3.3) ─────────
         // Only active when the orchestration (1.0.57+) supplied snapshot
@@ -2229,6 +2423,40 @@ export function registerActivities(
                     message: `Provider admission could not verify this turn: ${err?.message ?? err}`,
                 } as TurnResult;
             }
+        }
+
+        // ── external personal secrets ────────────────────────────────
+        //
+        // A key kept in the deployment's secret store is resolved here, after
+        // the budget gate and before anything is attached or created; the
+        // Copilot session below takes it from the cache. A refusal fails the
+        // turn as an authentication failure (not retried), an outage fails it
+        // with an ordinary error (retried), and a busy answer returns the same
+        // wait a busy workspace returns, so the busy policy holds the session.
+        try {
+            await sessionManager.preparePersonalCredential?.(input.sessionId, runConfig.model, catalogSessionRow);
+        } catch (err: any) {
+            if (!(err instanceof PersonalCredentialError)) throw err;
+            const heldOn = workerNodeId ?? os.hostname();
+            activityCtx.traceInfo(`[runTurn] personal credential ${err.outcome} for ${input.sessionId}: ${err.message}`);
+            const result = personalCredentialTurnResult(err, heldOn, activityCtx?.orchestrationVersion);
+            if (result.type === "wait" && catalog) {
+                await cmsRetryBestEffort(
+                    `runTurn.recordEvent credential-busy session=${input.sessionId}`,
+                    () => catalog!.recordEvents(input.sessionId, [{
+                        eventType: "session.workspace_unavailable",
+                        data: {
+                            code: "WORKSPACE_BUSY",
+                            message: err.message,
+                            workerNodeId: heldOn,
+                            credential: true,
+                            ...(runConfig.workspace ? { revision: input.workspaceRevision ?? 1 } : {}),
+                        },
+                    }], workerNodeId),
+                    (msg) => activityCtx.traceInfo(msg),
+                );
+            }
+            return result;
         }
 
         // ── the workspace gate (session workspaces) ─────────────────
@@ -2714,6 +2942,16 @@ export function registerActivities(
             }
         }
 
+        // Owner routing (1.0.84): a session this turn creates gets the turn's
+        // owner tag and busy policy. In an owner-routed tree a Workflow is not
+        // started or tested and create_agent_session makes no new root
+        // (owner-routing.ts).
+        const ownerRoutedTree = isOwnerRoutingTag(input.ownerTag);
+        const createdSessionRouting = {
+            ...(isOwnerRoutingTag(input.ownerTag) ? { ownerTag: input.ownerTag } : {}),
+            ...(input.workspaceBusyFastRelease === true ? { workspaceBusyFastRelease: true } : {}),
+        };
+
         const getInlineClient = async () => {
             if (inlineSdkClient) return inlineSdkClient;
             if (inlineSdkClientPromise) return await inlineSdkClientPromise;
@@ -3017,6 +3255,10 @@ let canvasDrawChain: Promise<void> = Promise.resolve();
             return { error: `session_id ${requestedId} is not an ancestor of this session — canvas tools may target only your parent chain (parent, grandparent, root)` };
         };
 
+        // Secret redaction: what an agent writes here for another session (a
+        // task, a message, a reason, a handoff) bypasses the turn result,
+        // which is stored redacted, so each tool redacts it before it is
+        // queued or saved.
         const controlToolBridge = {
             /**
              * Session workspaces: the attach and the path check behind the
@@ -3069,7 +3311,7 @@ let canvasDrawChain: Promise<void> = Promise.resolve();
                     await (sdkClient as any)._getDuroxideClient().enqueueEvent(
                         `session-${targetId}`,
                         "messages",
-                        JSON.stringify({ prompt: message, sender: agentSender(input.sessionId, `agent ${input.sessionId.slice(0, 8)}`) }),
+                        JSON.stringify({ prompt: redactSecrets(message), sender: agentSender(input.sessionId, `agent ${input.sessionId.slice(0, 8)}`) }),
                     );
                     return `[SYSTEM: delivered to ${targetId} as a user message. `
                         + `It runs on its own schedule — read_session_info / read_agent_events to see what it did.]`;
@@ -3111,7 +3353,7 @@ let canvasDrawChain: Promise<void> = Promise.resolve();
 
                     const target = await catalog!.getSession(targetId).catch(() => null);
                     const sdkClient = await getInlineClient();
-                    const reason = args.reason ?? `${action} requested by agent-manager`;
+                    const reason = redactSecretsIn(args.reason ?? `${action} requested by agent-manager`);
 
                     if (action === "delete") {
                         // A terminal session has no live orchestration to ask,
@@ -3147,9 +3389,10 @@ let canvasDrawChain: Promise<void> = Promise.resolve();
             /**
              * spawn_workflow: save (and, with start, start) a Workflow as a
              * CHILD of this session. Runs inline in the runTurn activity and
-             * does not end the turn. See workflow/spawn.ts.
+             * does not end the turn. See workflow/spawn.ts. Refused in an
+             * owner-routed tree, as workflow_definition's start and test are.
              */
-            spawnWorkflow: async (args: SpawnWorkflowToolArgs, call?: { toolCallId?: string }) => spawnWorkflowFromTool(args, call, {
+            spawnWorkflow: async (args: SpawnWorkflowToolArgs, call?: { toolCallId?: string }) => ownerRoutedTree ? workflowOwnerRoutedRefusal() : spawnWorkflowFromTool(args, call, {
                 parentSessionId: input.sessionId,
                 nestingLevel: input.nestingLevel ?? 0,
                 enabled: () => sessionManager.workflowScriptsEnabled,
@@ -3178,6 +3421,7 @@ let canvasDrawChain: Promise<void> = Promise.resolve();
              * refused inside a Workflow (A1, by the stored lineage).
              */
             workflowDefinition: async (args: Record<string, unknown>, call?: { toolCallId?: string }) => {
+                if (ownerRoutedTree && (args.operation === "start" || args.operation === "test")) return workflowOwnerRoutedRefusal();
                 try { if (await definitionToolsRefused()) return workflowDefinitionToolsRefusal(); } catch (error) { return workflowToolErrorPayload(error); }
                 // A save's scripts gate from its YAML alone, before the host is made (e02ec6f8 run); a start's is decided on the
                 // stored revision it starts, before its binding is captured (session-definitions.ts).
@@ -3271,6 +3515,9 @@ let canvasDrawChain: Promise<void> = Promise.resolve();
              * reused rather than duplicated. This is the same trick
              * spawnChildSession already uses for deterministic system
              * children.
+             *
+             * OWNER ROUTING. In an owner-routed tree it is refused: the new
+             * root would hold no drive on the owner's workers.
              */
             createAgentSession: async (args: {
                 agent_name: string;
@@ -3282,6 +3529,7 @@ let canvasDrawChain: Promise<void> = Promise.resolve();
                 key?: string;
             }) => {
                 try {
+                    if (ownerRoutedTree) return NEW_ROOT_OWNER_ROUTED_TEXT;
                     const agentName = String(args.agent_name || "").trim();
                     if (!agentName) return "Error: agent_name is required.";
 
@@ -3342,6 +3590,7 @@ let canvasDrawChain: Promise<void> = Promise.resolve();
                         ...(agentDef.tools ? { toolNames: agentDef.tools } : {}),
                         agentId: agentDef.id ?? agentDef.name,
                         ...(owner ? { owner } : {}),
+                        ...createdSessionRouting,
                     });
 
                     if (catalog) {
@@ -3365,7 +3614,7 @@ let canvasDrawChain: Promise<void> = Promise.resolve();
                     }
 
                     const bootstrap = typeof args.prompt === "string" && args.prompt.trim()
-                        ? args.prompt.trim()
+                        ? redactSecrets(args.prompt.trim())
                         : (agentDef.initialPrompt || `You are the ${agentDef.name} agent. Begin your work.`);
                     // Stamp who actually wrote this. It goes onto the queue as a
                     // user-role prompt, and an unstamped user-role message is
@@ -3422,8 +3671,10 @@ let canvasDrawChain: Promise<void> = Promise.resolve();
                         directChildren: loadDirectChildSessions });
                     if (admission.refusal) return admission.refusal;
 
-                    let agentTask = args.task || "";
-                    let agentSystemMessage = args.system_message;
+                    const task = redactSecretsIn(args.task);
+                    const contract = redactSecretsIn(args.contract);
+                    let agentTask = task || "";
+                    let agentSystemMessage = redactSecretsIn(args.system_message);
                     let agentToolNames = args.tool_names;
                     let agentModel = args.model;
                     let agentReasoningEffort = args.reasoning_effort;
@@ -3440,7 +3691,7 @@ let canvasDrawChain: Promise<void> = Promise.resolve();
                     let promptLayeringKind: "app-agent" | "app-system-agent" | "pilotswarm-system-agent" | undefined;
                     let resolvedAgentName = args.agent_name;
                     const applyAgentDef = (agentDef: any) => {
-                        agentTask = args.task || agentDef.initialPrompt || `You are the ${agentDef.name} agent. Begin your work.`;
+                        agentTask = task || agentDef.initialPrompt || `You are the ${agentDef.name} agent. Begin your work.`;
                         agentSystemMessage = undefined;
                         // Match durable spawning: no parent package tools when
                         // the selected definition declares no extra tools.
@@ -3561,13 +3812,14 @@ let canvasDrawChain: Promise<void> = Promise.resolve();
                         detachedPackageToolPolicy: boundAgentName || args.tool_names?.length ? "reject" : "drop",
                         ...(promptLayeringKind ? { promptLayering: { kind: promptLayeringKind } } : {}),
                         ...(agentToolNames ? { toolNames: agentToolNames } : {}),
-                        ...(args.contract ? { childContract: args.contract } : {}),
+                        ...(contract ? { childContract: contract } : {}),
                     };
                     // Session workspaces: omitted inherits the parent's
                     // workspace (already in the spread), a record replaces
-                    // it, null gives the child none.
+                    // it, null gives the child none, and so does omitting it
+                    // where children get no workspace.
                     if (args.workspace) childConfig.workspace = args.workspace;
-                    else if (args.workspace === null) delete childConfig.workspace;
+                    else if (args.workspace === null || childWorkspacesDisabled()) delete childConfig.workspace;
 
                     const parentSystemMsg = typeof childConfig.systemMessage === "string"
                         ? childConfig.systemMessage
@@ -3625,6 +3877,7 @@ let canvasDrawChain: Promise<void> = Promise.resolve();
                         // (lazily registering the user row); when null, the CMS
                         // falls back to copying the direct parent's owner row.
                         ...(inheritedOwner ? { owner: inheritedOwner } : {}),
+                        ...createdSessionRouting,
                     });
 
                     if (catalog) {
@@ -3650,7 +3903,7 @@ let canvasDrawChain: Promise<void> = Promise.resolve();
                             );
                         }
 
-                        const contractJson = buildContractJson(args.contract, input.sessionId, childSession.sessionId);
+                        const contractJson = buildContractJson(contract, input.sessionId, childSession.sessionId);
                         if (contractJson) {
                             await cmsRetryCritical(
                                 `runTurn.spawn.upsertChildOutcome contract child=${childSession.sessionId}`,
@@ -3747,8 +4000,8 @@ let canvasDrawChain: Promise<void> = Promise.resolve();
                                 cmd: "regenerate",
                                 id: `regenerate-tool-${randomUUID()}`,
                                 args: {
-                                    ...(args.handoff ? { handoff: String(args.handoff).slice(0, 4_000) } : {}),
-                                    ...(args.instructions ? { instructions: String(args.instructions).slice(0, 4_000) } : {}),
+                                    ...(args.handoff ? { handoff: redactSecrets(String(args.handoff)).slice(0, 4_000) } : {}),
+                                    ...(args.instructions ? { instructions: redactSecrets(String(args.instructions)).slice(0, 4_000) } : {}),
                                     source: "tool",
                                 },
                                 // Owner-gate evidence: the runTurn activity input's
@@ -3778,8 +4031,8 @@ let canvasDrawChain: Promise<void> = Promise.resolve();
                             cmd: "regenerate",
                             id: `regenerate-parent-${randomUUID()}`,
                             args: {
-                                ...(args.handoff ? { handoff: String(args.handoff).slice(0, 4_000) } : {}),
-                                ...(args.instructions ? { instructions: String(args.instructions).slice(0, 4_000) } : {}),
+                                ...(args.handoff ? { handoff: redactSecrets(String(args.handoff)).slice(0, 4_000) } : {}),
+                                ...(args.instructions ? { instructions: redactSecrets(String(args.instructions)).slice(0, 4_000) } : {}),
                                 source: "parent",
                             },
                             // Parent-of gate evidence: the child's handler accepts
@@ -3816,6 +4069,7 @@ let canvasDrawChain: Promise<void> = Promise.resolve();
                         return `[SYSTEM: message_agent refused — ${child.orchId} runs a state of your workflow, not a sub-agent you spawned; `
                             + `contract_patch applies to your own sub-agents only. Send the message without it.]`;
                     }
+                    const message = redactSecretsIn(args.message);
                     if (catalog && args.contract_patch) {
                         const existing = await catalog.getChildOutcome(child.sessionId);
                         const contractJson = appendContractPatchJson(existing?.contractJson ?? null, args.contract_patch, input.sessionId, child.sessionId);
@@ -3838,7 +4092,7 @@ let canvasDrawChain: Promise<void> = Promise.resolve();
                             "messages",
                             // A workflow state's session is told who wrote (the controlling parent agent); an own sub-agent's
                             // message is its parent agent's (FU-9: never merged with a person's words).
-                            JSON.stringify({ prompt: args.message,
+                            JSON.stringify({ prompt: message,
                                 sender: agentSender(input.sessionId, descendant ? "controlling parent agent" : "parent agent") }),
                         );
                     };
@@ -3847,14 +4101,14 @@ let canvasDrawChain: Promise<void> = Promise.resolve();
                         return await withManagementClient((client) => steerChildTurn(client, {
                             childSessionId: child.sessionId,
                             agentLabel: child.orchId,
-                            text: args.message,
+                            text: message,
                             requestId: parentControlRequestId("steer", input.sessionId, call?.toolCallId || randomUUID()),
                             caller,
                             queue,
                         }));
                     }
                     await queue();
-                    return `[SYSTEM: Message sent to sub-agent ${child.orchId}: "${args.message.slice(0, 200)}". ` +
+                    return `[SYSTEM: Message sent to sub-agent ${child.orchId}: "${message.slice(0, 200)}". ` +
                         `Continue your work in this SAME turn. If you are waiting on the child, call wait_for_agents explicitly rather than stopping here.]`;
                 } catch (err: any) {
                     return `[SYSTEM: message_agent failed: ${err?.message || String(err)}]`;
@@ -3980,6 +4234,7 @@ let canvasDrawChain: Promise<void> = Promise.resolve();
                     const { requestId } = await sendInternalSessionMessage({
                         catalog,
                         duroxideClient: sdkClient._getDuroxideClient(),
+                        scope: sessionMessageScope,
                     }, {
                         fromSessionId: input.sessionId,
                         toSessionId: targetSessionId,
@@ -4006,6 +4261,7 @@ let canvasDrawChain: Promise<void> = Promise.resolve();
                     await replyInternalSessionMessage({
                         catalog,
                         duroxideClient: sdkClient._getDuroxideClient(),
+                        scope: sessionMessageScope,
                     }, {
                         requestId: args.request_id,
                         fromSessionId: input.sessionId,
@@ -4088,7 +4344,8 @@ let canvasDrawChain: Promise<void> = Promise.resolve();
                     }
                     const sdkClient = await getInlineClient();
                     const cmdId = `cancel-inline-${Date.now()}`;
-                    const command = { type: "cmd", cmd: "cancel", id: cmdId, args: { reason: args.reason ?? "Cancelled by parent" }, requestedBy: input.sessionId };
+                    const reason = redactSecretsIn(args.reason);
+                    const command = { type: "cmd", cmd: "cancel", id: cmdId, args: { reason: reason ?? "Cancelled by parent" }, requestedBy: input.sessionId };
                     // S7-DX2: a workflow child's command goes through the store first, as the orchestration's path sends it.
                     if (!await workflowChildCommandApplied(activityCtx, child.sessionId, command)) {
                         // G1 residual: the end is marked on the child before its command is queued (session-end-mark.ts).
@@ -4096,7 +4353,7 @@ let canvasDrawChain: Promise<void> = Promise.resolve();
                         await sdkClient._getDuroxideClient().enqueueEvent(child.orchId, "messages", JSON.stringify(command));
                     }
                     return `[SYSTEM: Graceful cancellation requested for sub-agent ${child.orchId}. ` +
-                        `Use check_agents or wait_for_agents to observe final termination.${args.reason ? ` Reason: ${args.reason}` : ""}]`;
+                        `Use check_agents or wait_for_agents to observe final termination.${reason ? ` Reason: ${reason}` : ""}]`;
                 } catch (err: any) {
                     return `[SYSTEM: cancel_agent failed: ${err?.message || String(err)}]`;
                 }
@@ -4108,7 +4365,7 @@ let canvasDrawChain: Promise<void> = Promise.resolve();
                     return await withManagementClient((client) => stopChildTurn(client, {
                         childSessionId: child.sessionId,
                         agentLabel: child.orchId,
-                        reason: args.reason?.trim() || "Stopped by parent agent",
+                        reason: redactSecretsIn(args.reason)?.trim() || "Stopped by parent agent",
                         requestId: parentControlRequestId("stop", input.sessionId, call?.toolCallId || randomUUID()),
                         caller,
                     }));
@@ -4120,18 +4377,19 @@ let canvasDrawChain: Promise<void> = Promise.resolve();
                 try {
                     const child = await resolveManagedChild(args.agent_id);
                     const sdkClient = await getInlineClient();
+                    const reason = redactSecretsIn(args.reason);
                     if (child.status === "completed" || child.status === "failed" || child.status === "cancelled") {
                         await sdkClient.deleteSession(child.sessionId);
-                        return `[SYSTEM: Sub-agent ${child.orchId} has been deleted.${args.reason ? ` Reason: ${args.reason}` : ""}]`;
+                        return `[SYSTEM: Sub-agent ${child.orchId} has been deleted.${reason ? ` Reason: ${reason}` : ""}]`;
                     }
                     const cmdId = `delete-inline-${Date.now()}`;
-                    const command = { type: "cmd", cmd: "delete", id: cmdId, args: { reason: args.reason ?? "Deleted by parent" }, requestedBy: input.sessionId };
+                    const command = { type: "cmd", cmd: "delete", id: cmdId, args: { reason: reason ?? "Deleted by parent" }, requestedBy: input.sessionId };
                     // S7-DX2: a workflow child's delete is applied in the store, as the orchestration's path sends it.
                     if (!await workflowChildCommandApplied(activityCtx, child.sessionId, command)) {
                         await sdkClient._getDuroxideClient().enqueueEvent(child.orchId, "messages", JSON.stringify(command));
                     }
                     return `[SYSTEM: Graceful deletion requested for sub-agent ${child.orchId}. ` +
-                        `It will cancel its descendants first and then delete itself.${args.reason ? ` Reason: ${args.reason}` : ""}]`;
+                        `It will cancel its descendants first and then delete itself.${reason ? ` Reason: ${reason}` : ""}]`;
                 } catch (err: any) {
                     return `[SYSTEM: delete_agent failed: ${err?.message || String(err)}]`;
                 }
@@ -5432,6 +5690,11 @@ let canvasDrawChain: Promise<void> = Promise.resolve();
                 } as TurnResult;
             }
             activityCtx.traceInfo(`[runTurn] ManagedSession.runTurn completed for ${input.sessionId} type=${result.type}`);
+            // The model refused the key: the next attempt fetches it again
+            // instead of reusing the cached one.
+            if (result.type === "error" && readsAsAuthFailure((result as any).message)) {
+                sessionManager.forgetPersonalCredential?.(input.sessionId);
+            }
 
             // Drain event writes before the atomic post-turn writeback records
             // session.turn_completed.
@@ -5613,7 +5876,7 @@ let canvasDrawChain: Promise<void> = Promise.resolve();
         // orchestration history) and in .ps-turn-commit.json (the session
         // snapshot). Keep only the events the orchestration reads; the CMS
         // already has every event from onEvent (issue #121).
-        const bodyResult: TurnResult = withIntakeWitness(keepOrchestrationTurnEvents(fullBodyResult));
+        const bodyResult: TurnResult = withIntakeWitness(persistedTurnResult(fullBodyResult));
         const sizeWarning = turnResultSizeWarning(bodyResult);
         if (sizeWarning) traceWarn(`[runTurn] session=${input.sessionId} ${sizeWarning}`);
 
@@ -5760,6 +6023,7 @@ let canvasDrawChain: Promise<void> = Promise.resolve();
             }
             turnSpan.recordException(err);
             turnSpan.setStatus({ code: SpanStatusCode.ERROR, message: err?.message || String(err) });
+            if (readsAsAuthFailure(err?.message)) sessionManager.forgetPersonalCredential?.(input.sessionId);
             throw err;
         } finally {
             if (tc?.live) {
@@ -6334,10 +6598,19 @@ let canvasDrawChain: Promise<void> = Promise.resolve();
             const sdk = createCopilotClient({ ...(githubToken ? { gitHubToken: githubToken } : {}) }, defaultProvider?.sdkProvider, defaultProvider?.toolCatalog);
             try {
                 await sdk.start();
-                // Resolve the default model + provider from the registry
-                const sessionOpts: any = {
-                    onPermissionRequest: approvePermissionForSession,
-                };
+                // Resolve the default model + provider from the registry.
+                // PILOTSWARM_LIMIT_TITLE_SESSION_TOOLS=1: the title model reads
+                // any user's conversation, so it gets no tool, every
+                // permission request is refused, and it neither reads nor
+                // writes the CLI's cross-session store and embedding cache.
+                const sessionOpts: any = process.env.PILOTSWARM_LIMIT_TITLE_SESSION_TOOLS === "1"
+                    ? {
+                        availableTools: [],
+                        onPermissionRequest: denyEveryPermission,
+                        enableSessionStore: false,
+                        skipEmbeddingRetrieval: true,
+                    }
+                    : { onPermissionRequest: approvePermissionForSession };
                 if (defaultProvider) {
                     sessionOpts.model = defaultProvider.modelName;
                     sessionOpts.provider = defaultProvider.sdkProvider;
@@ -6348,7 +6621,7 @@ let canvasDrawChain: Promise<void> = Promise.resolve();
                     await sdk.stop();
                     return "";
                 }
-                const tempSession = await sdk.createSession(sessionOpts);
+                const tempSession = await sdk.createSession(withCliProgramSessionOptions(sessionOpts));
                 let title = "";
                 await new Promise<void>((resolve, reject) => {
                     tempSession.on("assistant.message", (event: any) => {
@@ -6437,7 +6710,7 @@ let canvasDrawChain: Promise<void> = Promise.resolve();
     // Goes through the full SDK path: CMS registration + orchestration startup.
     registerHandoffActivity(runtime, "spawnChildSession", async (
         activityCtx: any,
-        input: { parentSessionId: string; config: SerializableSessionConfig; task: string; nestingLevel?: number; isSystem?: boolean; title?: string; agentId?: string; splash?: string; titleIsExplicit?: boolean; requiredTool?: string; workspaceChosen?: boolean },
+        input: { parentSessionId: string; config: SerializableSessionConfig; task: string; nestingLevel?: number; isSystem?: boolean; title?: string; agentId?: string; splash?: string; titleIsExplicit?: boolean; requiredTool?: string; workspaceChosen?: boolean; ownerTag?: string; workspaceBusyFastRelease?: boolean },
     ): Promise<string> => {
         const startedAt = Date.now();
         const trace = (message: string) => {
@@ -6554,6 +6827,10 @@ let canvasDrawChain: Promise<void> = Promise.resolve();
                 waitThreshold: input.config.waitThreshold,
                 agentId: input.agentId,
                 ...(inheritedOwner ? { owner: inheritedOwner } : {}),
+                // Owner routing (1.0.84): the parent's tag and busy policy. A
+                // system child gets neither.
+                ...(!input.isSystem && isOwnerRoutingTag(input.ownerTag) ? { ownerTag: input.ownerTag } : {}),
+                ...(!input.isSystem && input.workspaceBusyFastRelease === true ? { workspaceBusyFastRelease: true } : {}),
             });
             trace(`sdkClient.createSession done (${Date.now() - createSessionAt}ms)`);
 
@@ -7035,6 +7312,27 @@ let canvasDrawChain: Promise<void> = Promise.resolve();
         };
     });
 
+    // ── requestOwnerCapacity (owner routing, 1.0.84) ────────
+    // Only workers with a capacity requester declare this activity's tag.
+    // The answer comes within OWNER_CAPACITY_TIMEOUT_MS: a requester that is
+    // still waiting then gets its signal, and the session waits on its timer
+    // and asks again instead of holding an activity slot.
+    runtime.registerActivity("requestOwnerCapacity", async (
+        activityCtx: any,
+        input: { sessionId: string; ownerTag: string },
+    ) => {
+        const answer = await askOwnerCapacityRequester(sessionManager.getOwnerCapacityRequester(), async () => {
+            const row = catalog ? await catalog.getSession(input.sessionId) : null;
+            if (catalog && !row) throw new Error(`session ${input.sessionId} is not in the catalog`);
+            return { sessionId: input.sessionId, rootSessionId: row?.rootSessionId || input.sessionId, ownerTag: input.ownerTag };
+        });
+        activityCtx.traceInfo(
+            `[requestOwnerCapacity] session=${input.sessionId} owner=${input.ownerTag}: ${answer.decision}`
+            + `${answer.decision === "ok" ? "" : ` ${answer.code} (${answer.message})`}`,
+        );
+        return answer;
+    });
+
     // ── loadKnowledgeIndex ──────────────────────────────────
     // Reads curated skills and open asks from the facts table for
     // injection into agent context before each turn.
@@ -7158,9 +7456,14 @@ let canvasDrawChain: Promise<void> = Promise.resolve();
 
     runtime.registerActivity("runRegenSpawnDistiller", async (
         activityCtx: any,
-        input: { sessionId: string; epoch: number; attemptId: string; archiveArtifactId?: string; archiveChunkIds?: string[]; handoff?: string; instructions?: string; distillerModel?: string; distillerReasoningEffort?: string; distillerContextTier?: string },
+        input: { sessionId: string; epoch: number; attemptId: string; archiveArtifactId?: string; archiveChunkIds?: string[]; handoff?: string; instructions?: string; distillerModel?: string; distillerReasoningEffort?: string; distillerContextTier?: string; ownerTag?: string; workspaceBusyFastRelease?: boolean },
     ) => {
         if (!catalog) throw new Error("distiller spawn requires the CMS catalog");
+        // Owner routing (1.0.84): the distiller runs with the served session's tag and busy policy.
+        const distillerRouting = {
+            ...(isOwnerRoutingTag(input.ownerTag) ? { ownerTag: input.ownerTag } : {}),
+            ...(input.workspaceBusyFastRelease === true ? { workspaceBusyFastRelease: true } : {}),
+        };
         if (!artifactStore) throw new Error("distiller spawn requires an artifact store");
         if (!storeUrl) throw new Error("distiller spawn requires a storeUrl");
         // Deployment kill switch: force the deterministic package fleet-wide.
@@ -7223,6 +7526,7 @@ let canvasDrawChain: Promise<void> = Promise.resolve();
                     await (reseedClient as any)._startTurn(distillerSessionId, seed, {
                         bootstrap: true,
                         sender: { kind: "system", display: "regen distiller seed" },
+                        ...distillerRouting,
                     });
                 } finally {
                     await reseedClient.stop().catch(() => {});
@@ -7275,6 +7579,7 @@ let canvasDrawChain: Promise<void> = Promise.resolve();
                 systemMessage: DISTILLER_SYSTEM_MESSAGE,
                 toolNames: ["read_transcript_page"],
                 ...(owner ? { owner } : {}),
+                ...distillerRouting,
             });
             await catalog.markSessionService(distillerSessionId, REGEN_DISTILLER_SERVICE_KIND, input.sessionId);
             await cmsRetryBestEffort(

@@ -118,6 +118,13 @@ private. Historical references are outside the current-file privacy check; an
 old entry does not prove the resource or identity is retired. See
 [repository privacy](REPOSITORY-PRIVACY.md).
 
+The managed test environment has no Windows worker pool, and its workflow
+can't deploy one: its stamp is `EDGE_MODE=public` with an external database,
+and the pool needs `EDGE_MODE=afd` or `private` with the stamp's own
+PostgreSQL server. The workflow passes the pool's settings through from the
+environment's variables like the other optional switches, and the deploy's
+preflight refuses `WIN_WORKERS_ENABLED=true` on that stamp before any step.
+
 ## Test portal access using existing authorization settings
 
 To give authenticated test users admin access without per-user allowlists, set
@@ -153,3 +160,12 @@ actual auth posture first. Microsoft-specific Service Tree requirements apply
 when that tenant policy is in force, not to every user's Azure tenant. VPN steps
 apply only to stamps configured with a VPN gateway. A public deployment still
 has an AKS-managed node VNet; it does not need a separate application VNet.
+
+An operator who adds a Windows worker pool to their own stamp
+(`WIN_WORKERS_ENABLED=true`) runs `deploy.mjs` from their own pipeline or by
+hand, and follows [Windows workers](../docs/developer/deploy/windows-workers.md)
+for the steps outside it: the subscription owner's custom role definitions,
+app role assignments, the Windows image, the golden drive snapshot, the
+four-step upgrade, whose freeze reaches the disk controller only through
+`kubectl port-forward`, and the rotation of the disk controller's CA
+(`npm run deploy:rotate-ca`).
