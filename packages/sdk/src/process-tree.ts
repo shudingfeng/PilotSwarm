@@ -13,7 +13,13 @@
  *     running with its pid, which the host may give to another process
  *
  * The CLI runs on this host, so its pids are ours. These helpers walk the
- * process tree below a pid: /proc on Linux, CIM on Windows, `ps` elsewhere.
+ * process tree below a pid: /proc on Linux, WMI on Windows, `ps` elsewhere.
+ *
+ * On Windows they read WMI through [wmisearcher], which needs no PowerShell
+ * module: loading one (Get-CimInstance's) took over 5 s on a fresh host, a
+ * CI runner with many modules and no module analysis cache. [wmisearcher]
+ * also runs in Constrained Language Mode, and the WMI time it prints is
+ * converted here.
  */
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
@@ -58,9 +64,21 @@ function linuxClockTicks(): number {
 }
 
 /**
+ * A WMI time, "yyyymmddHHMMSS.ffffff" and its offset from UTC in minutes
+ * ("+000", "-480"), in epoch milliseconds; undefined when it is not one.
+ */
+export function wmiDateTimeMs(value: string): number | undefined {
+    const match = /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\.(\d{3})\d{3}([+-]\d{3})$/.exec(value.trim());
+    if (!match) return undefined;
+    const [year, month, day, hour, minute, second, millis, offsetMinutes] = match.slice(1).map(Number);
+    const ms = Date.UTC(year, month - 1, day, hour, minute, second, millis) - offsetMinutes * 60_000;
+    return Number.isFinite(ms) && ms > 0 ? ms : undefined;
+}
+
+/**
  * When a process started, in epoch milliseconds, or undefined when this host
  * cannot tell. Linux: field 22 of /proc/<pid>/stat (clock ticks after boot)
- * plus the boot time from /proc/stat. Windows: CIM CreationDate.
+ * plus the boot time from /proc/stat. Windows: the WMI CreationDate.
  * Elsewhere: `ps -o lstart=`, to the second.
  */
 export function processStartTimeMs(pid: number): number | undefined {
@@ -69,10 +87,9 @@ export function processStartTimeMs(pid: number): number | undefined {
         try {
             const out = execFileSync(WINDOWS_POWERSHELL, [
                 "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
-                `$p = Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}'; if ($p) { ([DateTimeOffset]$p.CreationDate).ToUnixTimeMilliseconds() }`,
+                `foreach ($p in ([wmisearcher]'SELECT CreationDate FROM Win32_Process WHERE ProcessId = ${pid}').Get()) { $p.CreationDate }`,
             ], { encoding: "utf8", timeout: 5_000, windowsHide: true, stdio: ["ignore", "pipe", "ignore"] });
-            const ms = Number(out.trim());
-            return Number.isFinite(ms) && ms > 0 ? ms : undefined;
+            return wmiDateTimeMs(out);
         } catch {
             return undefined;
         }
@@ -134,20 +151,18 @@ function childrenByParent(rootPid: number): Map<number, number[]> | undefined {
         try {
             const out = execFileSync(WINDOWS_POWERSHELL, [
                 "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
-                "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId | ConvertTo-Json -Compress",
+                "foreach ($p in ([wmisearcher]'SELECT ProcessId, ParentProcessId FROM Win32_Process').Get()) { [string]$p.ProcessId + ' ' + [string]$p.ParentProcessId }",
             ], { encoding: "utf8", timeout: 5_000, windowsHide: true, stdio: ["ignore", "pipe", "ignore"] });
-            const parsed: unknown = JSON.parse(out);
-            const rows = Array.isArray(parsed) ? parsed : [parsed];
             let includesSelf = false;
             let includesRoot = false;
-            for (const row of rows) {
-                if (!row || typeof row !== "object") return undefined;
-                const { ProcessId: childPid, ParentProcessId: parentPid } = row as Record<string, unknown>;
-                if (typeof childPid !== "number" || !Number.isInteger(childPid) || childPid < 0
-                    || typeof parentPid !== "number" || !Number.isInteger(parentPid) || parentPid < 0) return undefined;
+            for (const line of out.split("\n")) {
+                if (!line.trim()) continue;
+                const row = /^(\d+) (\d+)$/.exec(line.trim());
+                if (!row) return undefined;
+                const childPid = Number(row[1]);
                 includesSelf ||= childPid === process.pid;
                 includesRoot ||= childPid === rootPid;
-                add(childPid, parentPid);
+                add(childPid, Number(row[2]));
             }
             // An incomplete snapshot could hide an ancestor or a root that has exited.
             return includesSelf && includesRoot ? children : undefined;

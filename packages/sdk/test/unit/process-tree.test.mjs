@@ -3,11 +3,23 @@
  * shells the Copilot CLI will not cancel (docs/proposals/session-workspaces.md
  * 4.5). The kill itself is tested in session-workspace-release.test.mjs.
  */
-import test from "node:test";
+import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { killProcessTree, processAlive, processStartTimeMs, taskProcessAlive } from "../../dist/process-tree.js";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { killProcessTree, processAlive, processStartTimeMs, taskProcessAlive, wmiDateTimeMs } from "../../dist/process-tree.js";
+
+// As on a fresh Windows host (a CI runner): Windows PowerShell's own module paths and no module analysis
+// cache. Loading a module there took longer than the helpers wait, so they must answer without one.
+if (process.platform === "win32") {
+    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "ps-tree-"));
+    process.env.PSModuleAnalysisCachePath = path.join(cacheDir, "ModuleAnalysisCache");
+    delete process.env.PSModulePath;
+    after(() => fs.rmSync(cacheDir, { recursive: true, force: true }));
+}
 
 async function startChild(t, script = "process.send('ready'); setInterval(() => {}, 1_000);") {
     const child = spawn(process.execPath, ["-e", script], {
@@ -21,6 +33,16 @@ async function startChild(t, script = "process.send('ready'); setInterval(() => 
     const [message] = await once(child, "message");
     return { child, exited, message };
 }
+
+test("a WMI time is the same instant whatever its offset from UTC", () => {
+    const instant = Date.UTC(2026, 10, 13, 6, 52, 57, 853);
+    assert.equal(wmiDateTimeMs("20261113065257.853699+000"), instant);
+    assert.equal(wmiDateTimeMs("20261112225257.853999-480\r\n"), instant);
+    assert.equal(wmiDateTimeMs("20261113122257.853000+330"), instant);
+    for (const value of ["", "20261113065257", "20261113065257.853699", "2026111306525x.853699+000", "20261113065257.853699+000\r\n20261113065257.853699+000"]) {
+        assert.equal(wmiDateTimeMs(value), undefined, JSON.stringify(value));
+    }
+});
 
 test("a process's start time is read from the host, to within a couple of seconds", async (t) => {
     const before = Date.now();

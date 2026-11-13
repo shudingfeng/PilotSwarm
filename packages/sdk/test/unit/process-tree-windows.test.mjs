@@ -13,6 +13,10 @@ const snapshot = () => [
     { ProcessId: GRANDCHILD, ParentProcessId: CHILD },
     { ProcessId: process.pid, ParentProcessId: 0 },
 ];
+/** What the WMI query prints: one "pid parent-pid" line per process. */
+const printed = (rows) => rows.map(row => `${row.ProcessId} ${row.ParentProcessId}\r\n`).join("");
+/** A WMI CreationDate, in UTC. */
+const wmiTime = (ms) => new Date(ms).toISOString().replace(/[-:T]/g, "").replace(/Z$/, "000+000");
 
 function withWindows(exec, run, kill = () => true) {
     const platform = Object.getOwnPropertyDescriptor(process, "platform");
@@ -36,8 +40,8 @@ function withWindows(exec, run, kill = () => true) {
     }
 }
 
-test("Windows creation time comes from a bounded, hidden CIM query", () => {
-    withWindows(() => "1700000000123\r\n", calls => {
+test("Windows creation time comes from a bounded, hidden WMI query", () => {
+    withWindows(() => `${wmiTime(1_700_000_000_123)}\r\n`, calls => {
         assert.equal(processStartTimeMs(ROOT), 1_700_000_000_123);
         assert.equal(calls.length, 1);
         assert.match(calls[0].command, /\\System32\\WindowsPowerShell\\v1\.0\\powershell\.exe$/i);
@@ -59,17 +63,17 @@ test("invalid PIDs never reach PowerShell", () => {
 });
 
 test("missing, malformed and failed Windows creation-time queries stay unknown", () => {
-    for (const output of ["", "not a timestamp", "0", "-1", "null", "Infinity"]) {
+    for (const output of ["", "not a timestamp", "0", "-1", "null", "Infinity", "1700000000123", "20231114221320+000"]) {
         withWindows(() => output, () => assert.equal(processStartTimeMs(ROOT), undefined));
     }
-    withWindows(() => { throw new Error("CIM unavailable"); }, () => {
+    withWindows(() => { throw new Error("WMI unavailable"); }, () => {
         assert.equal(processStartTimeMs(ROOT), undefined);
     });
 });
 
 test("Windows creation time rejects a reused task PID", () => {
     const started = 1_700_000_000_000;
-    withWindows(() => String(started), () => {
+    withWindows(() => wmiTime(started), () => {
         assert.equal(taskProcessAlive(ROOT, started), true);
         assert.equal(taskProcessAlive(ROOT, started - 60_000), false);
     });
@@ -78,7 +82,7 @@ test("Windows creation time rejects a reused task PID", () => {
 test("Windows tree cleanup uses taskkill only for the validated root PID", () => {
     withWindows(command => {
         if (command.endsWith("taskkill.exe")) return "";
-        return JSON.stringify(snapshot());
+        return printed(snapshot());
     }, calls => {
         assert.equal(killProcessTree(ROOT), true);
         const taskkill = calls.find(call => call.command.endsWith("taskkill.exe"));
@@ -101,7 +105,7 @@ test("invalid roots and this process are never killed", () => {
 test("Windows taskkill cannot terminate an ancestor of this process", () => {
     const rows = snapshot().map(row => row.ProcessId === process.pid
         ? { ...row, ParentProcessId: GRANDCHILD } : row);
-    withWindows(() => JSON.stringify(rows), calls => {
+    withWindows(() => printed(rows), calls => {
         assert.equal(killProcessTree(ROOT), false);
         assert.equal(calls.some(call => call.command.endsWith("taskkill.exe")), false);
     });
@@ -109,16 +113,16 @@ test("Windows taskkill cannot terminate an ancestor of this process", () => {
 
 test("unknown or incomplete Windows process snapshots fail closed", () => {
     for (const output of [
-        "", "not json", "null", "[]", "[{}]",
-        JSON.stringify(snapshot().slice(0, 3)),
-        JSON.stringify(snapshot().filter(row => row.ProcessId !== ROOT)),
+        "", "not a snapshot", "null", `${printed(snapshot())}1 2 3\r\n`, `${printed(snapshot())}-1 4\r\n`, `${printed(snapshot())}1.5 2\r\n`,
+        printed(snapshot().slice(0, 3)),
+        printed(snapshot().filter(row => row.ProcessId !== ROOT)),
     ]) {
         withWindows(() => output, calls => {
             assert.equal(killProcessTree(ROOT), false);
             assert.equal(calls.some(call => call.command.endsWith("taskkill.exe")), false);
         });
     }
-    withWindows(() => { throw new Error("CIM unavailable"); }, () => {
+    withWindows(() => { throw new Error("WMI unavailable"); }, () => {
         assert.equal(killProcessTree(ROOT), false);
     });
 });
@@ -127,7 +131,7 @@ test("if a root exits during taskkill, only its snapshotted descendants are kill
     const killed = [];
     withWindows(command => {
         if (command.endsWith("taskkill.exe")) throw new Error("root already gone");
-        return JSON.stringify(snapshot());
+        return printed(snapshot());
     }, () => {
         assert.equal(killProcessTree(ROOT), true);
         assert.deepEqual(killed, [CHILD, GRANDCHILD]);
