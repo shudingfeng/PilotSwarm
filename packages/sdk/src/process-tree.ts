@@ -76,19 +76,30 @@ export function wmiDateTimeMs(value: string): number | undefined {
 }
 
 /**
+ * How long one command these helpers run (PowerShell, taskkill, `ps`) may
+ * take. They run synchronously, so the caller waits that long at most.
+ */
+export interface ProcessQueryOptions {
+    /** 5 s when not given. */
+    timeoutMs?: number;
+}
+
+const COMMAND_TIMEOUT_MS = 5_000;
+
+/**
  * When a process started, in epoch milliseconds, or undefined when this host
  * cannot tell. Linux: field 22 of /proc/<pid>/stat (clock ticks after boot)
  * plus the boot time from /proc/stat. Windows: the WMI CreationDate.
  * Elsewhere: `ps -o lstart=`, to the second.
  */
-export function processStartTimeMs(pid: number): number | undefined {
+export function processStartTimeMs(pid: number, { timeoutMs = COMMAND_TIMEOUT_MS }: ProcessQueryOptions = {}): number | undefined {
     if (process.platform === "win32") {
         if (!Number.isInteger(pid) || pid <= 0) return undefined;
         try {
             const out = execFileSync(WINDOWS_POWERSHELL, [
                 "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
                 `foreach ($p in ([wmisearcher]'SELECT CreationDate FROM Win32_Process WHERE ProcessId = ${pid}').Get()) { $p.CreationDate }`,
-            ], { encoding: "utf8", timeout: 5_000, windowsHide: true, stdio: ["ignore", "pipe", "ignore"] });
+            ], { encoding: "utf8", timeout: timeoutMs, windowsHide: true, stdio: ["ignore", "pipe", "ignore"] });
             return wmiDateTimeMs(out);
         } catch {
             return undefined;
@@ -108,7 +119,7 @@ export function processStartTimeMs(pid: number): number | undefined {
     }
     try {
         const out = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], {
-            encoding: "utf8", timeout: 5_000, env: { ...process.env, LC_ALL: "C" },
+            encoding: "utf8", timeout: timeoutMs, env: { ...process.env, LC_ALL: "C" },
         }).trim();
         const ms = Date.parse(out);
         return Number.isFinite(ms) ? ms : undefined;
@@ -127,19 +138,19 @@ const START_TIME_SLACK_MS = 2_000;
  * the task is that other process, and must never be killed. When either
  * start time is unknown, a live pid counts.
  */
-export function taskProcessAlive(pid: unknown, startedAt?: unknown): boolean {
+export function taskProcessAlive(pid: unknown, startedAt?: unknown, options: ProcessQueryOptions = {}): boolean {
     if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 1 || pid === process.pid) return false;
     if (!processAlive(pid)) return false;
     const taskStart = typeof startedAt === "string" ? Date.parse(startedAt)
         : typeof startedAt === "number" ? startedAt : Number.NaN;
     if (!Number.isFinite(taskStart)) return true;
-    const processStart = processStartTimeMs(pid);
+    const processStart = processStartTimeMs(pid, options);
     if (processStart === undefined) return true;
     return processStart <= taskStart + START_TIME_SLACK_MS;
 }
 
 /** Parent pid to child pids, for every process this host lists. */
-function childrenByParent(rootPid: number): Map<number, number[]> | undefined {
+function childrenByParent(rootPid: number, timeoutMs: number): Map<number, number[]> | undefined {
     const children = new Map<number, number[]>();
     const add = (pid: number, ppid: number) => {
         if (!Number.isInteger(pid) || !Number.isInteger(ppid)) return;
@@ -152,7 +163,7 @@ function childrenByParent(rootPid: number): Map<number, number[]> | undefined {
             const out = execFileSync(WINDOWS_POWERSHELL, [
                 "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
                 "foreach ($p in ([wmisearcher]'SELECT ProcessId, ParentProcessId FROM Win32_Process').Get()) { [string]$p.ProcessId + ' ' + [string]$p.ParentProcessId }",
-            ], { encoding: "utf8", timeout: 5_000, windowsHide: true, stdio: ["ignore", "pipe", "ignore"] });
+            ], { encoding: "utf8", timeout: timeoutMs, windowsHide: true, stdio: ["ignore", "pipe", "ignore"] });
             let includesSelf = false;
             let includesRoot = false;
             for (const line of out.split("\n")) {
@@ -183,7 +194,7 @@ function childrenByParent(rootPid: number): Map<number, number[]> | undefined {
         return children;
     }
     try {
-        const out = execFileSync("ps", ["-A", "-o", "pid=,ppid="], { encoding: "utf8", timeout: 5_000 });
+        const out = execFileSync("ps", ["-A", "-o", "pid=,ppid="], { encoding: "utf8", timeout: timeoutMs });
         for (const line of out.split("\n")) {
             const [pid, ppid] = line.trim().split(/\s+/).map(Number);
             add(pid, ppid);
@@ -198,10 +209,10 @@ function childrenByParent(rootPid: number): Map<number, number[]> | undefined {
  * first, so a loop cannot start new children; the listed children are then
  * killed by pid even after they are re-parented.
  */
-export function killProcessTree(pid: unknown): boolean {
+export function killProcessTree(pid: unknown, { timeoutMs = COMMAND_TIMEOUT_MS }: ProcessQueryOptions = {}): boolean {
     if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 1 || pid === process.pid) return false;
     if (!processAlive(pid)) return false;
-    const children = childrenByParent(pid);
+    const children = childrenByParent(pid, timeoutMs);
     if (!children) return false;
     const tree: number[] = [];
     const seen = new Set<number>();
@@ -221,7 +232,7 @@ export function killProcessTree(pid: unknown): boolean {
         if (containsSelf) return false;
         try {
             execFileSync("C:\\Windows\\System32\\taskkill.exe", ["/F", "/T", "/PID", String(pid)], {
-                timeout: 5_000, windowsHide: true, stdio: "ignore",
+                timeout: timeoutMs, windowsHide: true, stdio: "ignore",
             });
             return true;
         } catch { /* the root may have exited; still stop its snapshotted children */ }

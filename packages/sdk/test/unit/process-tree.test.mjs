@@ -3,23 +3,15 @@
  * shells the Copilot CLI will not cancel (docs/proposals/session-workspaces.md
  * 4.5). The kill itself is tested in session-workspace-release.test.mjs.
  */
-import test, { after } from "node:test";
+import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
 import { killProcessTree, processAlive, processStartTimeMs, taskProcessAlive, wmiDateTimeMs } from "../../dist/process-tree.js";
 
-// As on a fresh Windows host (a CI runner): Windows PowerShell's own module paths and no module analysis
-// cache. Loading a module there took longer than the helpers wait, so they must answer without one.
-if (process.platform === "win32") {
-    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "ps-tree-"));
-    process.env.PSModuleAnalysisCachePath = path.join(cacheDir, "ModuleAnalysisCache");
-    delete process.env.PSModulePath;
-    after(() => fs.rmSync(cacheDir, { recursive: true, force: true }));
-}
+// These tests check what the host answers, not how fast it answers. On a CI runner the first Windows PowerShell
+// query took 2-5 s, once more than the 5 s the helpers wait by default (process-tree-windows.test.mjs checks that).
+const patient = { timeoutMs: 60_000 };
 
 async function startChild(t, script = "process.send('ready'); setInterval(() => {}, 1_000);") {
     const child = spawn(process.execPath, ["-e", script], {
@@ -47,7 +39,7 @@ test("a WMI time is the same instant whatever its offset from UTC", () => {
 test("a process's start time is read from the host, to within a couple of seconds", async (t) => {
     const before = Date.now();
     const { child } = await startChild(t);
-    const started = processStartTimeMs(child.pid);
+    const started = processStartTimeMs(child.pid, patient);
     assert.equal(typeof started, "number");
     assert.ok(Math.abs(started - before) < 2_500, `${started - before} ms off`);
 });
@@ -55,8 +47,8 @@ test("a process's start time is read from the host, to within a couple of second
 test("a task's pid counts only while it runs the process the task started (review R4)", async (t) => {
     const { child, exited } = await startChild(t);
     const iso = (offsetMs) => new Date(Date.now() + offsetMs).toISOString();
-    assert.equal(taskProcessAlive(child.pid, iso(0)), true, "started with the task");
-    assert.equal(taskProcessAlive(child.pid, iso(-60_000)), false, "the task is a minute older than the process: the pid was reused");
+    assert.equal(taskProcessAlive(child.pid, iso(0), patient), true, "started with the task");
+    assert.equal(taskProcessAlive(child.pid, iso(-60_000), patient), false, "the task is a minute older than the process: the pid was reused");
     assert.equal(taskProcessAlive(child.pid), true, "without a start time, a live pid counts");
     assert.equal(taskProcessAlive(child.pid, "not a date"), true);
     assert.equal(taskProcessAlive(process.pid, iso(0)), false, "never this process");
@@ -81,12 +73,12 @@ test("Windows tree cleanup stops a test child and its grandchild", {
     const grandchildPid = message.pid;
     assert.ok(Number.isInteger(grandchildPid) && grandchildPid > 1);
     t.after(() => {
-        if (taskProcessAlive(grandchildPid, message.startedAt)) {
+        if (taskProcessAlive(grandchildPid, message.startedAt, patient)) {
             try { process.kill(grandchildPid, "SIGKILL"); } catch {}
         }
     });
     assert.equal(processAlive(grandchildPid), true);
-    assert.equal(killProcessTree(child.pid), true);
+    assert.equal(killProcessTree(child.pid, patient), true);
     await exited;
     const deadline = Date.now() + 5_000;
     while (processAlive(grandchildPid) && Date.now() < deadline) {
