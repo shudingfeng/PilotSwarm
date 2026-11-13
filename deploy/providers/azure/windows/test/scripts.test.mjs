@@ -181,7 +181,7 @@ test("-Verify prints one JSON line last and fails the controller's Run Command u
     }
 });
 
-test("the seed manifest: the example is valid, and a manifest the worker could not use is refused", { skip: noPwsh || notWindows }, () => {
+test("the seed manifest: the example is valid, also on a machine without its drive, and a manifest the worker could not use is refused", { skip: noPwsh || notWindows }, () => {
     const home = tempDir("ps-win-seedmf-");
     try {
         const base = JSON.parse(fs.readFileSync(path.join(WINDOWS_DIR, "examples", "seed-manifest.json"), "utf8"));
@@ -194,15 +194,22 @@ test("the seed manifest: the example is valid, and a manifest the worker could n
             unknown: { ...base, extra: true },
         };
         for (const [name, value] of Object.entries(variants)) fs.writeFileSync(path.join(home, `${name}.json`), JSON.stringify(value));
+        // Only a worker has the drive of reposRoot; the check runs anywhere.
+        const missingDrive = [..."ZYXWVUTSRPONMLKJIHGF"].find((letter) => !fs.existsSync(`${letter}:\\`));
+        assert.ok(missingDrive, "this machine has a free drive letter");
+        const onMissingDrive = (folder) => folder.replace(/^Q:/i, `${missingDrive}:`);
+        fs.writeFileSync(path.join(home, "elsewhere.json"), JSON.stringify({ ...base, reposRoot: onMissingDrive(base.reposRoot), modifyFolders: base.modifyFolders.map(onMissingDrive) }));
         const driver = runDriver(home, "manifest.ps1", [
             `. ${psQuote(scriptPath("Seed-WorkerReposDisk.ps1"))}`,
             `$example = Test-SeedManifest (Read-JsonFile -Path ${psQuote(path.join(WINDOWS_DIR, "examples", "seed-manifest.json"))})`,
+            `$elsewhere = Test-SeedManifest (Read-JsonFile -Path ${psQuote(path.join(home, "elsewhere.json"))})`,
             "$refused = [ordered]@{}",
             `foreach ($name in @(${Object.keys(variants).map(psQuote).join(", ")})) { try { [void](Test-SeedManifest (Read-JsonFile -Path (Join-Path ${psQuote(home)} ($name + '.json')))); $refused[$name] = 'accepted' } catch { $refused[$name] = $_.Exception.Message } }`,
-            "ConvertTo-Json -Compress -Depth 5 -InputObject @{ repos = @($example.Repositories | ForEach-Object { $_.Path }); modify = $example.ModifyFolders; caches = @($example.PackageCaches | ForEach-Object { $_.Name }); refused = $refused }",
+            "ConvertTo-Json -Compress -Depth 5 -InputObject @{ repos = @($example.Repositories | ForEach-Object { $_.Path }); elsewhere = @($elsewhere.Repositories | ForEach-Object { $_.Path }); modify = $example.ModifyFolders; caches = @($example.PackageCaches | ForEach-Object { $_.Name }); refused = $refused }",
         ].join("\n"));
         assert.equal(driver.status, 0, driver.stderr + driver.stdout);
         assert.deepEqual(driver.json.repos, ["Q:\\Repos\\PilotSwarm", "Q:\\Repos\\Hello-World"]);
+        assert.deepEqual(driver.json.elsewhere, [`${missingDrive}:\\Repos\\PilotSwarm`, `${missingDrive}:\\Repos\\Hello-World`]);
         assert.deepEqual(driver.json.caches, ["npm"]);
         assert.match(driver.json.refused.outside, /no modify folder covers/);
         assert.match(driver.json.refused.rootModify, /reposRoot itself stays read-only/);
