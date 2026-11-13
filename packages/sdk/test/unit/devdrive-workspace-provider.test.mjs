@@ -23,14 +23,15 @@
  *   D12 back from local work: the branch sync (Git)
  *   D13 admission and the credential broker; no capacity requester
  */
-import { describe, it } from "node:test";
+import { after, describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { promisify } from "node:util";
 import { PilotSwarmWorker } from "../../dist/worker.js";
 import { checkWorkspaceForSpawn } from "../../dist/workspace.js";
 import { PersonalCredentialError } from "../../dist/personal-secret-store.js";
@@ -43,7 +44,9 @@ import { HEARTBEAT_HANDOVER } from "../../examples/devdrive-workspaces/heartbeat
 const GIB = 1024 ** 3;
 const OWNER = "0b8f6c2e-4d1a-4c5e-9f3b-2a7d8e9c1f00";
 const DISK = (n) => `psdrive-${String(n).padStart(12, "0")}`;
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// Some tests mock setTimeout and Date; the test's own waits always run in real time.
+const { setTimeout: realSetTimeout, clearTimeout: realClearTimeout } = globalThis;
+const sleep = (ms) => new Promise((resolve) => realSetTimeout(resolve, ms));
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 
 function deferred() {
@@ -53,9 +56,19 @@ function deferred() {
     return { promise, resolve, reject };
 }
 
+/** Waits for `promise`, for at most `ms` of real time. */
+async function within(promise, ms) {
+    let timer;
+    try {
+        return await Promise.race([promise, new Promise((resolve) => { timer = realSetTimeout(resolve, ms); })]);
+    } finally {
+        realClearTimeout(timer);
+    }
+}
+
 async function waitFor(check, { timeoutMs = 10_000, message = "condition" } = {}) {
-    const until = Date.now() + timeoutMs;
-    while (Date.now() < until) {
+    const until = performance.now() + timeoutMs;
+    while (performance.now() < until) {
         if (await check()) return;
         await sleep(10);
     }
@@ -248,7 +261,7 @@ async function harness(t, {
         await ext.heartbeat.stop();
         await ext.drive.shutdown();
         // A test that failed may leave a fake blocked; the teardown never waits for it.
-        await Promise.race([ext.drive.settle(), sleep(3_000)]);
+        await within(ext.drive.settle(), 3_000);
         useDiskPoolClient(null);
         fs.rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     });
@@ -963,39 +976,135 @@ function gitIn(env, cwd, ...args) {
     return execFileSync("git", args, { cwd, env, encoding: "utf8", windowsHide: true, stdio: ["ignore", "pipe", "pipe"] }).trim();
 }
 
+const execFileAsync = promisify(execFile);
+
+async function gitInBackground(env, cwd, ...args) {
+    const { stdout } = await execFileAsync("git", args, { cwd, env, encoding: "utf8", windowsHide: true });
+    return stdout.trim();
+}
+
 /**
- * A drive whose root "repos" holds one clone, app, of a local bare origin,
- * with a.txt and a .gitignore that ignores bin/. `wrap` sees every git call
- * of the extension.
+ * The repositories the Git tests start from, built once per file and copied
+ * for each test (gitDrive): a git process takes tens of milliseconds on
+ * Windows, and a fixture takes dozens. The first Git test starts both
+ * builds, so the parked one is ready by the time D12 runs.
+ *
+ *   plain   origin.git, and the drive's clone of it, Q/Repos/app, with a.txt
+ *           and a .gitignore that ignores bin/
+ *   parked  the same, with a submodule, lib, of lib.git. Then the work
+ *           continued outside: a developer pushed c2 on main (with l2, a new
+ *           submodule commit), while the drive has an unpushed commit d1, an
+ *           uncommitted change, an untracked file and ignored build output
  */
-async function gitDrive(t, { leases = { R1: { diskName: DISK(1) } }, providerOptions = {}, env = {}, wrap = null, submodule = false } = {}) {
+const gitTemplates = new Map();
+
+after(async () => {
+    for (const { home, ready } of gitTemplates.values()) {
+        await ready.catch(() => {});
+        fs.rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
+});
+
+/** A template's folder and its build. The first call starts both builds. */
+function gitTemplate(kind) {
+    for (const name of ["plain", "parked"]) {
+        if (gitTemplates.has(name)) continue;
+        const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), `ps-devdrive-${name}-`)));
+        const ready = buildGitTemplate(name, home);
+        // A build that failed fails the tests that wait for it.
+        ready.catch(() => {});
+        gitTemplates.set(name, { home, ready });
+    }
+    return gitTemplates.get(kind);
+}
+
+async function buildGitTemplate(kind, home) {
+    const gitEnv = gitEnvFor(home);
+    const g = (cwd, ...args) => gitInBackground(gitEnv, cwd, ...args);
+    const commit = async (cwd, file, text, message) => {
+        fs.writeFileSync(path.join(cwd, file), text);
+        await g(cwd, "add", "-A");
+        await g(cwd, "commit", "-q", "-m", message);
+        return g(cwd, "rev-parse", "HEAD");
+    };
+    const parked = kind === "parked";
+    const origin = path.join(home, "origin.git");
+    await g(home, "init", "-q", "--bare", origin);
+    const seed = path.join(home, "seed");
+    await g(home, "init", "-q", "-b", "main", seed);
+    fs.writeFileSync(path.join(seed, ".gitignore"), "bin/\n");
+    fs.writeFileSync(path.join(seed, "a.txt"), "one\n");
+    if (parked) {
+        const lib = path.join(home, "lib.git");
+        await g(home, "init", "-q", "--bare", lib);
+        const libSeed = path.join(home, "lib-seed");
+        await g(home, "init", "-q", "-b", "main", libSeed);
+        fs.writeFileSync(path.join(libSeed, "lib.txt"), "lib one\n");
+        await g(libSeed, "add", "-A");
+        await g(libSeed, "commit", "-q", "-m", "l1");
+        await g(libSeed, "push", "-q", lib, "main");
+        // Relative to the superproject's own URL, so a copy's submodule comes from the copy's lib.git.
+        await g(seed, "submodule", "add", "-q", "../lib.git", "lib");
+    }
+    await g(seed, "add", "-A");
+    await g(seed, "commit", "-q", "-m", "c1");
+    await g(seed, "push", "-q", origin, "main");
+    const reposRoot = path.join(home, "Q", "Repos");
+    fs.mkdirSync(reposRoot, { recursive: true });
+    await g(reposRoot, "clone", "-q", ...(parked ? ["--recurse-submodules"] : []), origin, "app");
+    const app = path.join(reposRoot, "app");
+    // The repositories the template was made from are no part of a drive.
+    const seeds = [seed, path.join(home, "lib-seed")];
+    let commits = {};
+    if (parked) {
+        const dev = path.join(home, "dev");
+        seeds.push(dev);
+        await g(home, "clone", "-q", "--recurse-submodules", origin, "dev");
+        const devLib = path.join(dev, "lib");
+        await g(devLib, "checkout", "-q", "main");
+        const l2 = await commit(devLib, "lib.txt", "lib two\n", "l2");
+        await g(devLib, "push", "-q", "origin", "main");
+        fs.writeFileSync(path.join(dev, "a.txt"), "from local work\n");
+        const c2 = await commit(dev, "b.txt", "local\n", "c2");
+        await g(dev, "push", "-q", "origin", "main");
+        const d1 = await commit(app, "drive-only.txt", "drive\n", "d1");
+        fs.writeFileSync(path.join(app, "a.txt"), "uncommitted on the drive\n");
+        fs.writeFileSync(path.join(app, "scratch.txt"), "untracked\n");
+        fs.mkdirSync(path.join(app, "bin"));
+        fs.writeFileSync(path.join(app, "bin", "out.dll"), "warm build output");
+        commits = { c2, l2, d1 };
+    }
+    for (const folder of seeds) fs.rmSync(folder, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    // Git wrote the template's folder into the clone's remotes; each copy points them at its own.
+    const configs = [path.join(app, ".git", "config"), ...(parked ? [path.join(app, ".git", "modules", "lib", "config")] : [])]
+        .map((file) => path.relative(home, file));
+    return { configs, ...commits };
+}
+
+/** Points a copied Git config at the copy's folder: Git writes a local remote's path with each \ doubled. */
+function moveConfig(file, from, to) {
+    const forms = (dir) => [dir.replaceAll("\\", "\\\\"), dir, dir.replaceAll("\\", "/")];
+    const targets = forms(to);
+    let text = fs.readFileSync(file, "utf8");
+    forms(from).forEach((form, i) => { text = text.replaceAll(form, targets[i]); });
+    fs.writeFileSync(file, text);
+}
+
+/**
+ * A drive whose root "repos" holds a copy of a template's clone, app (see
+ * gitTemplates). `wrap` sees every git call of the extension.
+ */
+async function gitDrive(t, { template = "plain", leases = { R1: { diskName: DISK(1) } }, providerOptions = {}, env = {}, wrap = null } = {}) {
+    const source = gitTemplate(template);
+    const built = await source.ready;
     const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "ps-devdrive-git-")));
+    fs.cpSync(source.home, home, { recursive: true });
+    for (const config of built.configs) moveConfig(path.join(home, config), source.home, home);
     const gitEnv = gitEnvFor(home);
     const g = (cwd, ...args) => gitIn(gitEnv, cwd, ...args);
     const origin = path.join(home, "origin.git");
-    g(home, "init", "-q", "--bare", origin);
-    const seed = path.join(home, "seed");
-    g(home, "init", "-q", "-b", "main", seed);
-    fs.writeFileSync(path.join(seed, ".gitignore"), "bin/\n");
-    fs.writeFileSync(path.join(seed, "a.txt"), "one\n");
-    let lib = null;
-    if (submodule) {
-        lib = path.join(home, "lib.git");
-        g(home, "init", "-q", "--bare", lib);
-        const libSeed = path.join(home, "lib-seed");
-        g(home, "init", "-q", "-b", "main", libSeed);
-        fs.writeFileSync(path.join(libSeed, "lib.txt"), "lib one\n");
-        g(libSeed, "add", "-A");
-        g(libSeed, "commit", "-q", "-m", "l1");
-        g(libSeed, "push", "-q", lib, "main");
-        g(seed, "submodule", "add", "-q", lib, "lib");
-    }
-    g(seed, "add", "-A");
-    g(seed, "commit", "-q", "-m", "c1");
-    g(seed, "push", "-q", origin, "main");
+    const lib = template === "parked" ? path.join(home, "lib.git") : null;
     const reposRoot = path.join(home, "Q", "Repos");
-    fs.mkdirSync(reposRoot, { recursive: true });
-    g(reposRoot, "clone", "-q", ...(submodule ? ["--recurse-submodules"] : []), origin, "app");
     const real = createGitRunner({ env: gitEnv });
     const calls = [];
     const runGit = async (args, opts) => {
@@ -1005,9 +1114,10 @@ async function gitDrive(t, { leases = { R1: { diskName: DISK(1) } }, providerOpt
     const h = await harness(t, { home, folders: [], runGit, leases, providerOptions, env });
     const app = path.join(reposRoot, "app");
     return {
-        ...h, gitEnv, g, origin, lib, app, gitCalls: calls,
+        ...h, gitEnv, g, origin, lib, app, gitCalls: calls, commits: { c2: built.c2, l2: built.l2, d1: built.d1 },
         head: (cwd = app) => g(cwd, "rev-parse", "HEAD"),
-        gitDir: (cwd = app) => g(cwd, "rev-parse", "--absolute-git-dir"),
+        // The clone's Git directory is its .git folder; Git is asked for any other.
+        gitDir: (cwd = app) => (cwd === app ? path.join(app, ".git") : g(cwd, "rev-parse", "--absolute-git-dir")),
         commit(file, text, message, cwd = app) {
             fs.writeFileSync(path.join(cwd, file), text);
             g(cwd, "add", "-A");
@@ -1017,8 +1127,14 @@ async function gitDrive(t, { leases = { R1: { diskName: DISK(1) } }, providerOpt
         /** A turn, then PilotSwarm's release of it: the drive is pushed, recorded and detached. */
         async cleanCycle(turnIndex = 1) {
             assert.equal((await h.turn("R1", "app", { turnIndex })).ok, true);
+            // PilotSwarm waits 5 s for the provider's release, then lets it run on. A loaded machine can take
+            // longer to push and record, so the cycle waits for the release itself. The release's own deadlines
+            // (90 s for the push, 60 s for the record) end it; the 5 minutes here only stop one that never ends.
+            const releases = t.mock.method(h.provider, "release");
             const released = await h.worker.sessionManager.releaseWorkspace("R1", { reason: "moved", workerNodeId: "worker-1" });
             assert.equal(released.released, true);
+            await within(Promise.all(releases.mock.calls.map((call) => call.result)), 5 * 60_000);
+            releases.mock.restore();
             assert.equal(h.mounted(), null);
         },
     };
@@ -1026,7 +1142,8 @@ async function gitDrive(t, { leases = { R1: { diskName: DISK(1) } }, providerOpt
 
 const hasRevList = (calls) => calls.some((args) => args[0] === "rev-list" && args.includes("--indexed-objects"));
 
-describe("D10 crash recovery", () => {
+// Each test here works on its own copy with its own fakes, and none races a short deadline: they run side by side.
+describe("D10 crash recovery", { concurrency: true }, () => {
     it("a takeover removes a stale index.lock, checks only what came after the clean-detach record, and a commit then succeeds", async (t) => {
         const h = await gitDrive(t);
         await h.cleanCycle();
@@ -1123,7 +1240,9 @@ describe("D10 crash recovery", () => {
 /** A local HTTP server for a remote that never answers, or that asks for credentials. */
 async function localRemote(t, mode) {
     const sockets = new Set();
+    let requests = 0;
     const server = http.createServer((req, res) => {
+        requests += 1;
         if (mode === "credentials") {
             res.writeHead(401, { "WWW-Authenticate": "Basic realm=\"test\"" });
             res.end();
@@ -1139,7 +1258,7 @@ async function localRemote(t, mode) {
         for (const socket of sockets) socket.destroy();
         server.close();
     });
-    return { url: `http://127.0.0.1:${server.address().port}/app.git`, sockets };
+    return { url: `http://127.0.0.1:${server.address().port}/app.git`, sockets, get requests() { return requests; } };
 }
 
 const alive = (pid) => {
@@ -1169,13 +1288,37 @@ describe("D11 the WIP push", () => {
 
     for (const mode of ["stall", "credentials"]) {
         it(`a ${mode === "stall" ? "stalled remote" : "credential prompt"} ends within the push's time, leaves no process, and the drive still goes offline and detaches`, async (t) => {
+            // The push's clock moves only when the test moves it, once the push waits at the remote or at
+            // the helper: on a loaded machine, a real deadline can pass before the push reaches either.
+            t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
             const pushTimeoutMs = 2_000;
-            const h = await gitDrive(t, { providerOptions: { wipPushTimeoutMs: pushTimeoutMs } });
             const remote = await localRemote(t, mode);
+            let releasing = null;
+            let pidFile = null;
+            let helperSeenDead = false;
+            const helperPid = () => Number(pidFile !== null && fs.existsSync(pidFile) && fs.readFileSync(pidFile, "utf8"));
+            // Runs before the drive's teardown, also after a failure: the clock passes every deadline of the
+            // release, the teardown gets real timers, and a helper the push did not kill is ended.
+            t.after(async () => {
+                t.mock.timers.tick(10 * 60_000);
+                await within(Promise.resolve(releasing).catch(() => {}), 60_000);
+                t.mock.timers.reset();
+                // Once the test saw the helper dead, its PID may belong to another process.
+                const pid = helperSeenDead ? 0 : helperPid();
+                try { if (pid > 0) process.kill(pid); } catch { /* it has ended */ }
+            });
+            const pushes = [];
+            const h = await gitDrive(t, {
+                providerOptions: { wipPushTimeoutMs: pushTimeoutMs },
+                wrap: (args, opts, real) => {
+                    if (args.includes("push")) pushes.push(opts.timeoutMs);
+                    return real(args, opts);
+                },
+            });
             h.g(h.app, "remote", "set-url", "origin", remote.url);
-            const pidFile = path.join(h.home, "helper.pid");
             if (mode === "credentials") {
                 // A helper that never answers, like a prompt nobody sees.
+                pidFile = path.join(h.home, "helper.pid");
                 const helper = path.join(h.home, "helper.cjs");
                 fs.writeFileSync(helper, "require('fs').writeFileSync(process.argv[2], String(process.pid)); setInterval(() => {}, 1000);\n");
                 const slash = (value) => value.replace(/\\/g, "/");
@@ -1183,46 +1326,46 @@ describe("D11 the WIP push", () => {
             }
             assert.equal((await h.turn("R1", "app")).ok, true);
             fs.writeFileSync(path.join(h.app, "a.txt"), "changed\n");
-            const started = Date.now();
-            await h.provider.release({ ...h.req("R1", "app"), reason: "moved" });
-            const elapsed = Date.now() - started;
-            assert.ok(elapsed < pushTimeoutMs + 12_000, `the release took ${elapsed} ms`);
-            assert.ok(elapsed >= pushTimeoutMs - 200, `the push ran until its deadline (${elapsed} ms)`);
+            let ended = false;
+            releasing = h.provider.release({ ...h.req("R1", "app"), reason: "moved" }).finally(() => { ended = true; });
+            // In real time, seconds even on a loaded machine: the WIP commit, then the push reaches the remote
+            // and, for a prompt, starts the helper.
+            await waitFor(() => ended || (mode === "credentials" ? helperPid() > 0 : remote.requests > 0), {
+                timeoutMs: 60_000, message: mode === "credentials" ? "the credential helper to start" : "the push's request",
+            });
+            assert.deepEqual(pushes, [pushTimeoutMs], "the push gets what is left of the push's time");
+            t.mock.timers.tick(pushTimeoutMs - 1);
+            assert.equal(ended, false, "the push waits for its deadline");
+            t.mock.timers.tick(1);
+            // The kill, the record, the offline and the detach take real time, but no other timer. Git gives
+            // up on a stalled remote by itself only after 30 s (http.lowSpeedTime): a push not killed fails here.
+            await within(releasing, 20_000);
+            assert.equal(ended, true, "the release ends when the push's time is up");
             await waitFor(() => remote.sockets.size === 0, { timeoutMs: 5_000, message: "the push's connections to close" });
             if (mode === "credentials") {
-                const pid = Number(fs.readFileSync(pidFile, "utf8"));
-                assert.equal(alive(pid), false, "the credential helper was killed with the push");
+                assert.equal(alive(helperPid()), false, "the credential helper was killed with the push");
+                helperSeenDead = true;
             }
             assert.deepEqual(h.attacher.routes(), ["/online-lun0", "/offline-lun0"]);
             assert.deepEqual(h.detaches().map((body) => [body.diskName, body.crashed]), [[DISK(1), false]]);
-            assert.ok(h.logs.some((line) => /WIP push of drive .* failed; the drive keeps every edit/.test(line)));
+            assert.ok(h.logs.some((line) => /WIP push of drive .* failed; the drive keeps every edit.*: it ran out of time and was stopped/.test(line)),
+                "the push was stopped at its deadline");
             assert.equal(fs.readFileSync(path.join(h.app, "a.txt"), "utf8"), "changed\n", "the drive keeps every edit");
         });
     }
 });
 
-describe("D12 back from local work: the branch sync", () => {
+// Side by side, as in D10.
+describe("D12 back from local work: the branch sync", { concurrency: true }, () => {
     /**
      * The work continued outside: a developer pushed c2 on main (with a new
      * submodule commit), while the drive has an unpushed commit, an
-     * uncommitted change, an untracked file and ignored build output.
+     * uncommitted change, an untracked file and ignored build output (the
+     * parked template).
      */
     async function parked(t, options = {}) {
-        const h = await gitDrive(t, { submodule: true, ...options });
-        const dev = path.join(h.home, "dev");
-        h.g(h.home, "clone", "-q", "--recurse-submodules", h.origin, "dev");
-        const devLib = path.join(dev, "lib");
-        h.g(devLib, "checkout", "-q", "main");
-        const l2 = h.commit("lib.txt", "lib two\n", "l2", devLib);
-        h.g(devLib, "push", "-q", "origin", "main");
-        fs.writeFileSync(path.join(dev, "a.txt"), "from local work\n");
-        const c2 = h.commit("b.txt", "local\n", "c2", dev);
-        h.g(dev, "push", "-q", "origin", "main");
-        const d1 = h.commit("drive-only.txt", "drive\n", "d1");
-        fs.writeFileSync(path.join(h.app, "a.txt"), "uncommitted on the drive\n");
-        fs.writeFileSync(path.join(h.app, "scratch.txt"), "untracked\n");
-        fs.mkdirSync(path.join(h.app, "bin"));
-        fs.writeFileSync(path.join(h.app, "bin", "out.dll"), "warm build output");
+        const h = await gitDrive(t, { template: "parked", ...options });
+        const { c2, l2, d1 } = h.commits;
         h.controller.state.leases.get("R1").sync = { syncId: "sync-1", sourceBranch: "main", headSha: c2, url: pathToFileURL(h.origin).href };
         return { ...h, c2, l2, d1 };
     }
