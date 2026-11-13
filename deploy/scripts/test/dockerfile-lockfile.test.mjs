@@ -224,6 +224,43 @@ test("worker image carries the coordination host's module at its path under /app
   }
 });
 
+// The coordination host's module is also a package of its own, outside the
+// workspaces, so the Azure SDK it loads comes from its own lockfile. The
+// worker's build stage installs it with the configured registry, and the image
+// takes the installed modules beside the folder's *.mjs files, before USER
+// node. Every package the modules import is a dependency of the package. Its
+// lockfile must resolve from registry.npmjs.org, which NPM_REGISTRY rewrites.
+test("worker image installs the coordination host's module from its own lockfile", () => {
+  const dir = "deploy/providers/azure/linux-worker";
+  const [build, runtime] = stripComments(readDockerfile("Dockerfile.worker")).split(/^FROM\s/m).slice(1);
+  const install = build.search(new RegExp(`^RUN npm ci --omit=dev --prefix ${dir}\\b`, "m"));
+  const registry = build.indexOf("ENV npm_config_registry=${NPM_REGISTRY}");
+  const manifests = build.indexOf(`COPY ${dir}/package.json ${dir}/package-lock.json ./${dir}/`);
+  assert.ok(install > 0, "the build stage installs the package with npm ci");
+  assert.ok(registry >= 0 && registry < install, "after NPM_REGISTRY takes effect");
+  assert.ok(manifests >= 0 && manifests < install, "from its own manifests");
+  const copy = runtime.search(new RegExp(`^COPY --from=build /app/${dir}/node_modules/ \\./${dir}/node_modules/\\r?$`, "m"));
+  assert.ok(copy > 0 && copy < runtime.search(/^USER node\r?$/m), "the image takes the installed modules before USER node");
+
+  const root = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8"));
+  assert.deepEqual(root.workspaces, ["packages/*"], "the package stays outside the workspaces");
+  const manifest = JSON.parse(readFileSync(join(REPO_ROOT, dir, "package.json"), "utf8"));
+  for (const file of readdirSync(join(REPO_ROOT, dir)).filter((f) => f.endsWith(".mjs"))) {
+    const text = readFileSync(join(REPO_ROOT, dir, file), "utf8");
+    for (const [, specifier] of text.matchAll(/(?:\bfrom\s+|\bimport\s*\(\s*)["']([^"']+)["']/g)) {
+      if (specifier.startsWith("node:") || specifier.startsWith(".")) continue;
+      assert.ok(manifest.dependencies?.[specifier], `${file} imports ${specifier}, which is not a dependency of the package`);
+    }
+  }
+  const lock = JSON.parse(readFileSync(join(REPO_ROOT, dir, "package-lock.json"), "utf8"));
+  assert.deepEqual(lock.packages[""].dependencies, manifest.dependencies, "the lockfile matches package.json");
+  for (const [path, entry] of Object.entries(lock.packages)) {
+    if (!path) continue;
+    assert.match(entry.resolved, /^https:\/\/registry\.npmjs\.org\//, path);
+    assert.match(entry.integrity, /^sha512-/, path);
+  }
+});
+
 // The Copilot CLI program's unpacked copy. With external personal secrets a
 // worker starts the program only from a complete copy that it cannot change,
 // which COPILOT_PKG_CACHE_HOME names (packages/sdk/src/cli-program-guard.ts). A

@@ -27,7 +27,8 @@ runs a turn here, even when a client started it without the tag.
 It is a module of the Azure provider, not of PilotSwarm's packages: they never
 import it, and nothing loads it unless a deployment names it. The worker
 image (`deploy/Dockerfile.worker`) carries it at
-`/app/deploy/providers/azure/linux-worker/`, without its tests.
+`/app/deploy/providers/azure/linux-worker/`, with its dependencies and
+without its tests.
 
 ## Loading it
 
@@ -119,9 +120,22 @@ again with a new credential, at most once a minute, so a newly granted role
 takes effect without a restart.
 
 `@azure/identity` loads at the first sign-in, never with the module itself,
-which imports only Node's built-ins. It is a dependency of `pilotswarm-sdk`,
-so it resolves from `/app/node_modules` in the image, as from the repository's
-root `node_modules`.
+which imports only Node's built-ins. It is the module's own dependency: the
+folder is a package with its own `package.json` and lockfile, so PilotSwarm's
+packages don't decide its version. The worker image's build stage installs it
+from that lockfile with `npm ci --omit=dev`, and the image carries the result
+at `/app/deploy/providers/azure/linux-worker/node_modules/`. In a checkout
+without that install it resolves from the repository's root `node_modules`,
+where it is a dependency of `pilotswarm-sdk`. To load the module with its own
+dependencies locally:
+
+```bash
+npm ci --omit=dev --prefix deploy/providers/azure/linux-worker
+```
+
+Keep the lockfile's `resolved` URLs on `https://registry.npmjs.org/`: the
+worker image's `NPM_REGISTRY` build argument relies on npm rewriting them onto
+the configured registry.
 
 ## TLS
 

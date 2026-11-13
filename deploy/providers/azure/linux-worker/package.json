@@ -1,0 +1,13 @@
+{
+  "name": "pilotswarm-azure-linux-worker",
+  "private": true,
+  "type": "module",
+  "description": "The coordination host's extension module for PilotSwarm's Linux worker beside a Windows worker pool, loaded through PILOTSWARM_EXTENSION_MODULES.",
+  "license": "MIT",
+  "engines": {
+    "node": "^24.22.1 || >=26.12.1"
+  },
+  "dependencies": {
+    "@azure/identity": "^4.14.1"
+  }
+}

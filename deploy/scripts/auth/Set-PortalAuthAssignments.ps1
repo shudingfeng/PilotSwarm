@@ -167,65 +167,48 @@ function Resolve-AppIdFromEnv {
 function Resolve-Principal {
     <#
     Resolves a user-supplied identifier to @{ id; type; display } where
-    type is "User", "Group" or "ServicePrincipal". Returns $null if nothing
-    matches. -MemberTypes is the role's allowedMemberTypes: "User" looks up
-    users and groups, "Application" looks up service principals.
+    type is "User" or "Group". Returns $null if nothing matches.
 
     Lookup order:
-      - GUID  → User first, then Group, then ServicePrincipal (object id or application id)
+      - GUID  → User first, then Group
       - UPN-like (contains '@') → User by UPN
-      - Otherwise → User by UPN (in case bare alias), then Group by displayName,
-        then ServicePrincipal by service principal name
+      - Otherwise → User by UPN (in case bare alias), then Group by displayName
     #>
-    param([string]$Identifier, [string[]]$MemberTypes = @("User"))
+    param([string]$Identifier)
     if ([string]::IsNullOrWhiteSpace($Identifier)) { return $null }
     $id = $Identifier.Trim()
     $isGuid = $id -match '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
 
-    if ($MemberTypes -contains "User") {
+    if ($isGuid) {
         $u = az ad user show --id $id 2>$null
         if ($LASTEXITCODE -eq 0 -and $u) {
             $obj = $u | ConvertFrom-Json
             return @{ id = $obj.id; type = "User"; display = $obj.userPrincipalName }
         }
-        if ($isGuid) {
-            $g = az ad group show --group $id 2>$null
-            if ($LASTEXITCODE -eq 0 -and $g) {
-                $obj = $g | ConvertFrom-Json
-                return @{ id = $obj.id; type = "Group"; display = $obj.displayName }
-            }
-        } else {
-            $g = az ad group list --display-name $id --query "[0]" 2>$null
-            if ($LASTEXITCODE -eq 0 -and $g -and "$g".Trim() -ne "null" -and "$g".Trim() -ne "") {
-                $obj = $g | ConvertFrom-Json
-                if ($obj) { return @{ id = $obj.id; type = "Group"; display = $obj.displayName } }
-            }
+        $g = az ad group show --group $id 2>$null
+        if ($LASTEXITCODE -eq 0 -and $g) {
+            $obj = $g | ConvertFrom-Json
+            return @{ id = $obj.id; type = "Group"; display = $obj.displayName }
         }
+        return $null
     }
-    if ($MemberTypes -contains "Application") {
-        $sp = az ad sp show --id $id 2>$null
-        if ($LASTEXITCODE -eq 0 -and $sp) {
-            $obj = $sp | ConvertFrom-Json
-            return @{ id = $obj.id; type = "ServicePrincipal"; display = $obj.displayName }
-        }
+
+    $u = az ad user show --id $id 2>$null
+    if ($LASTEXITCODE -eq 0 -and $u) {
+        $obj = $u | ConvertFrom-Json
+        return @{ id = $obj.id; type = "User"; display = $obj.userPrincipalName }
+    }
+    $g = az ad group list --display-name $id --query "[0]" 2>$null
+    if ($LASTEXITCODE -eq 0 -and $g -and "$g".Trim() -ne "null" -and "$g".Trim() -ne "") {
+        $obj = $g | ConvertFrom-Json
+        if ($obj) { return @{ id = $obj.id; type = "Group"; display = $obj.displayName } }
     }
     return $null
 }
 
-function Get-PrincipalKinds {
-    param([string[]]$MemberTypes)
-    if ($MemberTypes -notcontains "Application") { return "User or Group" }
-    if ($MemberTypes -contains "User") { return "User, Group or ServicePrincipal" }
-    return "ServicePrincipal"
-}
-
-function Get-RoleMemberTypes {
-    # A role without allowedMemberTypes is treated as users-only, as before.
-    param([hashtable]$Ctx, [string]$RoleValue)
-    $types = @(@($Ctx.roleMemberTypes[$RoleValue]) | Where-Object { $_ })
-    if ($types.Count -eq 0) { $types = @("User") }
-    return ,$types
-}
+# The roles that applications can hold: Resolve-RolePrincipal,
+# Get-RoleMemberTypes and Get-PrincipalKinds (deploy/providers/azure/entra/WorkerRoles.ps1).
+. (Join-Path $PSScriptRoot "../../providers/azure/entra/WorkerRoles.ps1")
 
 function Get-AppContext {
     <#
@@ -312,7 +295,7 @@ function Invoke-AssignBatch {
     $memberTypes = Get-RoleMemberTypes -Ctx $Ctx -RoleValue $RoleValue
     Write-Host "  Assigning '$RoleValue' role to $($Identifiers.Count) principal(s)..." -ForegroundColor Yellow
     foreach ($ident in $Identifiers) {
-        $p = Resolve-Principal -Identifier $ident -MemberTypes $memberTypes
+        $p = Resolve-RolePrincipal -Identifier $ident -MemberTypes $memberTypes
         if (-not $p) {
             Write-Warning "    Could not resolve '$ident' to a $(Get-PrincipalKinds $memberTypes) - skipping"
             continue
@@ -333,7 +316,7 @@ function Invoke-RemoveBatch {
     $current = Get-CurrentAssignments -SpObjectId $Ctx.spObjectId
     Write-Host "  Removing '$RoleValue' role from $($Identifiers.Count) principal(s)..." -ForegroundColor Yellow
     foreach ($ident in $Identifiers) {
-        $p = Resolve-Principal -Identifier $ident -MemberTypes $memberTypes
+        $p = Resolve-RolePrincipal -Identifier $ident -MemberTypes $memberTypes
         if (-not $p) {
             Write-Warning "    Could not resolve '$ident' to a $(Get-PrincipalKinds $memberTypes) - skipping"
             continue

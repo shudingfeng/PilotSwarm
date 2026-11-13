@@ -21,6 +21,13 @@ You can also invoke it directly.
 | `Setup-PortalAuth.ps1` | Opinionated wrapper that creates the exact shape the PilotSwarm portal expects. See "Defaults" below. |
 | `Set-PortalAuthAssignments.ps1` | Add / remove / list app-role assignments on an existing portal app: users and groups for `admin` / `user`, and service principals for the roles that applications can hold (see "Roles for application identities" below). Idempotent. Re-runnable. See `.github/skills/pilotswarm-portal-auth-assignments/SKILL.md` for full operator docs. |
 
+The functions behind the roles that applications can hold, which
+`Setup-PortalAuth.ps1 -WorkerRoles` and `Set-PortalAuthAssignments.ps1` use,
+are in the Azure provider's
+[`deploy/providers/azure/entra/WorkerRoles.ps1`](../../providers/azure/entra/README.md).
+The scripts dot-source it by its path from their own folder;
+`Setup-PortalAuth.ps1` loads it only with `-WorkerRoles`.
+
 ## Prerequisites
 
 - Azure CLI installed and on PATH
