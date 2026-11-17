@@ -1,9 +1,10 @@
 /**
  * Formal audit R1 (pse/wfv2/formal/latest-1083): every registered session orchestration version resolves to its own
  * module, exactly. 1.0.82 is a frozen copy (orchestration_1_0_82/, which names itself "1.0.82" and stamps that literal
- * as a continue-as-new's source version; audit R2), and so is 1.0.83 (orchestration_1_0_83/, frozen when 1.0.84 added
- * owner routing); 1.0.84, the latest, is the live tree (orchestration/). Registering the live tree's code under 1.0.82
- * or 1.0.83, or a frozen copy's under the latest, would hand in-flight histories the wrong handler.
+ * as a continue-as-new's source version; audit R2), and so are 1.0.83, 1.0.84 and 1.0.85 (orchestration_1_0_83/ to
+ * orchestration_1_0_85/, each frozen when the next version opened); 1.0.86, the latest (1.0.85 plus owner routing), is
+ * the live tree (orchestration/). Registering the live tree's code under a frozen version, or a frozen copy's under the
+ * latest, would hand in-flight histories the wrong handler.
  *
  * Run: node --test test/unit/orchestration-registry-modules.test.mjs (after npm run build).
  */
@@ -14,6 +15,7 @@ import { DURABLE_SESSION_LATEST_VERSION, DURABLE_SESSION_ORCHESTRATION_REGISTRY 
 
 const DIST = new URL("../../dist/", import.meta.url);
 const SRC = new URL("../../src/", import.meta.url);
+const FROZEN = ["1.0.82", "1.0.83", "1.0.84", "1.0.85"];
 
 /** The module a version's code lives in: the live tree for the latest; else its own file (to 1.0.51) or directory. */
 function moduleOf(version) {
@@ -22,8 +24,8 @@ function moduleOf(version) {
     return existsSync(new URL(`${name}/index.js`, DIST)) ? `${name}/index.js` : `${name}.js`;
 }
 
-test("each registered version is its own module's handler, exactly; the latest (1.0.84) is the live tree; 1.0.82 and 1.0.83 frozen copies", async () => {
-    assert.equal(DURABLE_SESSION_LATEST_VERSION, "1.0.84");
+test("each registered version is its own module's handler, exactly; the latest (1.0.86) is the live tree; 1.0.82 to 1.0.85 frozen copies", async () => {
+    assert.equal(DURABLE_SESSION_LATEST_VERSION, "1.0.86");
     const versions = DURABLE_SESSION_ORCHESTRATION_REGISTRY.map(entry => entry.version);
     assert.equal(new Set(versions).size, versions.length, "no version is registered twice");
     assert.equal(versions.at(-1), DURABLE_SESSION_LATEST_VERSION);
@@ -33,18 +35,19 @@ test("each registered version is its own module's handler, exactly; the latest (
         assert.equal(handler, mod[name], `${version} is ${moduleOf(version)}'s ${name}`);
         assert.equal(handler.name, name, version);
     }
-    const frozen = await import(new URL("orchestration_1_0_82/index.js", DIST).href);
-    const frozen83 = await import(new URL("orchestration_1_0_83/index.js", DIST).href);
     const live = await import(new URL("orchestration/index.js", DIST).href);
-    assert.equal(DURABLE_SESSION_ORCHESTRATION_REGISTRY.find(entry => entry.version === "1.0.82").handler, frozen.durableSessionOrchestration_1_0_82);
-    assert.equal(DURABLE_SESSION_ORCHESTRATION_REGISTRY.find(entry => entry.version === "1.0.83").handler, frozen83.durableSessionOrchestration_1_0_83);
-    assert.equal(DURABLE_SESSION_ORCHESTRATION_REGISTRY.at(-1).handler, live.durableSessionOrchestration_1_0_84);
-    assert.equal("durableSessionOrchestration_1_0_82" in live, false, "the live tree is not 1.0.82");
-    assert.equal("durableSessionOrchestration_1_0_83" in live, false, "the live tree is not 1.0.83");
+    for (const version of FROZEN) {
+        const name = version.replaceAll(".", "_");
+        const frozen = await import(new URL(`orchestration_${name}/index.js`, DIST).href);
+        assert.equal(DURABLE_SESSION_ORCHESTRATION_REGISTRY.find(entry => entry.version === version).handler,
+            frozen[`durableSessionOrchestration_${name}`], version);
+        assert.equal(`durableSessionOrchestration_${name}` in live, false, `the live tree is not ${version}`);
+    }
+    assert.equal(DURABLE_SESSION_ORCHESTRATION_REGISTRY.at(-1).handler, live.durableSessionOrchestration_1_0_86);
 });
 
-test("audit R2: frozen 1.0.82 and 1.0.83 name themselves with their literal and stamp it as a continue-as-new's source version", () => {
-    for (const version of ["1.0.82", "1.0.83"]) {
+test("audit R2: frozen 1.0.82 to 1.0.85 name themselves with their literal and stamp it as a continue-as-new's source version", () => {
+    for (const version of FROZEN) {
         const dir = `orchestration_${version.replaceAll(".", "_")}`;
         const runtime = readFileSync(new URL(`${dir}/runtime.ts`, SRC), "utf8").replace(/\r\n/g, "\n");
         assert.ok(runtime.split("\n").includes(`export const CURRENT_ORCHESTRATION_VERSION = "${version}";`), dir);

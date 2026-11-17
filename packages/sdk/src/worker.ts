@@ -1,6 +1,8 @@
 import { capabilityHash, type CapabilitySource } from "./capability-catalog.js";
 import { OWNER_CAPACITY_CAPABILITY, workerTagFilter } from "./activity-routing.js";
 import { isOwnerRoutingTag } from "./owner-routing.js";
+import { resolveWorkflowCapabilitySnapshot, type WorkflowToolLabels, type WorkflowCapabilitySnapshot } from "./workflow/package-pins.js";
+import type { WorkflowToolBinding } from "./workflow/tool-policy.js";
 import { isWorkflowTestBench } from "./workflow/test-bench.js";
 import { workflowScriptsEnabledFromEnv } from "./workflow/scripts-gate.js";
 import { skillsIndexLine, skillsIndexSection, WORKFLOW_SKILLS_DIR, WORKFLOW_TEST_MODE_SKILLS_DIR } from "./workflow/guidance.js";
@@ -373,6 +375,7 @@ export class PilotSwarmWorker {
      * sessions bound to that id (ensurePinnedAgentPackageRevision).
      */
     private _retainedPackageRevisions = new Map<string, AgentPackageInstallEntry & { pinnedOf: string }>();
+    private _pinnedCapabilitySources = new Map<string, CapabilitySource>();
     /** Agent-package dynamic install state (docs/proposals/agent-packages.md). */
     private _agentPackagesCacheDir: string | null = null;
     private _agentPackagesRefreshMs = 20_000;
@@ -523,6 +526,8 @@ export class PilotSwarmWorker {
                 // in place on reload): deployment + shared-package skills.
                 skills: this._loadableSkills,
                 getCapabilitySources: () => this._getCapabilitySources(),
+                getWorkflowCapabilitySnapshot: (binding, labels, load, checked) => this.getWorkflowCapabilitySnapshot(binding, labels, load, checked),
+                getAgentPackagesEpoch: () => this._agentPackagesEpoch,
                 // Private, per-owner skills, also by reference. A session
                 // gets the ones its OWNER published, and nobody else's — see
                 // SessionManager._skillCatalogForSession (what load_skill
@@ -757,7 +762,8 @@ export class PilotSwarmWorker {
      * capacity tag and take those requests. An owner-only worker never
      * takes them, and a worker with an owner tag that is not owner-only
      * refuses to start with one: the owner tag and the capacity tag together
-     * exceed duroxide's five tags. With a requester, the worker also refuses,
+     * would make seven tags, one more than the six a worker's filter may hold
+     * (MAX_OWNER_ROUTING_WORKER_TAGS). With a requester, the worker also refuses,
      * without a retry, a turn whose session's creation config holds an owner
      * tag that the turn doesn't carry (`OWNER_TAG_MISSING`). Null removes it.
      */
@@ -1689,6 +1695,7 @@ export class PilotSwarmWorker {
 
     private _resetLoadedPluginState(): void {
         this._capabilitySources.length = 0;
+        this._pinnedCapabilitySources.clear();
         this._agentPackageMcpServersByPackage.clear();
         this._loadedSkillDirs.length = 0;
         this._loadedSkills.clear();
@@ -1990,6 +1997,23 @@ export class PilotSwarmWorker {
         }
         await this.refreshAgentPackages({ force: true });
         return this._pinnedRevisionLoaded(pinnedPackageId);
+    }
+
+    private async getWorkflowCapabilitySnapshot(binding: WorkflowToolBinding, labels?: WorkflowToolLabels, load = true,
+        checked?: WorkflowCapabilitySnapshot) {
+        if (!this._catalog) throw new Error("Workflow package registry is unavailable.");
+        const loadSource = async (id: string, revision: string) => {
+            const pinnedId = `${id}@${revision}`;
+            if (!await this.ensurePinnedAgentPackageRevision(pinnedId)) {
+                throw new Error(`Pinned package '${id}' revision '${revision}' could not be loaded; retry the operation.`);
+            }
+            const source = this._pinnedCapabilitySources.get(pinnedId);
+            if (!source) throw new Error(`Pinned package '${id}' revision '${revision}' has no loaded capability source; retry the operation.`);
+            return { ...source, tools: this._agentPackageToolsByPackage.get(pinnedId) ?? new Map() };
+        };
+        if (load && checked) return checked.loadSources ? checked.loadSources(loadSource) : checked;
+        return resolveWorkflowCapabilitySnapshot(binding, labels, this._catalog, this._getCapabilitySources(),
+            load ? loadSource : undefined);
     }
 
     private _pinnedRevisionLoaded(pinnedPackageId: string): boolean {
@@ -2563,6 +2587,7 @@ export class PilotSwarmWorker {
                 prompt: agent.prompt,
                 ...(agent.baseV2Prompt ? { baseV2Prompt: agent.baseV2Prompt } : {}),
                 toolNames: [...(agent.tools ?? [])],
+                ...(agent.initialRequiredTool ? { initialRequiredTool: agent.initialRequiredTool } : {}),
                 nativeTaskTools: agent.nativeTaskTools,
                 kind: agent.promptLayerKind ?? "app-agent",
                 descriptor: agent.layerDescriptor,
@@ -2838,6 +2863,7 @@ export class PilotSwarmWorker {
 
         if (!source.revision) source.revision = capabilityHash({ artifacts: source.artifacts, mcp: source.mcpServers });
         if (!pinnedRevision) this._capabilitySources.push(source);
+        else this._pinnedCapabilitySources.set(source.id, source);
 
         // Session policy — last one wins
         const policyPath = path.join(absDir, "session-policy.json");

@@ -241,7 +241,7 @@ describe("owner routing gates", () => {
                 sessionId: randomUUID(), model: qualifiedModel, owner: ownerOf("c"), parentSessionId: parentId, nestingLevel: 1, ownerTag: OWNER_TAG.c,
             });
             await child.send("the child's turn waits in the queue");
-            await eventually(async () => (await scheduledActivities(client, child.sessionId)).includes("runTurnV5"), "the child's queued turn");
+            await eventually(async () => (await scheduledActivities(client, child.sessionId)).includes("runTurnV6"), "the child's queued turn");
 
             const sentAt = Date.now();
             await mgmt.completeSession(parentId, "done while the child's turn waits", { wait: false });
@@ -259,7 +259,7 @@ describe("owner routing gates", () => {
             expect(race.fireAtMs - race.timer.timestampMs).toBe(WORKSPACE_RELEASE_CAP_MS);
             const finished = new Set(history.filter((e) => /^Activity(Completed|Failed)$/.test(e.kind)).map((e) => e.sourceEventId));
             expect(finished.has(race.scheduled.eventId)).toBe(false);
-            expect(await scheduledActivities(client, parentId)).not.toContain("runTurnV5");
+            expect(await scheduledActivities(client, parentId)).not.toContain("runTurnV6");
         });
     }, TIMEOUT);
 });

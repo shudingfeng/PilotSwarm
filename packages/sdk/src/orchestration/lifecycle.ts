@@ -51,6 +51,7 @@ import {
 } from "./utils.js";
 import { assertIntakeContinueAsNewTarget, carryIntakeState, type IntakeCarryingInput } from "./intake-state.js";
 import { IntakeInvariantError } from "./intake-machine.js";
+import { LIVE_SESSION_PROXY_CONTRACT } from "./proxy-contract.js";
 
 // ─── Custom status / KV helpers ─────────────────────────────
 
@@ -215,7 +216,7 @@ export function* releaseAffinity(
         }
     }
     state.affinityKey = yield ctx.newGuid();
-    runtime.session = createSessionProxy(ctx, runtime.input.sessionId, state.affinityKey, state.config, "workflow-intake-v1", sessionRouting(runtime.options));
+    runtime.session = createSessionProxy(ctx, runtime.input.sessionId, state.affinityKey, state.config, LIVE_SESSION_PROXY_CONTRACT, sessionRouting(runtime.options));
     try {
         yield runtime.manager.recordSessionEvent(runtime.input.sessionId, [{
             eventType: "session.affinity_released",
@@ -227,7 +228,7 @@ export function* releaseAffinity(
 }
 
 /**
- * 1.0.84: ask for capacity for an owner-tagged session's owner. Its
+ * 1.0.86: ask for capacity for an owner-tagged session's owner. Its
  * activities wait for a worker that declares the owner's tag; the answer
  * tells whether to run them now (`ok`), to end the turn (`deny`), or to wait
  * on the busy timer (`busy`). An activity that fails counts as no answer.
@@ -374,7 +375,7 @@ export function* applyAgentWorkspaceExtrasChange(runtime: DurableSessionRuntime,
     const revision = state.workspaceRevision + 1;
     const extraPaths = action.extraPaths && typeof action.extraPaths === "object" ? action.extraPaths as Record<string, string> : null;
     state.config.workspace = next;
-    runtime.session = createSessionProxy(ctx, runtime.input.sessionId, state.affinityKey, state.config, "workflow-intake-v1", sessionRouting(runtime.options));
+    runtime.session = createSessionProxy(ctx, runtime.input.sessionId, state.affinityKey, state.config, LIVE_SESSION_PROXY_CONTRACT, sessionRouting(runtime.options));
     state.workspaceRevision = revision;
     const note = extraFoldersChangedNote(previous, next, extraPaths);
     if (note) state.workspaceNotice = state.workspaceNotice ? `${state.workspaceNotice} ${note}` : note;
@@ -712,7 +713,7 @@ export function buildContinueInput(
         ...(state.multiWriter ? { multiWriter: true } : {}),
         ...(state.sharedPreambleSent ? { sharedPreambleSent: true } : {}),
         ...(state.ownerDisplay ? { ownerDisplay: state.ownerDisplay } : {}),
-        // 1.0.84: owner routing, only when set.
+        // 1.0.86: owner routing, only when set.
         ...(options.ownerTag ? { ownerTag: options.ownerTag } : {}),
         ...(options.workspaceBusyFastRelease ? { workspaceBusyFastRelease: true } : {}),
         ...restOverrides,
@@ -1154,7 +1155,7 @@ function* handleSetWorkspaceCommand(runtime: DurableSessionRuntime, cmdMsg: Comm
     let path: string | null = null;
     let extraPaths: Record<string, string> | null = null;
     if (next) {
-        // 1.0.84: an owner-tagged session's check waits for a worker of its
+        // 1.0.86: an owner-tagged session's check waits for a worker of its
         // owner. The command asks for one first, and the check is capped, so
         // a command never holds the session's later commands for good. A
         // refusal or the cap answers the command and keeps the workspace.
@@ -1212,7 +1213,7 @@ function* handleSetWorkspaceCommand(runtime: DurableSessionRuntime, cmdMsg: Comm
     else delete state.config.workspace;
     // The proxy carries the config into every turn; rebuild it from the
     // changed config rather than rely on sharing one object.
-    runtime.session = createSessionProxy(ctx, runtime.input.sessionId, state.affinityKey, state.config, "workflow-intake-v1", sessionRouting(runtime.options));
+    runtime.session = createSessionProxy(ctx, runtime.input.sessionId, state.affinityKey, state.config, LIVE_SESSION_PROXY_CONTRACT, sessionRouting(runtime.options));
     state.workspaceRevision = revision;
     // A change of extra folders only (section 4.10) keeps the working
     // directory, so its note names the extra folders alone. A note not yet
@@ -1393,7 +1394,7 @@ export function* advanceRegenPipeline(
                 ...(regen.distillerModel ? { distillerModel: regen.distillerModel } : {}),
                 ...((regen as any).distillerReasoningEffort ? { distillerReasoningEffort: (regen as any).distillerReasoningEffort } : {}),
                 ...((regen as any).distillerContextTier ? { distillerContextTier: (regen as any).distillerContextTier } : {}),
-                // 1.0.84: the distiller session takes this session's tag and busy policy.
+                // 1.0.86: the distiller session takes this session's tag and busy policy.
                 ...createdSessionRouting(runtime.options),
             });
             if (!spawn?.distillerSessionId) {

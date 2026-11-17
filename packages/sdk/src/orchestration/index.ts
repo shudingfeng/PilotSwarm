@@ -1,13 +1,17 @@
 /**
- * Durable session orchestration v1.0.84: the latest version. New sessions start here and every continue-as-new targets
- * it; 1.0.83 and 1.0.82 are frozen in orchestration_1_0_83/ and orchestration_1_0_82/, and their sessions move here at
- * their next continue-as-new. It is 1.0.83 plus owner routing (docs/proposals/windows-worker-pool.md, U18): owner tags,
- * capacity requests, the fast busy policy and the capped waits, each inert unless a session's input asks for it.
+ * Durable session orchestration v1.0.86: the latest version. New sessions start here and every continue-as-new targets
+ * it; 1.0.85, 1.0.84 and 1.0.83 are frozen in orchestration_1_0_85/, orchestration_1_0_84/ and orchestration_1_0_83/,
+ * and their sessions move here at their next continue-as-new. It is 1.0.85 plus owner routing
+ * (docs/proposals/windows-worker-pool.md, U18): owner tags, capacity requests, the fast busy policy and the capped waits,
+ * each inert unless a session's input asks for it. Turns keep the tool-composition activity contract
+ * (LIVE_SESSION_PROXY_CONTRACT), with the workflow intake, turn controls and workspace protocol.
  *
- * 1.0.83 (owner decision 2026-11-08T15:30Z, pse/decision/always-on-scope-20261108T1530) is 1.0.82 plus the durable
- * workflow intake (design docs/proposals/workflow-durable-intake.md, revision 3 with amendment 2): its turns are
- * workflow request turns (the Workflow controller's request, agent and parallel states). Its continue-as-new never
- * targets an older version (lifecycle.ts versionedContinueAsNew), and 1.0.84 keeps that floor.
+ * 1.0.85 is 1.0.84 plus durable session titles (a spawn-time title that can be locked, summary titles that never
+ * overwrite a locked one); 1.0.84 is 1.0.83 plus pinned spawn grants and subtree tool ceilings. 1.0.83 (owner decision
+ * 2026-11-08T15:30Z, pse/decision/always-on-scope-20261108T1530) is 1.0.82 plus the durable workflow intake (design
+ * docs/proposals/workflow-durable-intake.md, revision 3 with amendment 2): its turns are workflow request turns (the
+ * Workflow controller's request, agent and parallel states). Its continue-as-new never targets an older version
+ * (lifecycle.ts versionedContinueAsNew), and 1.0.86 keeps that floor.
  *
  * Flat event loop backed by a KV FIFO work buffer:
  *   1. `createRuntime` builds the mutable runtime and runs startup gates.
@@ -34,7 +38,7 @@ import { DURABLE_SESSION_LATEST_VERSION } from "../orchestration-version.js";
 
 export { CURRENT_ORCHESTRATION_VERSION };
 
-export function* durableSessionOrchestration_1_0_84(
+export function* durableSessionOrchestration_1_0_86(
     ctx: any,
     input: OrchestrationInput,
 ): Generator<any, string, any> {

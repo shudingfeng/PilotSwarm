@@ -490,7 +490,7 @@ export function* refreshTrackedSubAgents(
 // ─── Graceful shutdown cascade ──────────────────────────────
 
 /**
- * Free the session on the worker that holds it. 1.0.84: an owner-tagged
+ * Free the session on the worker that holds it. 1.0.86: an owner-tagged
  * session's destroy waits for a worker of its owner, so it is raced against
  * WORKSPACE_RELEASE_CAP_MS. With no such worker nothing is held in memory,
  * the session ends anyway, and duroxide drops the destroy no worker took.
@@ -847,6 +847,10 @@ export function* handleSubAgentAction(
             let boundAgentPackageId: string | undefined;
             let promptLayeringKind: "app-agent" | "app-system-agent" | "pilotswarm-system-agent" | undefined;
             let resolvedAgentName = result.agentName;
+            if (result.toolNames !== undefined && (result.grant !== undefined || result.tools !== undefined)) {
+                queueFollowup(runtime, "Error: deprecated tool_names cannot be combined with grant or tools.");
+                return true;
+            }
             if (Object.hasOwn(result, "requiredTool") || Object.hasOwn(result, "required_tool")) {
                 queueFollowup(runtime,
                     `[SYSTEM: spawn_agent failed — required_tool is no longer supported by spawn_agent. Use ps_list_agents to find a suitable named agent, then pass its exact agent_name and your assignment in task.]`);
@@ -943,6 +947,7 @@ export function* handleSubAgentAction(
                 agentIdentity: _parentAgentIdentity,
                 isCrawler: _parentIsCrawler,
                 isHarvester: _parentIsHarvester,
+                toolGrant: _parentToolGrant,
                 ...parentConfig
             } = state.config;
             const childConfig: SerializableSessionConfig = {
@@ -980,9 +985,14 @@ export function* handleSubAgentAction(
             });
 
             let childSessionId: string;
-            // 1.0.84: the child takes the tag and busy policy; a system child neither.
+            // 1.0.86: the child takes the tag and busy policy; a system child neither.
             const childRouting = agentIsSystem ? undefined : createdSessionRouting(runtime.options);
             try {
+                const composition = yield runtime.session.captureSpawnTools(childConfig, result.grant, result.tools, agentDef,
+                    result.toolNames !== undefined, {
+                        transcriptEpoch: state.transcriptEpoch, workspaceRevision: state.workspaceRevision, turnIndex: state.iteration,
+                    });
+                Object.assign(childConfig, composition);
                 childSessionId = yield runtime.manager.spawnChildSession(
                     runtime.input.sessionId,
                     childConfig,
@@ -995,7 +1005,9 @@ export function* handleSubAgentAction(
                     agentTitleIsExplicit,
                     bootstrapRequiredTool,
                     ...(childRouting
-                        ? [result.workspace ? true : undefined, childRouting]
+                        ? [result.workspace ? true : undefined, result.lockTitle, childRouting]
+                        : result.lockTitle !== undefined
+                        ? [result.workspace ? true : undefined, result.lockTitle]
                         : result.workspace ? [true] : []),
                 );
             } catch (err: any) {
@@ -1009,6 +1021,11 @@ export function* handleSubAgentAction(
             yield runtime.manager.recordSessionEvent(runtime.input.sessionId, [{
                 eventType: "session.agent_spawned",
                 data: { childSessionId, agentId: agentId || undefined, task: agentTask.slice(0, 500) },
+            }, {
+                eventType: "session.tools_granted",
+                data: { childSessionId, agent: agentDef?.name ?? null, tools: childConfig.toolGrant?.tools,
+                    sources: childConfig.toolGrant?.toolSources, packages: childConfig.toolGrant?.packagePins,
+                    owner: childConfig.toolGrant?.owner },
             }]);
 
             state.subAgents.push({

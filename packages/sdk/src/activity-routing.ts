@@ -10,13 +10,15 @@ export const AGENT_HANDOFF_CAPABILITY = "pilotswarm.agent-handoff.v2";
  * - "turn-control-v1" (1.0.81+): turns run as runTurnV4/runTurnEpochV4 with
  *   TURN_CONTROL_CAPABILITY; every other routed activity keeps the handoff
  *   names and tag.
- * - "workflow-intake-v1" (1.0.83+): turns run as
+ * - "workflow-intake-v1" (1.0.83): turns run as
  *   runTurnV5/runTurnEpochV5 with WORKFLOW_REQUEST_CAPABILITY; their input
  *   may carry `intake` and their result carries `intakeDispatch`; every other
  *   routed activity keeps the handoff names and tag, as under turn-control-v1.
- *   An owner-tagged session's turns (1.0.84) carry its owner tag instead.
+ * - "tool-composition-v1" (1.0.84+): turns run as runTurnV6/runTurnEpochV6
+ *   with TOOL_COMPOSITION_CAPABILITY and keep the intake fields.
+ *   An owner-tagged session's turns (1.0.86) carry its owner tag instead.
  */
-export type ActivityRoutingContract = "agent-handoff-v2" | "turn-control-v1" | "workflow-intake-v1";
+export type ActivityRoutingContract = "agent-handoff-v2" | "turn-control-v1" | "workflow-intake-v1" | "tool-composition-v1";
 export const HANDOFF_ACTIVITY_NAMES = {
     runTurn: "runTurnV3",
     runTurn2: "runTurnEpochV3",
@@ -129,15 +131,38 @@ export function registerWorkflowIntakeTurnActivity(runtime: any, name: keyof typ
 }
 
 /**
- * Owner routing (1.0.84): every session-scoped activity of an owner-tagged
+ * Tool composition (1.0.84 and later): turns keep the intake protocol and
+ * use the pinned spawn grant contract. They run as runTurnV6/runTurnEpochV6,
+ * and a spawn's tool capture (captureSpawnToolsV1) runs with the same tag.
+ * Every worker declares it (WORKFLOW_MILESTONE_WORKER_TAGS).
+ */
+export const TOOL_COMPOSITION_CAPABILITY = "pilotswarm.tool-composition.v1";
+export const COMPOSITION_TURN_ACTIVITY_NAMES = {
+    runTurn: "runTurnV6",
+    runTurn2: "runTurnEpochV6",
+} as const;
+
+export function routeToolCompositionActivity(task: any): any {
+    if (typeof task.withTag !== "function") {
+        throw new Error("Tool composition requires Duroxide activity tag routing support");
+    }
+    return task.withTag(TOOL_COMPOSITION_CAPABILITY);
+}
+
+export function registerToolCompositionTurnActivity(runtime: any, name: keyof typeof COMPOSITION_TURN_ACTIVITY_NAMES, handler: any): void {
+    runtime.registerActivity(COMPOSITION_TURN_ACTIVITY_NAMES[name], handler);
+}
+
+/**
+ * Owner routing (1.0.86): every session-scoped activity of an owner-tagged
  * session carries the owner's tag, `owner.<subject>`, so only that owner's
  * workers run it. duroxide gives an activity one tag, so on the turn (with or
- * without an intake invocation) and the two workspace activities the owner
- * tag replaces the capability tag. It stands for those capabilities as well:
- * only a release that has them lets a worker declare an owner tag. The
- * intake's own writes and the report of a failed Workflow agent turn are
- * catalog writes that run no session: they keep the workflow-request tag, as
- * the manager activities keep theirs.
+ * without an intake invocation), the spawn's tool capture and the two
+ * workspace activities the owner tag replaces the capability tag. It stands
+ * for those capabilities as well: only a release that has them lets a worker
+ * declare an owner tag. The intake's own writes and the report of a failed
+ * Workflow agent turn are catalog writes that run no session: they keep the
+ * workflow-request tag, as the manager activities keep theirs.
  */
 export function routeOwnerActivity(task: any, ownerTag: string): any {
     if (typeof task.withTag !== "function") {
@@ -147,7 +172,7 @@ export function routeOwnerActivity(task: any, ownerTag: string): any {
 }
 
 /**
- * Owner routing (1.0.84): the requestOwnerCapacity activity goes only to
+ * Owner routing (1.0.86): the requestOwnerCapacity activity goes only to
  * workers that have a capacity requester, which declare this tag.
  */
 export const OWNER_CAPACITY_CAPABILITY = "pilotswarm.owner-capacity.v1";
@@ -161,17 +186,29 @@ export function routeOwnerCapacityActivity(task: any): any {
 
 /**
  * duroxide's MAX_WORKER_TAGS. duroxide-node 0.2.4 does not check it when a
- * runtime starts, so workerTagFilter keeps every filter within it.
+ * runtime starts: a runtime whose `defaultAnd` filter holds six or seven tags
+ * claims every one of them.
  */
 export const MAX_WORKER_TAGS = 5;
+
+/**
+ * The most tags workerTagFilter gives a worker: the five capability tags
+ * every worker declares, and the owner tag or the capacity tag. Since tool
+ * composition took the fifth capability tag, an owner tag or the capacity tag
+ * is a sixth, one past duroxide's MAX_WORKER_TAGS, which the pinned
+ * duroxide-node 0.2.4 accepts (see MAX_WORKER_TAGS). A duroxide release that
+ * enforces its limit refuses such a worker when it starts; the default filter
+ * stays within it.
+ */
+export const MAX_OWNER_ROUTING_WORKER_TAGS = MAX_WORKER_TAGS + 1;
 
 /**
  * A worker's tag filter: untagged work and the capability tags every worker
  * declares (`workflowTags` is WORKFLOW_MILESTONE_WORKER_TAGS), plus the
  * owner's tag when the worker has one, or the capacity tag when it has a
  * capacity requester. Without either it is the default filter exactly. With
- * four capability tags either one makes five, so a worker that has both, six,
- * is refused.
+ * five capability tags either one makes six (MAX_OWNER_ROUTING_WORKER_TAGS),
+ * so a worker that has both, seven, is refused.
  *
  * An owner-only worker names its owner's tag alone, so it claims only that
  * owner's session-scoped activities: no untagged work, no capability-tagged
@@ -197,12 +234,12 @@ export function workerTagFilter(
         AGENT_HANDOFF_CAPABILITY,
         WORKSPACE_CAPABILITY,
         TURN_CONTROL_CAPABILITY,
-        ...(opts.workflowTags ?? [WORKFLOW_REQUEST_CAPABILITY]),
+        ...(opts.workflowTags ?? [WORKFLOW_REQUEST_CAPABILITY, TOOL_COMPOSITION_CAPABILITY]),
         ...(opts.ownerTag ? [opts.ownerTag] : []),
         ...(opts.ownerCapacity ? [OWNER_CAPACITY_CAPABILITY] : []),
     ];
-    if ((opts.ownerTag || opts.ownerCapacity) && tags.length > MAX_WORKER_TAGS) {
-        throw new TypeError(`a worker's filter holds at most ${MAX_WORKER_TAGS} tags, duroxide's limit, not ${tags.length}`);
+    if ((opts.ownerTag || opts.ownerCapacity) && tags.length > MAX_OWNER_ROUTING_WORKER_TAGS) {
+        throw new TypeError(`a worker's filter holds at most ${MAX_OWNER_ROUTING_WORKER_TAGS} tags, not ${tags.length}`);
     }
     return { defaultAnd: tags };
 }
