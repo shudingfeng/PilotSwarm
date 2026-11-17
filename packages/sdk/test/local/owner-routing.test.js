@@ -54,12 +54,12 @@ function parsed(value) {
 }
 
 describe("owner routing on Duroxide runtimes", () => {
-    // Schedules what 1.0.84 schedules for an owner-tagged session, through
+    // Schedules what 1.0.86 schedules for an owner-tagged session, through
     // PilotSwarm's own proxies. With `pause`, it waits for the "go" event
     // after the workspace check, so a test can restart a worker there.
     function* probe(ctx, input) {
-        const manager = createSessionManagerProxy(ctx, "workflow-intake-v1", { childResultProvenance: true });
-        const proxy = (key) => createSessionProxy(ctx, input.sessionId, key, { workspace: WORKSPACE }, "workflow-intake-v1", { ownerTag: input.ownerTag });
+        const manager = createSessionManagerProxy(ctx, "tool-composition-v1", { childResultProvenance: true });
+        const proxy = (key) => createSessionProxy(ctx, input.sessionId, key, { workspace: WORKSPACE }, "tool-composition-v1", { ownerTag: input.ownerTag });
         let session = proxy(`affinity-${input.sessionId}`);
         yield manager.requestOwnerCapacity(input.sessionId, input.ownerTag);
         yield session.runTurn("one", false, 0);
@@ -76,7 +76,7 @@ describe("owner routing on Duroxide runtimes", () => {
 
     // The capped destroy of a completing session whose owner has no worker.
     function* cappedDestroy(ctx, input) {
-        const session = createSessionProxy(ctx, input.sessionId, `affinity-${input.sessionId}`, {}, "workflow-intake-v1", { ownerTag: input.ownerTag });
+        const session = createSessionProxy(ctx, input.sessionId, `affinity-${input.sessionId}`, {}, "tool-composition-v1", { ownerTag: input.ownerTag });
         const raced = parsed(yield ctx.race(session.destroy(), ctx.scheduleTimer(1_000)));
         return raced.index;
     }
@@ -88,7 +88,7 @@ describe("owner routing on Duroxide runtimes", () => {
         const executions = [];
         const runtimes = new Map();
         const answers = {
-            runTurnV5: { type: "completed", content: "ok" },
+            runTurnV6: { type: "completed", content: "ok" },
             requestOwnerCapacity: { decision: "ok" },
             checkWorkspace: { ok: true, path: "/work/app" },
         };
@@ -107,7 +107,7 @@ describe("owner routing on Duroxide runtimes", () => {
             });
             runtime.registerOrchestration("owner-probe", probe);
             runtime.registerOrchestration("capped-destroy", cappedDestroy);
-            for (const name of ["runTurnV5", "hydrateSession", "checkWorkspace", "releaseWorkspace", "destroySession", "requestOwnerCapacity"]) {
+            for (const name of ["runTurnV6", "hydrateSession", "checkWorkspace", "releaseWorkspace", "destroySession", "requestOwnerCapacity"]) {
                 runtime.registerActivity(name, async (ctx, input) => {
                     executions.push({ worker: id, name, tag: ctx.tag(), sessionId: input.sessionId, at: Date.now() });
                     return answers[name] ?? null;
@@ -142,7 +142,7 @@ describe("owner routing on Duroxide runtimes", () => {
         return false;
     }
 
-    const SCOPED = ["runTurnV5", "hydrateSession", "checkWorkspace", "releaseWorkspace", "runTurnV5", "destroySession"];
+    const SCOPED = ["runTurnV6", "hydrateSession", "checkWorkspace", "releaseWorkspace", "runTurnV6", "destroySession"];
 
     it("runs each owner's session-scoped activities only on that owner's worker, also under a new affinity key, and capacity requests only on the requester's worker", async () => {
         await withRuntimes("owner_route", async ({ client, executions, start, ran, timeoutMs }) => {
@@ -191,8 +191,8 @@ describe("owner routing on Duroxide runtimes", () => {
             await client.raiseEvent("probe-r", "go", {});
             expect((await client.waitForOrchestration("probe-r", timeoutMs)).status).toBe("Completed");
             expect(ran("sr").map((e) => `${e.worker} ${e.name}`)).toEqual([
-                "owner-a runTurnV5", "owner-a hydrateSession", "owner-a checkWorkspace",
-                "owner-a2 releaseWorkspace", "owner-a2 runTurnV5", "owner-a2 destroySession",
+                "owner-a runTurnV6", "owner-a hydrateSession", "owner-a checkWorkspace",
+                "owner-a2 releaseWorkspace", "owner-a2 runTurnV6", "owner-a2 destroySession",
             ]);
         });
     }, TIMEOUT);
@@ -214,7 +214,7 @@ describe("owner routing on Duroxide runtimes", () => {
             await eventually(() => recorded(client, "probe-s", "ActivityScheduled", "releaseWorkspace"), "the workspace release");
             await sleep(3_000);
             expect(ran("ss").map((e) => `${e.worker} ${e.name}`)).toEqual([
-                "owner-a runTurnV5", "owner-a hydrateSession", "owner-a checkWorkspace",
+                "owner-a runTurnV6", "owner-a hydrateSession", "owner-a checkWorkspace",
             ]);
             // The same ID: the restarted worker takes the session back at once.
             const restartedAt = Date.now();
@@ -565,7 +565,7 @@ describe("owner routing with PilotSwarm workers", () => {
             expect(await instance(lone.sessionId)).toBe("NotFound");
         });
     }, TIMEOUT);
-    it("keeps a session started on 1.0.82 untagged on that version and after its continue-as-new to 1.0.84", async () => {
+    it("keeps a session started on 1.0.82 untagged on that version and after its continue-as-new to 1.0.86", async () => {
         const env = getEnv();
         const respond = (_body, position) => ({ content: `ok:${position.lastUserText.slice(0, 24)}` });
         await withOwnerCluster(env, { respond }, async ({ startWorker, startClients, client, mgmt, catalog, asked, qualifiedModel }) => {
@@ -576,7 +576,7 @@ describe("owner routing with PilotSwarm workers", () => {
             // A session from before the upgrade: no tag saved with its creation
             // config, so a worker with a capacity requester runs its untagged
             // 1.0.82 turns. Its start input still names the owner and the fast
-            // policy, as a 1.0.84 client's would for an owner-routed session.
+            // policy, as a 1.0.86 client's would for an owner-routed session.
             const pin = pinSessionStartVersion(client, "1.0.82", { sessionId });
             const named = patchSessionStartInput(client, (input) => ({ ...input, ownerTag: TAG.a, workspaceBusyFastRelease: true }), { sessionId });
             try {
@@ -590,7 +590,7 @@ describe("owner routing with PilotSwarm workers", () => {
             expect(await sessionOrchestrationVersion(client, sessionId)).toBe("1.0.82");
 
             await mgmt.setSessionModel(sessionId, qualifiedModel);
-            await eventually(async () => (await sessionOrchestrationVersion(client, sessionId)) === "1.0.84", "the move to 1.0.84");
+            await eventually(async () => (await sessionOrchestrationVersion(client, sessionId)) === "1.0.86", "the move to 1.0.86");
             await eventually(async () => (await turnWorkers(catalog, sessionId)).length >= 2, "the turn after the move");
             const inputs = await executionInputs(client, sessionId);
             // 1.0.82 ignores both fields and carries neither into the next execution.

@@ -3,7 +3,7 @@
  * the probe orchestrations every runtime registers, and a runtime in a child
  * process that a test can kill outright.
  *
- * The orchestrations schedule what orchestration 1.0.84 schedules for an
+ * The orchestrations schedule what orchestration 1.0.86 schedules for an
  * owner-tagged session, through PilotSwarm's own session proxies. A runtime
  * in the test process and one in a child process replay each other's
  * histories, so both load the proxies from the built dist/ code, and the
@@ -28,12 +28,12 @@ const WORKSPACE = { schema: 1, root: "repos", folder: "app" };
 
 /** The activities the probes schedule; a runtime registers each with its own handler. */
 export const PROBE_ACTIVITIES = [
-    "runTurnV5", "hydrateSession", "checkWorkspace", "releaseWorkspace", "destroySession", "requestOwnerCapacity", "probeKind",
+    "runTurnV6", "hydrateSession", "checkWorkspace", "releaseWorkspace", "destroySession", "requestOwnerCapacity", "probeKind",
 ];
 
 /** What a probe activity answers. */
 export const PROBE_ANSWERS = {
-    runTurnV5: { type: "completed", content: "ok" },
+    runTurnV6: { type: "completed", content: "ok" },
     requestOwnerCapacity: { decision: "ok" },
     checkWorkspace: { ok: true, path: "/work/app" },
 };
@@ -46,14 +46,14 @@ export const PROBE_ANSWERS = {
  */
 export function registerOwnerProbes(runtime, { createSessionProxy, createSessionManagerProxy }, hooks = {}) {
     const session = (ctx, input, key) => createSessionProxy(
-        ctx, input.sessionId, key, { workspace: WORKSPACE }, "workflow-intake-v1", { ownerTag: input.ownerTag },
+        ctx, input.sessionId, key, { workspace: WORKSPACE }, "tool-composition-v1", { ownerTag: input.ownerTag },
     );
     const raceIndex = (raced) => (typeof raced === "string" ? JSON.parse(raced) : raced).index;
 
     // An owner-tagged session's turn, its workspace check and release, and a
     // turn and a destroy under a new affinity key.
     runtime.registerOrchestration("owner-hold", function* (ctx, input) {
-        const manager = createSessionManagerProxy(ctx, "workflow-intake-v1", { childResultProvenance: true });
+        const manager = createSessionManagerProxy(ctx, "tool-composition-v1", { childResultProvenance: true });
         let current = session(ctx, input, `affinity-${input.sessionId}`);
         yield manager.requestOwnerCapacity(input.sessionId, input.ownerTag);
         yield current.runTurn("one", false, 0);
@@ -71,11 +71,11 @@ export function registerOwnerProbes(runtime, { createSessionProxy, createSession
     runtime.registerOrchestration("owner-untagged-follow-up", function* (ctx, input) {
         const key = `affinity-${input.sessionId}`;
         yield session(ctx, input, key).runTurn("one", false, 0);
-        yield createSessionProxy(ctx, input.sessionId, key, {}, "workflow-intake-v1").hydrate();
+        yield createSessionProxy(ctx, input.sessionId, key, {}, "tool-composition-v1").hydrate();
         return "ok";
     });
 
-    // The capped destroy of 1.0.84, with the cap from the input.
+    // The capped destroy of 1.0.86, with the cap from the input.
     runtime.registerOrchestration("owner-destroy-race", function* (ctx, input) {
         const destroy = session(ctx, input, `affinity-${input.sessionId}`).destroy();
         return raceIndex(yield ctx.race(destroy, ctx.scheduleTimer(input.capMs)));

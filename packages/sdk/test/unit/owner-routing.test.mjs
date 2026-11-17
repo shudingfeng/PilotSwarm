@@ -1,8 +1,9 @@
 /**
- * Owner routing and orchestration 1.0.84.
+ * Owner routing and orchestration 1.0.86 (1.0.85 plus owner routing).
  *
- * The orchestration tests drive the real 1.0.82, frozen 1.0.83 and 1.0.84
- * generators with a scripted context and the real session proxy, so every
+ * The orchestration tests drive the real 1.0.82, the frozen 1.0.83 and 1.0.85
+ * and the latest 1.0.86 generators with a scripted context and the real
+ * session proxy, so every
  * activity is the descriptor duroxide would schedule: its name, input, tag
  * and session key.
  * The owner-only tests run duroxide runtimes on an in-memory SQLite store.
@@ -16,8 +17,10 @@ import { createSessionManagerProxy, createSessionProxy, personalCredentialTurnRe
 import { PersonalCredentialError } from "../../dist/personal-secret-store.js";
 import {
     AGENT_HANDOFF_CAPABILITY,
+    MAX_OWNER_ROUTING_WORKER_TAGS,
     MAX_WORKER_TAGS as ROUTING_MAX_WORKER_TAGS,
     OWNER_CAPACITY_CAPABILITY,
+    TOOL_COMPOSITION_CAPABILITY,
     TURN_CONTROL_CAPABILITY,
     WORKFLOW_REQUEST_CAPABILITY,
     WORKSPACE_CAPABILITY,
@@ -32,7 +35,8 @@ import {
 } from "../../dist/owner-routing.js";
 import { durableSessionOrchestration_1_0_82 } from "../../dist/orchestration_1_0_82/index.js";
 import { durableSessionOrchestration_1_0_83 } from "../../dist/orchestration_1_0_83/index.js";
-import { durableSessionOrchestration_1_0_84 } from "../../dist/orchestration/index.js";
+import { durableSessionOrchestration_1_0_85 } from "../../dist/orchestration_1_0_85/index.js";
+import { durableSessionOrchestration_1_0_86 } from "../../dist/orchestration/index.js";
 import { WORKSPACE_CHECK_CAP_MS, WORKSPACE_RELEASE_CAP_MS, workspaceRetryDelayMs, WORKSPACE_BUSY_RETRY_SCHEDULE_SECONDS } from "../../dist/orchestration/state.js";
 import { PilotSwarmClient, PilotSwarmWorker } from "../../dist/index.js";
 
@@ -73,9 +77,10 @@ function sessionScopedTasks(proxy) {
 
 test("with an owner tag every session-scoped activity carries it, and without one routing is unchanged", () => {
     const ctx = descriptorContext();
-    // 1.0.84 schedules 1.0.83's workflow-intake-v1 turns, whose tag the owner tag replaces too; 1.0.82's turn-control-v1
-    // never passes an owner tag, and the proxy would treat one the same way.
+    // 1.0.86 schedules tool-composition-v1 turns (as 1.0.84 and 1.0.85 do), whose tag the owner tag replaces too; 1.0.83's
+    // workflow-intake-v1 and 1.0.82's turn-control-v1 never pass an owner tag, and the proxy would treat one the same way.
     for (const [contract, turnNames, turnTag] of [
+        ["tool-composition-v1", ["runTurnV6", "runTurnEpochV6"], TOOL_COMPOSITION_CAPABILITY],
         ["workflow-intake-v1", ["runTurnV5", "runTurnEpochV5"], WORKFLOW_REQUEST_CAPABILITY],
         ["turn-control-v1", ["runTurnV4", "runTurnEpochV4"], TURN_CONTROL_CAPABILITY],
     ]) {
@@ -96,6 +101,15 @@ test("with an owner tag every session-scoped activity carries it, and without on
         // Same names and inputs: only the tag differs.
         assert.deepEqual(plain.map((t) => [t.name, t.input, t.sessionId]), tagged.map((t) => [t.name, t.input, t.sessionId]));
     }
+    // A spawn's tool capture reads the parent's session state where the session is held: with an owner tag it goes to
+    // the owner's workers, without one to any worker of tool composition.
+    const capture = (routing) => createSessionProxy(ctx, "s-1", "affinity-1", {}, "tool-composition-v1", routing)
+        .captureSpawnTools({ model: "test:model" }, undefined, undefined, null);
+    const taggedCapture = capture({ ownerTag: OWNER });
+    const plainCapture = capture(undefined);
+    assert.deepEqual([taggedCapture.name, taggedCapture.tag, taggedCapture.sessionId], ["captureSpawnToolsV1", OWNER, "affinity-1"]);
+    assert.deepEqual([plainCapture.name, plainCapture.tag, plainCapture.sessionId], ["captureSpawnToolsV1", TOOL_COMPOSITION_CAPABILITY, "affinity-1"]);
+    assert.deepEqual(plainCapture.input, taggedCapture.input);
 });
 
 test("the turn input carries the owner tag and the fast busy policy only when the orchestration sends them", () => {
@@ -116,8 +130,12 @@ test("manager activities carry no owner tag; the capacity request carries its ow
     assert.equal(capacity.sessionId, undefined);
 
     const legacy = manager.spawnChildSession("s-1", {}, "task", 1, false, undefined, undefined, undefined, false);
+    // The routing follows the required tool, the workspace choice and 1.0.85's title lock.
     const routed = manager.spawnChildSession("s-1", {}, "task", 1, false, undefined, undefined, undefined, false, undefined, undefined,
-        { ownerTag: OWNER, workspaceBusyFastRelease: true });
+        undefined, { ownerTag: OWNER, workspaceBusyFastRelease: true });
+    const locked = manager.spawnChildSession("s-1", {}, "task", 1, false, undefined, undefined, undefined, false, undefined, undefined,
+        true, { ownerTag: OWNER });
+    assert.deepEqual(locked.input, { ...legacy.input, lockTitle: true, ownerTag: OWNER });
     assert.equal(legacy.tag, AGENT_HANDOFF_CAPABILITY);
     assert.equal(routed.tag, AGENT_HANDOFF_CAPABILITY);
     assert.deepEqual(routed.input, { ...legacy.input, ownerTag: OWNER, workspaceBusyFastRelease: true });
@@ -127,11 +145,15 @@ test("manager activities carry no owner tag; the capacity request carries its ow
     }
 });
 
-test("a worker's filter: four capability tags, plus the owner tag or the capacity tag, never both", () => {
+test("a worker's filter: five capability tags, plus the owner tag or the capacity tag, never both", () => {
     assert.equal(MAX_WORKER_TAGS, 5);
     assert.equal(ROUTING_MAX_WORKER_TAGS, MAX_WORKER_TAGS);
-    const base = [AGENT_HANDOFF_CAPABILITY, WORKSPACE_CAPABILITY, TURN_CONTROL_CAPABILITY, WORKFLOW_REQUEST_CAPABILITY];
-    assert.deepEqual(WORKFLOW_MILESTONE_WORKER_TAGS, [WORKFLOW_REQUEST_CAPABILITY]);
+    // One past duroxide's limit, which duroxide-node 0.2.4 does not check (the owner-only runtime test below starts
+    // a runtime with six tags and sees it claim the capacity tag and every capability tag).
+    assert.equal(MAX_OWNER_ROUTING_WORKER_TAGS, MAX_WORKER_TAGS + 1);
+    const base = [AGENT_HANDOFF_CAPABILITY, WORKSPACE_CAPABILITY, TURN_CONTROL_CAPABILITY, WORKFLOW_REQUEST_CAPABILITY, TOOL_COMPOSITION_CAPABILITY];
+    assert.equal(base.length, MAX_WORKER_TAGS, "the default filter stays within duroxide's limit");
+    assert.deepEqual(WORKFLOW_MILESTONE_WORKER_TAGS, [WORKFLOW_REQUEST_CAPABILITY, TOOL_COMPOSITION_CAPABILITY]);
     const cases = [
         [{}, base],
         [{ ownerTag: OWNER }, [...base, OWNER]],
@@ -141,11 +163,11 @@ test("a worker's filter: four capability tags, plus the owner tag or the capacit
         assert.deepEqual(workerTagFilter({ workflowTags: WORKFLOW_MILESTONE_WORKER_TAGS, ...opts }), { defaultAnd: tags });
         assert.deepEqual(workerTagFilter(opts), { defaultAnd: tags }, "the default capability tags are the worker's");
     }
-    // Six tags: refused, so such a worker never starts.
+    // Seven tags: refused, so such a worker never starts.
     assert.throws(() => workerTagFilter({ workflowTags: WORKFLOW_MILESTONE_WORKER_TAGS, ownerTag: OWNER, ownerCapacity: true }), /takes no capacity requests/);
 });
 
-test("every filter a worker can build holds at most duroxide's five tags; any other is refused", () => {
+test("every filter a worker can build holds at most six tags, and the default filter duroxide's five; any other is refused", () => {
     const built = [];
     for (const ownerTag of [undefined, OWNER]) {
         for (const ownerCapacity of [false, true]) {
@@ -158,7 +180,8 @@ test("every filter a worker can build holds at most duroxide's five tags; any ot
                     continue;
                 }
                 const tags = "tags" in filter ? filter.tags : filter.defaultAnd;
-                assert.ok(tags.length > 0 && tags.length <= MAX_WORKER_TAGS, JSON.stringify(filter));
+                assert.ok(tags.length > 0 && tags.length <= MAX_OWNER_ROUTING_WORKER_TAGS, JSON.stringify(filter));
+                if (!ownerTag && !ownerCapacity) assert.ok(tags.length <= MAX_WORKER_TAGS, JSON.stringify(filter));
                 built.push({ ownerTag, ownerCapacity, ownerOnly });
             }
         }
@@ -166,7 +189,8 @@ test("every filter a worker can build holds at most duroxide's five tags; any ot
     // The default, owner, capacity and owner-only filters (the last with or without a requester, which it ignores).
     assert.equal(built.length, 5);
     // More capability tags with an owner or capacity tag are refused, not cut.
-    assert.throws(() => workerTagFilter({ workflowTags: ["a.v1", "b.v1"], ownerTag: OWNER }), /at most 5 tags/);
+    assert.throws(() => workerTagFilter({ workflowTags: ["a.v1", "b.v1", "c.v1"], ownerTag: OWNER }), /at most 6 tags, not 7/);
+    assert.throws(() => workerTagFilter({ workflowTags: ["a.v1", "b.v1", "c.v1"], ownerCapacity: true }), /at most 6 tags, not 7/);
 });
 
 test("a worker with an owner tag and a capacity requester refuses to start unless it is owner-only", async () => {
@@ -191,7 +215,7 @@ test("an owner-only worker's filter names its owner tag alone, also with a capac
         assert.deepEqual(filter, { tags: [OWNER] });
         assert.ok(filter.tags.length <= MAX_WORKER_TAGS);
     }
-    const base = [AGENT_HANDOFF_CAPABILITY, WORKSPACE_CAPABILITY, TURN_CONTROL_CAPABILITY, WORKFLOW_REQUEST_CAPABILITY];
+    const base = [AGENT_HANDOFF_CAPABILITY, WORKSPACE_CAPABILITY, TURN_CONTROL_CAPABILITY, WORKFLOW_REQUEST_CAPABILITY, TOOL_COMPOSITION_CAPABILITY];
     assert.deepEqual(workerTagFilter({ ownerOnly: false }), { defaultAnd: base });
     assert.throws(() => workerTagFilter({ ownerTag: OWNER, ownerCapacity: true, ownerOnly: false }), /takes no capacity requests/);
     assert.throws(() => workerTagFilter({ ownerOnly: true, ownerCapacity: true }), /owner-only worker needs an owner tag/);
@@ -214,6 +238,7 @@ test("an owner-only runtime runs orchestration turns but claims only its owner's
         workspace: WORKSPACE_CAPABILITY,
         turnControl: TURN_CONTROL_CAPABILITY,
         workflowRequest: WORKFLOW_REQUEST_CAPABILITY,
+        toolComposition: TOOL_COMPOSITION_CAPABILITY,
         capacity: OWNER_CAPACITY_CAPABILITY,
         otherOwner: OTHER,
         owner: OWNER,
@@ -271,7 +296,10 @@ test("an owner-only runtime runs orchestration turns but claims only its owner's
         assert.deepEqual(await scheduled("owner-after-clock"), ["__duroxide_syscall:utc_now_ms"]);
         assert.deepEqual(await scheduled("owner-after-guid"), ["__duroxide_syscall:new_guid"]);
 
-        await start("default", workerTagFilter({ ownerCapacity: true }));
+        // Six tags: the five capability tags and the capacity tag.
+        const coordination = workerTagFilter({ ownerCapacity: true });
+        assert.equal(coordination.defaultAnd.length, MAX_OWNER_ROUTING_WORKER_TAGS);
+        await start("default", coordination);
         await start("other-owner", workerTagFilter({ ownerTag: OTHER, ownerOnly: true }));
         for (const id of ids) {
             const result = await client.waitForOrchestration(id, 10_000);
@@ -550,6 +578,8 @@ function drive(handler, input, script = {}) {
             case "runTurnEpochV4":
             case "runTurnV5":
             case "runTurnEpochV5":
+            case "runTurnV6":
+            case "runTurnEpochV6":
                 if (turns.length === 0) throw new Error(`runTurn past the script (${JSON.stringify(a.input.prompt).slice(0, 80)})`);
                 return turns.shift();
             case "requestOwnerCapacity":
@@ -631,8 +661,8 @@ function drive(handler, input, script = {}) {
     throw new Error("the orchestration did not stop");
 }
 
-/** Turns run so far: runTurnV4 on 1.0.82, runTurnV5 on 1.0.83 and 1.0.84. */
-const turnsOf = (h) => h.count("runTurnV4") + h.count("runTurnV5");
+/** Turns run so far: runTurnV4 on 1.0.82, runTurnV5 on 1.0.83, runTurnV6 on 1.0.84 and later. */
+const turnsOf = (h) => h.count("runTurnV4") + h.count("runTurnV5") + h.count("runTurnV6");
 const prompt = (text, extra = {}) => ({ prompt: text, ...extra });
 const command = (cmd, args) => ({ type: "cmd", cmd, id: `${cmd}-1`, ...(args ? { args } : {}) });
 const ran = (result) => ({ ...result, workspaceAttached: true });
@@ -693,9 +723,9 @@ const twoHolds = (refusal = busy("w1")) => ({
     fireTimers: 1,
 });
 
-test("without an owner tag or the fast policy, 1.0.84 yields exactly what 1.0.83 yields", () => {
-    const frozen = lifeOf(durableSessionOrchestration_1_0_83);
-    const now = lifeOf(durableSessionOrchestration_1_0_84);
+test("without an owner tag or the fast policy, 1.0.86 yields exactly what frozen 1.0.85 yields", () => {
+    const frozen = lifeOf(durableSessionOrchestration_1_0_85);
+    const now = lifeOf(durableSessionOrchestration_1_0_86);
     assert.equal(now.result, "done");
     assert.equal(now.cans.length, 1, "the model switch continued as new");
     assert.deepEqual(now.log, frozen.log);
@@ -703,29 +733,29 @@ test("without an owner tag or the fast policy, 1.0.84 yields exactly what 1.0.83
     assert.ok(now.activities.every((a) => !String(a.tag ?? "").startsWith("owner.")));
     // The scenario covered what it claims.
     const names = now.activities.map((a) => a.name);
-    for (const name of ["runTurnV5", "releaseWorkspace", "spawnChildSessionV2", "checkWorkspace", "destroySession"]) {
+    for (const name of ["runTurnV6", "releaseWorkspace", "captureSpawnToolsV1", "spawnChildSessionV2", "checkWorkspace", "destroySession"]) {
         assert.ok(names.includes(name), name);
     }
     assert.deepEqual(now.timersFired, [30_000, 120_000, 1_800_000]);
-    // A 1.0.82 input and a 1.0.83 input (neither has the new fields) continue into 1.0.84 as into frozen 1.0.83.
-    for (const source of [durableSessionOrchestration_1_0_82, durableSessionOrchestration_1_0_83]) {
+    // A 1.0.82, 1.0.83 or 1.0.85 input (none has the new fields) continues into 1.0.86 as into frozen 1.0.85.
+    for (const source of [durableSessionOrchestration_1_0_82, durableSessionOrchestration_1_0_83, durableSessionOrchestration_1_0_85]) {
         const carried = lifeOf(source).cans[0].input;
-        const upgraded = drive(durableSessionOrchestration_1_0_84, carried, { queue: [command("done")] });
-        const control = drive(durableSessionOrchestration_1_0_83, carried, { queue: [command("done")] });
+        const upgraded = drive(durableSessionOrchestration_1_0_86, carried, { queue: [command("done")] });
+        const control = drive(durableSessionOrchestration_1_0_85, carried, { queue: [command("done")] });
         assert.deepEqual(upgraded.log, control.log);
         assert.equal(upgraded.result, "done");
     }
     // A session without a workspace that a gate wait holds, with a busy
     // refusal or a failed attach (a default folder's): the same yields too.
     for (const refusal of [busy("w1"), { ...busy("w1"), code: "WORKSPACE_ATTACH_FAILED", reason: "workspace unavailable: attach failed" }]) {
-        const held = drive(durableSessionOrchestration_1_0_84, noWorkspace(), twoHolds(refusal));
-        assert.deepEqual(held.log, drive(durableSessionOrchestration_1_0_83, noWorkspace(), twoHolds(refusal)).log, refusal.code);
-        assert.equal(held.count("runTurnV5"), 4, refusal.code);
+        const held = drive(durableSessionOrchestration_1_0_86, noWorkspace(), twoHolds(refusal));
+        assert.deepEqual(held.log, drive(durableSessionOrchestration_1_0_85, noWorkspace(), twoHolds(refusal)).log, refusal.code);
+        assert.equal(held.count("runTurnV6"), 4, refusal.code);
     }
 });
 
 test("an owner-tagged session: every session-scoped activity carries the tag, across continue-as-new, and the tag rides the turn input", () => {
-    const run = lifeOf(durableSessionOrchestration_1_0_84, { ownerTag: OWNER, workspaceBusyFastRelease: true });
+    const run = lifeOf(durableSessionOrchestration_1_0_86, { ownerTag: OWNER, workspaceBusyFastRelease: true });
     assert.equal(run.result, "done");
     assert.equal(run.cans.length, 1);
     for (const can of run.cans) {
@@ -733,11 +763,11 @@ test("an owner-tagged session: every session-scoped activity carries the tag, ac
         assert.equal(can.input.workspaceBusyFastRelease, true);
     }
     const sessionScoped = run.activities.filter((a) => a.sessionId);
-    for (const name of ["runTurnV5", "releaseWorkspace", "checkWorkspace", "destroySession"]) {
+    for (const name of ["runTurnV6", "releaseWorkspace", "checkWorkspace", "destroySession"]) {
         assert.ok(sessionScoped.some((a) => a.name === name), name);
     }
     for (const a of sessionScoped) assert.equal(a.tag, OWNER, a.name);
-    const turns = run.activities.filter((a) => a.name === "runTurnV5");
+    const turns = run.activities.filter((a) => a.name === "runTurnV6");
     assert.equal(turns.length, 5);
     for (const turn of turns) {
         assert.equal(turn.input.ownerTag, OWNER);
@@ -752,11 +782,11 @@ test("an owner-tagged session: every session-scoped activity carries the tag, ac
 });
 
 test("one capacity request before each turn, tagged for workers with a requester, and before a set-workspace check", () => {
-    const run = lifeOf(durableSessionOrchestration_1_0_84, { ownerTag: OWNER });
+    const run = lifeOf(durableSessionOrchestration_1_0_86, { ownerTag: OWNER });
     const order = run.activities.map((a) => a.name)
-        .filter((n) => ["requestOwnerCapacity", "runTurnV5", "checkWorkspace"].includes(n));
+        .filter((n) => ["requestOwnerCapacity", "runTurnV6", "checkWorkspace"].includes(n));
     assert.deepEqual(order, [
-        ...Array.from({ length: 5 }, () => ["requestOwnerCapacity", "runTurnV5"]).flat(),
+        ...Array.from({ length: 5 }, () => ["requestOwnerCapacity", "runTurnV6"]).flat(),
         "requestOwnerCapacity", "checkWorkspace",
     ]);
     for (const a of run.activities.filter((x) => x.name === "requestOwnerCapacity")) {
@@ -766,13 +796,13 @@ test("one capacity request before each turn, tagged for workers with a requester
 });
 
 test("a deny ends the turn without a retry and takes no turn index; the next prompt asks again", () => {
-    const run = drive(durableSessionOrchestration_1_0_84, baseInput({ ownerTag: OWNER }), {
+    const run = drive(durableSessionOrchestration_1_0_86, baseInput({ ownerTag: OWNER }), {
         queue: [prompt("first"), { msg: prompt("second"), when: (h) => h.count("requestOwnerCapacity") >= 1 }],
         capacity: [{ decision: "deny", message: "This owner has no capacity." }],
         turns: [ran({ type: "completed", content: "ok" })],
     });
     assert.equal(run.count("requestOwnerCapacity"), 2);
-    const turns = run.activities.filter((a) => a.name === "runTurnV5");
+    const turns = run.activities.filter((a) => a.name === "runTurnV6");
     assert.equal(turns.length, 1);
     assert.match(turns[0].input.prompt, /second/);
     assert.equal(turns[0].input.turnIndex, 0, "the refused turn took no index");
@@ -781,7 +811,7 @@ test("a deny ends the turn without a retry and takes no turn index; the next pro
     assert.ok(run.statuses.some((s) => s.status === "error" && s.nonRetryable === true && s.error === "This owner has no capacity."));
 });
 
-test("a deny: the status names the refusal's response before the catalog shows the error; other non-retryable failures keep 1.0.83's order", () => {
+test("a deny: the status names the refusal's response before the catalog shows the error; other non-retryable failures keep 1.0.85's order", () => {
     // The last status and the latest response when the catalog's error write
     // is scheduled: a client that sees the error and then syncs its response
     // cursor from the status reads at least this status.
@@ -794,7 +824,7 @@ test("a deny: the status names the refusal's response before the catalog shows t
             latest: JSON.parse(before.filter((line) => line.startsWith("kv response.latest=")).at(-1).slice("kv response.latest=".length)),
         };
     };
-    const denied = drive(durableSessionOrchestration_1_0_84, baseInput({ ownerTag: OWNER }), {
+    const denied = drive(durableSessionOrchestration_1_0_86, baseInput({ ownerTag: OWNER }), {
         queue: [prompt("first")],
         capacity: [{ decision: "deny", message: "This owner has no capacity." }],
     });
@@ -804,24 +834,24 @@ test("a deny: the status names the refusal's response before the catalog shows t
     assert.deepEqual([status.status, status.error, status.retriesExhausted, status.nonRetryable], ["error", "This owner has no capacity.", true, true]);
 
     // An untagged session's non-retryable failure, such as an admission
-    // hook's deny, yields exactly what frozen 1.0.83 yields.
-    const refusal = sessionAdmissionTurnResult({ decision: "deny", message: "no drive is leased here" }, { workerNodeId: "w1", orchestrationVersion: "1.0.84" });
+    // hook's deny, yields exactly what frozen 1.0.85 yields.
+    const refusal = sessionAdmissionTurnResult({ decision: "deny", message: "no drive is leased here" }, { workerNodeId: "w1", orchestrationVersion: "1.0.86" });
     assert.equal(refusal.retryable, false);
     const script = () => ({ queue: [prompt("first")], turns: [refusal] });
-    const untagged = drive(durableSessionOrchestration_1_0_84, noWorkspace(), script());
-    assert.deepEqual(untagged.log, drive(durableSessionOrchestration_1_0_83, noWorkspace(), script()).log);
+    const untagged = drive(durableSessionOrchestration_1_0_86, noWorkspace(), script());
+    assert.deepEqual(untagged.log, drive(durableSessionOrchestration_1_0_85, noWorkspace(), script()).log);
     assert.equal(atCatalogError(untagged).latest.content, "Session admission denied this turn: no drive is leased here");
 });
 
 test("a busy answer holds the prompt on the busy timer without a turn, and a done command completes within the release cap", () => {
-    const run = drive(durableSessionOrchestration_1_0_84, baseInput({ ownerTag: OWNER }), {
+    const run = drive(durableSessionOrchestration_1_0_86, baseInput({ ownerTag: OWNER }), {
         queue: [prompt("hello", { clientMessageIds: ["m-1"] }), { msg: command("done"), when: (h) => h.count("requestOwnerCapacity") >= 1 }],
         capacity: [{ decision: "busy", retryAfterMs: 45_000, message: "The owner's workers are starting." }],
         hang: ["destroySession"],
     });
     assert.equal(run.done, true);
     assert.equal(run.result, "done");
-    assert.equal(run.count("runTurnV5"), 0);
+    assert.equal(run.count("runTurnV6"), 0);
     const held = run.activities.find((a) => a.name === "recordSessionEvent" && a.input.events[0].eventType === "user.message");
     assert.equal(held.input.events[0].data.content, "hello");
     assert.equal(held.input.events[0].data.workspaceQueued, true);
@@ -833,23 +863,23 @@ test("a busy answer holds the prompt on the busy timer without a turn, and a don
 });
 
 test("a busy answer under the fast policy releases the worker at once, under the release cap, and asks again when the timer fires", () => {
-    const run = drive(durableSessionOrchestration_1_0_84, baseInput({ ownerTag: OWNER, workspaceBusyFastRelease: true }), {
+    const run = drive(durableSessionOrchestration_1_0_86, baseInput({ ownerTag: OWNER, workspaceBusyFastRelease: true }), {
         queue: [prompt("hello")],
         capacity: [{ decision: "busy" }],
         turns: [ran({ type: "completed", content: "ok" })],
         fireTimers: 1,
         hang: ["releaseWorkspace"],
     });
-    assert.deepEqual(run.activities.map((a) => a.name).filter((n) => ["requestOwnerCapacity", "releaseWorkspace", "runTurnV5"].includes(n)),
-        ["requestOwnerCapacity", "releaseWorkspace", "requestOwnerCapacity", "runTurnV5"]);
+    assert.deepEqual(run.activities.map((a) => a.name).filter((n) => ["requestOwnerCapacity", "releaseWorkspace", "runTurnV6"].includes(n)),
+        ["requestOwnerCapacity", "releaseWorkspace", "requestOwnerCapacity", "runTurnV6"]);
     assert.deepEqual(run.timersFired.slice(0, 2), [WORKSPACE_RELEASE_CAP_MS, 10_000]);
-    const turn = run.activities.find((a) => a.name === "runTurnV5");
+    const turn = run.activities.find((a) => a.name === "runTurnV6");
     assert.equal(turn.sessionId, "guid-1", "the turn runs under the affinity key the release made");
     assert.deepEqual(turn.input.stashedPrompts, ["hello"]);
 });
 
 test("a requester that does not answer: busy CAPACITY_UNAVAILABLE keeps the worker, even under the fast policy", () => {
-    const run = drive(durableSessionOrchestration_1_0_84, baseInput({ ownerTag: OWNER, workspaceBusyFastRelease: true }), {
+    const run = drive(durableSessionOrchestration_1_0_86, baseInput({ ownerTag: OWNER, workspaceBusyFastRelease: true }), {
         queue: [prompt("hello"), { msg: command("done"), when: (h) => h.count("requestOwnerCapacity") >= 1 }],
         capacity: [{ decision: "busy", code: CAPACITY_UNAVAILABLE, retryAfterMs: 60_000, message: "no answer" }],
     });
@@ -865,7 +895,7 @@ test("an unanswered capacity request always waits its retryAfterMs, a minute, be
     const silent = { decision: "busy", code: CAPACITY_UNAVAILABLE, retryAfterMs: 60_000, message: "no answer" };
     const counted = { decision: "busy", retryAfterMs: 1_000, message: "The owner's VM is starting." };
     const released = (run) => run.log.filter((line) => line.includes('"eventType":"session.affinity_released"')).length;
-    const held = (extra, capacity) => drive(durableSessionOrchestration_1_0_84, baseInput({ ownerTag: OWNER, ...extra }), {
+    const held = (extra, capacity) => drive(durableSessionOrchestration_1_0_86, baseInput({ ownerTag: OWNER, ...extra }), {
         queue: [prompt("hello")],
         capacity,
         turns: [ran({ type: "completed", content: "ok" })],
@@ -878,7 +908,7 @@ test("an unanswered capacity request always waits its retryAfterMs, a minute, be
         const before = held(extra, [silent, silent, silent]);
         assert.deepEqual(before.timersFired, [60_000, 60_000, 60_000], what);
         assert.equal(released(before), 0, what);
-        const turn = before.activities.find((a) => a.name === "runTurnV5");
+        const turn = before.activities.find((a) => a.name === "runTurnV6");
         assert.equal(turn.sessionId, "s-1", `${what}: the turn runs under the session's first affinity key`);
         assert.deepEqual(turn.input.stashedPrompts, ["hello"]);
         // After two busy answers: a minute each, and the next busy answer
@@ -887,11 +917,11 @@ test("an unanswered capacity request always waits its retryAfterMs, a minute, be
         assert.deepEqual(after.timersFired, [steps[0], steps[1], 60_000, 60_000, steps[2]], what);
         assert.equal(released(after), releasesEach ? 3 : 0, `${what}: only the busy answers release`);
         assert.equal(after.count("requestOwnerCapacity"), 6);
-        assert.equal(after.count("runTurnV5"), 1);
+        assert.equal(after.count("runTurnV6"), 1);
     }
     // The failure count rides through too: a refusal of the turn on w1, an
     // unanswered request, then another refusal there, two in a row, release w1.
-    const refusedTwice = drive(durableSessionOrchestration_1_0_84, baseInput({ ownerTag: OWNER }), {
+    const refusedTwice = drive(durableSessionOrchestration_1_0_86, baseInput({ ownerTag: OWNER }), {
         queue: [prompt("hello")],
         capacity: [{ decision: "ok" }, silent, { decision: "ok" }],
         turns: [busy("w1"), busy("w1"), ran({ type: "completed", content: "ok" })],
@@ -903,37 +933,38 @@ test("an unanswered capacity request always waits its retryAfterMs, a minute, be
 
 test("the fast busy policy: the first WORKSPACE_BUSY refusal releases the worker and retries follow 10 s, 20 s, 1 min, 3 min", () => {
     const refusals = [busy("w1"), busy("w2"), busy("w2"), busy("w3")];
-    const fast = drive(durableSessionOrchestration_1_0_84, baseInput({ workspaceBusyFastRelease: true }), {
+    const fast = drive(durableSessionOrchestration_1_0_86, baseInput({ workspaceBusyFastRelease: true }), {
         queue: [prompt("hello")], turns: [...refusals, ran({ type: "completed", content: "ok" })], fireTimers: 4,
     });
     assert.deepEqual(fast.timersFired, [10_000, 20_000, 60_000, 180_000]);
     assert.equal(fast.count("releaseWorkspace"), 4, "every refusal released the worker");
     // Today's policy for the same refusals: release after two in a row on one worker.
-    const today = drive(durableSessionOrchestration_1_0_84, baseInput(), {
+    const today = drive(durableSessionOrchestration_1_0_86, baseInput(), {
         queue: [prompt("hello")], turns: [...refusals, ran({ type: "completed", content: "ok" })], fireTimers: 4,
     });
     assert.deepEqual(today.timersFired, [30_000, 120_000, 300_000, 900_000]);
     assert.equal(today.count("releaseWorkspace"), 1);
     // A refusal with another code keeps today's schedule under the fast policy.
-    const missing = drive(durableSessionOrchestration_1_0_84, baseInput({ workspaceBusyFastRelease: true }), {
+    const missing = drive(durableSessionOrchestration_1_0_86, baseInput({ workspaceBusyFastRelease: true }), {
         queue: [prompt("hello")], turns: [{ ...busy("w1"), code: "WORKSPACE_FOLDER_MISSING" }, ran({ type: "completed", content: "ok" })], fireTimers: 1,
     });
     assert.deepEqual(missing.timersFired, [30_000]);
     assert.equal(missing.count("releaseWorkspace"), 0);
 });
 
-test("a gate-held session without a workspace: untagged it escalates exactly as on 1.0.83; tagged or flagged it starts the schedule again after a turn runs", () => {
+test("a gate-held session without a workspace: untagged it escalates exactly as on 1.0.85 (and 1.0.83); tagged or flagged it starts the schedule again after a turn runs", () => {
     // What happened before the model switch continued as new.
     const beforeSwitch = (run) => run.log.slice(0, run.log.findIndex((line) => line.startsWith("can(")));
     const holds = (run) => beforeSwitch(run).filter((line) => line.startsWith("status ")).map((line) => JSON.parse(line.slice(7)))
         .filter((s) => s.status === "waiting" && s.gate === "workspace").map((s) => s.waitSeconds);
     const released = (run) => beforeSwitch(run).filter((line) => line.includes('"eventType":"session.affinity_released"')).length;
 
-    // Untagged and without the fast policy, 1.0.84 is 1.0.83: the second
+    // Untagged and without the fast policy, 1.0.86 is 1.0.85: the second
     // hold takes the next step, and the second refusal on the worker releases it.
-    const untagged = drive(durableSessionOrchestration_1_0_84, noWorkspace(), twoHolds());
-    assert.deepEqual(untagged.log, drive(durableSessionOrchestration_1_0_83, noWorkspace(), twoHolds()).log);
-    for (const handler of [durableSessionOrchestration_1_0_82, durableSessionOrchestration_1_0_83, durableSessionOrchestration_1_0_84]) {
+    const untagged = drive(durableSessionOrchestration_1_0_86, noWorkspace(), twoHolds());
+    assert.deepEqual(untagged.log, drive(durableSessionOrchestration_1_0_85, noWorkspace(), twoHolds()).log);
+    for (const handler of [durableSessionOrchestration_1_0_82, durableSessionOrchestration_1_0_83, durableSessionOrchestration_1_0_85,
+        durableSessionOrchestration_1_0_86]) {
         const run = drive(handler, noWorkspace(), twoHolds());
         assert.deepEqual(holds(run), [30, 120]);
         assert.equal(released(run), 1);
@@ -948,8 +979,8 @@ test("a gate-held session without a workspace: untagged it escalates exactly as 
         [{ ownerTag: OWNER, workspaceBusyFastRelease: true }, [10, 10], 2],
     ]) {
         const what = JSON.stringify(extra);
-        const run = drive(durableSessionOrchestration_1_0_84, noWorkspace(extra), twoHolds());
-        assert.equal(run.count("runTurnV5"), 4, what);
+        const run = drive(durableSessionOrchestration_1_0_86, noWorkspace(extra), twoHolds());
+        assert.equal(run.count("runTurnV6"), 4, what);
         assert.deepEqual(holds(run), expected, `${what}: the second hold starts at step 0`);
         assert.equal(released(run), releases, what);
         assert.deepEqual(run.cans[0].input.workspaceRetry, { step: 1, failures: { workerNodeId: "w1", count: 1 } }, what);
@@ -957,37 +988,38 @@ test("a gate-held session without a workspace: untagged it escalates exactly as 
     }
 
     // A continue-as-new after the turn that ran: untagged, it carries the hold
-    // as 1.0.82 and 1.0.83 do; tagged or flagged, it carries none.
+    // as 1.0.82, 1.0.83 and 1.0.85 do; tagged or flagged, it carries none.
     const idleSwitch = {
         queue: [prompt("first"), { msg: command("set_model", { model: "test:other" }), when: (h) => turnsOf(h) >= 2 }],
         turns: [busy("w1"), { type: "completed", content: "ok" }, { type: "completed", content: "on the new model" }],
         fireTimers: 1,
     };
-    for (const handler of [durableSessionOrchestration_1_0_82, durableSessionOrchestration_1_0_83, durableSessionOrchestration_1_0_84]) {
+    for (const handler of [durableSessionOrchestration_1_0_82, durableSessionOrchestration_1_0_83, durableSessionOrchestration_1_0_85,
+        durableSessionOrchestration_1_0_86]) {
         const carried = drive(handler, noWorkspace(), idleSwitch).cans[0].input;
         assert.deepEqual(carried.workspaceStatus, { state: "unavailable", code: "WORKSPACE_BUSY" });
         assert.deepEqual(carried.workspaceRetry, { step: 1, failures: { workerNodeId: "w1", count: 1 } });
     }
     for (const extra of [{ ownerTag: OWNER }, { workspaceBusyFastRelease: true }]) {
-        const carried = drive(durableSessionOrchestration_1_0_84, noWorkspace(extra), idleSwitch).cans[0].input;
+        const carried = drive(durableSessionOrchestration_1_0_86, noWorkspace(extra), idleSwitch).cans[0].input;
         assert.ok(!("workspaceStatus" in carried) && !("workspaceRetry" in carried), JSON.stringify(extra));
         assert.equal(carried.retryCount, 0);
     }
 });
 
 test("the admission hook's and the credential resolver's busy answers hold like a busy workspace; a tagged or flagged session starts over after a turn runs", () => {
-    const admission = sessionAdmissionTurnResult({ decision: "busy", message: "the owner's disk is in use" }, { workerNodeId: "w1", orchestrationVersion: "1.0.84" });
-    const credential = personalCredentialTurnResult(new PersonalCredentialError("busy", "github", "the secret store is busy"), "w1", "1.0.84");
+    const admission = sessionAdmissionTurnResult({ decision: "busy", message: "the owner's disk is in use" }, { workerNodeId: "w1", orchestrationVersion: "1.0.86" });
+    const credential = personalCredentialTurnResult(new PersonalCredentialError("busy", "github", "the secret store is busy"), "w1", "1.0.86");
     for (const refusal of [admission, credential]) {
         assert.deepEqual([refusal.type, refusal.gate, refusal.code, refusal.workerNodeId], ["wait", "workspace", "WORKSPACE_BUSY", "w1"]);
-        // Untagged and without the fast policy, the second hold escalates, as on 1.0.83.
+        // Untagged and without the fast policy, the second hold escalates, as on 1.0.85.
         for (const [extra, expected] of [[{}, [30, 120]], [{ ownerTag: OWNER }, [30, 30]], [{ workspaceBusyFastRelease: true }, [10, 10]]]) {
-            const run = drive(durableSessionOrchestration_1_0_84, noWorkspace(extra), {
+            const run = drive(durableSessionOrchestration_1_0_86, noWorkspace(extra), {
                 queue: [prompt("first"), { msg: prompt("second"), when: (h) => turnsOf(h) >= 2 }],
                 turns: [refusal, { type: "completed", content: "ok" }, refusal, { type: "completed", content: "ok" }],
                 fireTimers: 2,
             });
-            assert.equal(run.count("runTurnV5"), 4, refusal.reason);
+            assert.equal(run.count("runTurnV6"), 4, refusal.reason);
             const holds = run.log.filter((line) => line.startsWith("status ")).map((line) => JSON.parse(line.slice(7)))
                 .filter((s) => s.status === "waiting" && s.gate === "workspace").map((s) => s.waitSeconds);
             assert.deepEqual(holds, expected, `${refusal.reason} ${JSON.stringify(extra)}`);
@@ -998,17 +1030,17 @@ test("the admission hook's and the credential resolver's busy answers hold like 
 test("a set-workspace command of an owner-tagged session: deny, busy and the cap answer it and keep the workspace", () => {
     const set = command("set_workspace", { expectedRevision: 1, workspace: { root: "repos", folder: "other" } });
     const answerOf = (run) => JSON.parse(run.kv.get("command.response.set_workspace-1"));
-    const deny = drive(durableSessionOrchestration_1_0_84, baseInput({ ownerTag: OWNER, workspaceRevision: 1 }), {
+    const deny = drive(durableSessionOrchestration_1_0_86, baseInput({ ownerTag: OWNER, workspaceRevision: 1 }), {
         queue: [set], capacity: [{ decision: "deny", message: "no capacity" }],
     });
     assert.equal(answerOf(deny).error, "CAPACITY_DENIED: no capacity");
     assert.equal(deny.count("checkWorkspace"), 0);
-    const busyAnswer = drive(durableSessionOrchestration_1_0_84, baseInput({ ownerTag: OWNER, workspaceRevision: 1 }), {
+    const busyAnswer = drive(durableSessionOrchestration_1_0_86, baseInput({ ownerTag: OWNER, workspaceRevision: 1 }), {
         queue: [set], capacity: [{ decision: "busy", retryAfterMs: 30_000 }],
     });
     assert.match(answerOf(busyAnswer).error, /^WORKSPACE_BUSY: /);
     assert.equal(answerOf(busyAnswer).result.retryAfterMs, 30_000);
-    const capped = drive(durableSessionOrchestration_1_0_84, baseInput({ ownerTag: OWNER, workspaceRevision: 1 }), {
+    const capped = drive(durableSessionOrchestration_1_0_86, baseInput({ ownerTag: OWNER, workspaceRevision: 1 }), {
         queue: [set, { msg: command("done"), when: (h) => h.count("checkWorkspace") >= 1 }], hang: ["checkWorkspace", "destroySession"],
     });
     assert.match(answerOf(capped).error, /^WORKSPACE_BUSY: the workspace check did not finish within 20 minutes/);
@@ -1022,7 +1054,7 @@ test("a set-workspace command of an owner-tagged session: deny, busy and the cap
 
 test("complete, cancel and delete of an idle owner-tagged session finish when no worker declares the owner's tag", () => {
     for (const cmd of ["done", "cancel", "delete"]) {
-        const run = drive(durableSessionOrchestration_1_0_84, baseInput({ ownerTag: OWNER }), {
+        const run = drive(durableSessionOrchestration_1_0_86, baseInput({ ownerTag: OWNER }), {
             queue: [command(cmd)], hang: ["destroySession"],
         });
         assert.equal(run.done, true, cmd);
@@ -1032,16 +1064,16 @@ test("complete, cancel and delete of an idle owner-tagged session finish when no
         if (cmd === "delete") assert.ok(run.activities.some((a) => a.name === "deleteSession" && a.input.sessionId === "s-1"));
     }
     // When the owner's worker holds the session, the destroy wins the race at once.
-    const held = drive(durableSessionOrchestration_1_0_84, baseInput({ ownerTag: OWNER }), { queue: [command("done")] });
+    const held = drive(durableSessionOrchestration_1_0_86, baseInput({ ownerTag: OWNER }), { queue: [command("done")] });
     assert.deepEqual(held.timersFired, []);
     assert.ok(held.activities.some((a) => a.name === "destroySession" && !a.lost));
 });
 
 test("a system session and a system child never get the tag", () => {
-    const system = drive(durableSessionOrchestration_1_0_84, baseInput({ ownerTag: OWNER, isSystem: true, config: { model: "test:model" } }), {
+    const system = drive(durableSessionOrchestration_1_0_86, baseInput({ ownerTag: OWNER, isSystem: true, config: { model: "test:model" } }), {
         queue: [prompt("hello")], turns: [{ type: "completed", content: "ok" }],
     });
     assert.equal(system.count("requestOwnerCapacity"), 0);
     assert.ok(system.activities.every((a) => a.tag !== OWNER));
-    assert.ok(!("ownerTag" in system.activities.find((a) => a.name === "runTurnV5").input));
+    assert.ok(!("ownerTag" in system.activities.find((a) => a.name === "runTurnV6").input));
 });

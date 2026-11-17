@@ -11,7 +11,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
 import { registerActivities } from "../../dist/session-proxy.js";
-import { TURN_CONTROL_ACTIVITY_NAMES, WORKFLOW_INTAKE_TURN_ACTIVITY_NAMES } from "../../dist/activity-routing.js";
+import { COMPOSITION_TURN_ACTIVITY_NAMES, TURN_CONTROL_ACTIVITY_NAMES, WORKFLOW_INTAKE_TURN_ACTIVITY_NAMES } from "../../dist/activity-routing.js";
 import { OWNER_TAG_MISSING, ownerTagMissingText } from "../../dist/owner-routing.js";
 import { isAuthFailureError } from "../../dist/orchestration/utils.js";
 
@@ -56,7 +56,7 @@ function workerWith({
     registerActivities({ registerActivity: (name, handler) => handlers.set(name, handler) },
         sessionManager, null, undefined, catalog, undefined, undefined, undefined, undefined,
         [], null, [], [], null, "host-1");
-    const ctx = { traceInfo() {}, orchestrationVersion: "1.0.84", isCancelled: () => false };
+    const ctx = { traceInfo() {}, orchestrationVersion: "1.0.86", isCancelled: () => false };
     const turn = (sessionId, extra = {}, activity = WORKFLOW_INTAKE_TURN_ACTIVITY_NAMES.runTurn) =>
         handlers.get(activity)(ctx, { sessionId, prompt: "hello", config: {}, turnIndex: 1, ...extra });
     return { turn, ran, reads, asked };
@@ -67,7 +67,8 @@ const RAN = { type: "completed", content: "ran" };
 test("a worker with a capacity requester refuses, without a retry, a turn that lacks or replaces the session's saved owner tag", async () => {
     const { turn, ran } = workerWith();
     const missing = { type: "error", message: ownerTagMissingText(undefined), retryable: false };
-    for (const activity of ["runTurn", TURN_CONTROL_ACTIVITY_NAMES.runTurn, ...Object.values(WORKFLOW_INTAKE_TURN_ACTIVITY_NAMES)]) {
+    for (const activity of ["runTurn", TURN_CONTROL_ACTIVITY_NAMES.runTurn, ...Object.values(WORKFLOW_INTAKE_TURN_ACTIVITY_NAMES),
+        ...Object.values(COMPOSITION_TURN_ACTIVITY_NAMES)]) {
         assert.deepEqual(await turn("tagged", {}, activity), missing, activity);
     }
     assert.deepEqual(await turn("tagged", { ownerTag: OWNER_B }), { type: "error", message: ownerTagMissingText(OWNER_B), retryable: false });

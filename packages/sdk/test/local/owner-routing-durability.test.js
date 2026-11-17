@@ -22,8 +22,8 @@ import { createTestEnv, testTime } from "../helpers/local-env.js";
 import { forkOwnerRuntime, PROBE_ACTIVITIES, PROBE_ANSWERS, registerOwnerProbes } from "../helpers/owner-routing-runtime.mjs";
 import * as proxies from "../../dist/session-proxy.js";
 import {
-    AGENT_HANDOFF_CAPABILITY, OWNER_CAPACITY_CAPABILITY, TURN_CONTROL_CAPABILITY, WORKFLOW_REQUEST_CAPABILITY, WORKSPACE_CAPABILITY,
-    workerTagFilter,
+    AGENT_HANDOFF_CAPABILITY, MAX_OWNER_ROUTING_WORKER_TAGS, OWNER_CAPACITY_CAPABILITY, TOOL_COMPOSITION_CAPABILITY, TURN_CONTROL_CAPABILITY,
+    WORKFLOW_REQUEST_CAPABILITY, WORKSPACE_CAPABILITY, workerTagFilter,
 } from "../../dist/activity-routing.js";
 
 const { PostgresProvider, Runtime, Client } = createRequire(import.meta.url)("duroxide");
@@ -167,8 +167,8 @@ describe("owner routing when workers die, hold sessions or lose races", () => {
             const retried = ran("sk").filter((e) => e.name === "checkWorkspace")[1];
             console.log(`  the check ran again ${retried.at - check.at} ms after it started on the killed holder, ${retried.at - killedAt} ms after the kill`);
             expect(ran("sk").map((e) => `${e.worker} ${e.name}`)).toEqual([
-                "owner-a runTurnV5", "owner-a hydrateSession", "owner-a checkWorkspace",
-                "owner-a2 checkWorkspace", "owner-a2 releaseWorkspace", "owner-a2 runTurnV5", "owner-a2 destroySession",
+                "owner-a runTurnV6", "owner-a hydrateSession", "owner-a checkWorkspace",
+                "owner-a2 checkWorkspace", "owner-a2 releaseWorkspace", "owner-a2 runTurnV6", "owner-a2 destroySession",
             ]);
             expect(ran("sk").every((e) => e.tag === TAG.a)).toBe(true);
             // Claiming the check locked the session for Duroxide's 30 seconds;
@@ -203,25 +203,26 @@ describe("owner routing when workers die, hold sessions or lose races", () => {
             expect((await client.waitForOrchestration("turn-e", timeoutMs)).status).toBe("Completed");
             expect(turns.length).toBeGreaterThan(0);
             expect(turns.every((id) => id === "owner-a" || id === "owner-b")).toBe(true);
-            expect(await scheduled(client, "turn-e")).toEqual(["runTurnV5", "destroySession"]);
+            expect(await scheduled(client, "turn-e")).toEqual(["runTurnV6", "destroySession"]);
             expect(ran("se").map((e) => `${e.worker} ${e.name} ${e.tag}`)).toEqual([
-                `owner-a runTurnV5 ${TAG.a}`, `owner-a destroySession ${TAG.a}`,
+                `owner-a runTurnV6 ${TAG.a}`, `owner-a destroySession ${TAG.a}`,
             ]);
         });
     }, TIMEOUT);
 
-    it("runs untagged, capability-tagged and its own owner's work on a worker with the four capability tags and an owner tag, never another owner's or a capacity request; with the capacity tag instead, no owner's", async () => {
+    it("runs untagged, capability-tagged and its own owner's work on a worker with the five capability tags and an owner tag, never another owner's or a capacity request; with the capacity tag instead, no owner's", async () => {
         const KINDS = [
             { kind: "untagged" },
             { kind: "handoff", tag: AGENT_HANDOFF_CAPABILITY },
             { kind: "workspaces", tag: WORKSPACE_CAPABILITY },
             { kind: "turn-control", tag: TURN_CONTROL_CAPABILITY },
             { kind: "workflow-request", tag: WORKFLOW_REQUEST_CAPABILITY },
+            { kind: "tool-composition", tag: TOOL_COMPOSITION_CAPABILITY },
             { kind: "owner a", tag: TAG.a },
             { kind: "owner b", tag: TAG.b },
             { kind: "capacity", tag: OWNER_CAPACITY_CAPABILITY },
         ];
-        const SHARED = ["untagged", "handoff", "workspaces", "turn-control", "workflow-request"];
+        const SHARED = ["untagged", "handoff", "workspaces", "turn-control", "workflow-request", "tool-composition"];
         await withRuntimes("owner_kinds", async ({ client, executions, start, stop, timeoutMs }) => {
             const runsOf = (prefix) => Object.fromEntries(executions
                 .filter((e) => e.kind?.startsWith(prefix))
@@ -232,13 +233,15 @@ describe("owner routing when workers die, hold sessions or lose races", () => {
 
             const ownerFilter = workerTagFilter({ ownerTag: TAG.a });
             const capacityFilter = workerTagFilter({ ownerCapacity: true });
-            expect(ownerFilter.defaultAnd).toHaveLength(5);
-            expect(capacityFilter.defaultAnd).toHaveLength(5);
+            // Six tags each, one past duroxide's MAX_WORKER_TAGS, which duroxide-node 0.2.4 does not check: on
+            // PostgreSQL too, such a worker claims every tag of its filter.
+            expect(ownerFilter.defaultAnd).toHaveLength(MAX_OWNER_ROUTING_WORKER_TAGS);
+            expect(capacityFilter.defaultAnd).toHaveLength(MAX_OWNER_ROUTING_WORKER_TAGS);
 
-            // Only owner a's worker: it runs six kinds, two wait.
+            // Only owner a's worker: it runs seven kinds, two wait.
             await start("owner-a", ownerFilter);
             await probe("kinds-owner", "1:");
-            await eventually(() => Object.keys(runsOf("1:")).length >= 6, "the owner worker's kinds");
+            await eventually(() => Object.keys(runsOf("1:")).length >= 7, "the owner worker's kinds");
             await sleep(3_000);
             expect(runsOf("1:")).toEqual(Object.fromEntries([...SHARED, "owner a"].map((kind) => [kind, "owner-a"])));
             await start("owner-b", workerTagFilter({ ownerTag: TAG.b }));
@@ -246,11 +249,11 @@ describe("owner routing when workers die, hold sessions or lose races", () => {
             expect((await client.waitForOrchestration("kinds-owner", timeoutMs)).status).toBe("Completed");
             expect(runsOf("1:")).toMatchObject({ "owner b": "owner-b", capacity: "capacity" });
 
-            // Only the capacity worker: it runs six kinds, the owners' wait.
+            // Only the capacity worker: it runs seven kinds, the owners' wait.
             await stop("owner-a");
             await stop("owner-b");
             await probe("kinds-capacity", "2:");
-            await eventually(() => Object.keys(runsOf("2:")).length >= 6, "the capacity worker's kinds");
+            await eventually(() => Object.keys(runsOf("2:")).length >= 7, "the capacity worker's kinds");
             await sleep(3_000);
             expect(runsOf("2:")).toEqual(Object.fromEntries([...SHARED, "capacity"].map((kind) => [kind, "capacity"])));
             await start("owner-a", ownerFilter);
@@ -272,8 +275,8 @@ describe("owner routing when workers die, hold sessions or lose races", () => {
             await start("default", workerTagFilter({}), { runtimeOptions });
             await client.startOrchestration("follow-a", "owner-untagged-follow-up", { sessionId: "fa", ownerTag: TAG.a });
             await client.startOrchestration("follow-c", "owner-untagged-follow-up", { sessionId: "fc", ownerTag: TAG.c });
-            const turnA = await eventually(() => ran("fa").find((e) => e.name === "runTurnV5"), "owner a's turn");
-            const turnC = await eventually(() => ran("fc").find((e) => e.name === "runTurnV5"), "owner c's turn");
+            const turnA = await eventually(() => ran("fa").find((e) => e.name === "runTurnV6"), "owner a's turn");
+            const turnC = await eventually(() => ran("fc").find((e) => e.name === "runTurnV6"), "owner c's turn");
             expect([turnA.worker, turnC.worker]).toEqual(["owner-a", "owner-c"]);
 
             // Owner c's session idles out on its live holder, then moves.
@@ -285,7 +288,7 @@ describe("owner routing when workers die, hold sessions or lose races", () => {
 
             // Owner a's live holder still keeps its session, three lock periods on.
             await sleep(Math.max(0, turnA.at + 3 * runtimeOptions.sessionLockTimeoutMs - Date.now()));
-            expect(ran("fa").map((e) => e.name)).toEqual(["runTurnV5"]);
+            expect(ran("fa").map((e) => e.name)).toEqual(["runTurnV6"]);
             expect((await client.getStatus("follow-a")).status).toBe("Running");
             const stoppedAt = Date.now();
             await stop("owner-a");

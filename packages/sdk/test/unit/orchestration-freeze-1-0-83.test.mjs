@@ -1,16 +1,20 @@
 /**
- * Freezing 1.0.83 and opening 1.0.84 (owner routing; docs/proposals/windows-worker-pool.md, U18).
+ * Freezing 1.0.83 and opening 1.0.84.
  *
- * 1.0.83 is the durable workflow intake as v0.8.11 released it. 1.0.84 adds
- * yields for owner-tagged sessions: a capacity request before each turn and
- * before a set-workspace check, a capped destroy, and a capped workspace
- * check. It also changes the busy policy for sessions that ask for the fast
- * one, and routes an owner-tagged session's activities with its owner tag.
- * So 1.0.83 is frozen in orchestration_1_0_83/ (the released live code with
- * only its version literal), in-flight 1.0.83 sessions keep replaying on it,
- * and each moves to 1.0.84 at its next continue-as-new.
+ * 1.0.83 is the durable workflow intake as v0.8.11 released it. 1.0.84 (pinned
+ * spawn grants and subtree tool ceilings) changed the activities the session
+ * orchestration schedules, so 1.0.83 is frozen in orchestration_1_0_83/ (the
+ * released live code with only its version literal), in-flight 1.0.83
+ * sessions keep replaying on it, and each moves to the latest version at its
+ * next continue-as-new. 1.0.84 and 1.0.85 were frozen in turn
+ * (orchestration-freeze-1-0-84 and -1-0-85.test.mjs); the latest, 1.0.86, adds
+ * owner routing: a capacity request before each turn and before a
+ * set-workspace check, a capped destroy, a capped workspace check, the fast
+ * busy policy for sessions that ask for it, and an owner-tagged session's
+ * activities routed with its owner tag. The frozen 1.0.83 copy keeps 1.0.83's
+ * routing and busy policy.
  *
- * Run: node --test test/unit/orchestration-freeze-1-0-83.test.mjs
+ * Run: node --test test/unit/orchestration-freeze-1-0-83.test.mjs (after npm run build).
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -42,27 +46,28 @@ function importsOf(text) {
 
 const LIVE_VERSION_LINE = "export const CURRENT_ORCHESTRATION_VERSION = DURABLE_SESSION_LATEST_VERSION;";
 const FROZEN_VERSION_LINE = 'export const CURRENT_ORCHESTRATION_VERSION = "1.0.83";';
+// The latest version's handler; orchestration-freeze-1-0-85.test.mjs pins the version itself.
+const LATEST_HANDLER = `durableSessionOrchestration_${DURABLE_SESSION_LATEST_VERSION.replaceAll(".", "_")}`;
 
-test("the registry freezes 1.0.83 on its copy and registers 1.0.84, from the live tree, as the latest version", () => {
-    assert.equal(DURABLE_SESSION_LATEST_VERSION, "1.0.84");
+test("the registry freezes 1.0.83 on its copy and registers a later version, from the live tree, as the latest version", () => {
+    assert.notEqual(DURABLE_SESSION_LATEST_VERSION, "1.0.83");
     const frozen = DURABLE_SESSION_ORCHESTRATION_REGISTRY.find(entry => entry.version === "1.0.83");
     assert.equal(frozen.handler.name, "durableSessionOrchestration_1_0_83");
     assert.equal(DURABLE_SESSION_ORCHESTRATION_REGISTRY.find(entry => entry.version === "1.0.82").handler.name, "durableSessionOrchestration_1_0_82");
     const latest = DURABLE_SESSION_ORCHESTRATION_REGISTRY.at(-1);
-    assert.deepEqual([latest.version, latest.handler.name], ["1.0.84", "durableSessionOrchestration_1_0_84"]);
+    assert.deepEqual([latest.version, latest.handler.name], [DURABLE_SESSION_LATEST_VERSION, LATEST_HANDLER]);
     assert.equal(DURABLE_SESSION_ORCHESTRATION_REGISTRY.filter(entry => entry.version === "1.0.83").length, 1);
     const registry = read("orchestration-registry.ts");
     assert.match(registry, /import \{ durableSessionOrchestration_1_0_83 \} from "\.\/orchestration_1_0_83\/index\.js";/);
-    assert.match(registry, /import \{ durableSessionOrchestration_1_0_84 \} from "\.\/orchestration\/index\.js";/);
+    assert.match(registry, new RegExp(`import \\{ ${LATEST_HANDLER} \\} from "\\.\\/orchestration\\/index\\.js";`));
     assert.match(registry, /\{ version: "1\.0\.83", handler: durableSessionOrchestration_1_0_83 \}/);
-    assert.match(registry, /\{ version: DURABLE_SESSION_LATEST_VERSION, handler: durableSessionOrchestration_1_0_84 \}/);
-    assert.match(read("orchestration-version.ts"), /export const DURABLE_SESSION_LATEST_VERSION = "1\.0\.84";/);
+    assert.match(registry, new RegExp(`\\{ version: DURABLE_SESSION_LATEST_VERSION, handler: ${LATEST_HANDLER} \\}`));
 });
 
 test("the live tree names its version as the latest, never as a literal", () => {
     assert.equal(read("orchestration/runtime.ts").split(LIVE_VERSION_LINE).length, 2, "the live version line appears once");
     assert.ok(!read("orchestration/runtime.ts").includes(FROZEN_VERSION_LINE));
-    assert.match(read("orchestration/index.ts"), /export function\* durableSessionOrchestration_1_0_84\(/);
+    assert.match(read("orchestration/index.ts"), new RegExp(`export function\\* ${LATEST_HANDLER}\\(`));
 });
 
 test("frozen 1.0.83 names its version as a literal and continues as new to the live latest", () => {
@@ -70,6 +75,10 @@ test("frozen 1.0.83 names its version as a literal and continues as new to the l
     const index = read("orchestration_1_0_83/index.ts");
     assert.match(index, /latestVersion: DURABLE_SESSION_LATEST_VERSION/);
     assert.match(index, /export function\* durableSessionOrchestration_1_0_83\(/);
+});
+
+test("1.0.83 keeps its original proxy contract", () => {
+    assert.ok(read("orchestration_1_0_83/runtime.ts").includes('"workflow-intake-v1"'));
 });
 
 // Each file as v0.8.11 released orchestration/; runtime.ts with only its version literal.
@@ -137,7 +146,7 @@ test("only the registry imports the frozen 1.0.83 copy", () => {
     }
 });
 
-test("frozen 1.0.83 keeps the 1.0.83 routing and busy policy; 1.0.84 carries owner routing", () => {
+test("frozen 1.0.83 keeps the 1.0.83 routing and busy policy; the latest carries owner routing", () => {
     for (const name of Object.keys(frozenHashes)) {
         assert.doesNotMatch(read(`orchestration_1_0_83/${name}`), /ownerTag|requestOwnerCapacity|workspaceBusyFastRelease|sessionRouting/, name);
     }
@@ -145,6 +154,6 @@ test("frozen 1.0.83 keeps the 1.0.83 routing and busy policy; 1.0.84 carries own
     const agents = read("orchestration_1_0_83/agents.ts");
     assert.equal(agents.match(/yield runtime\.session\.destroy\(\);/g)?.length, 3, "complete, cancel and the failed shutdown destroy without a cap");
     assert.match(read("orchestration_1_0_83/turn.ts"), /if \(failures\.count >= 2 && state\.blobEnabled\) \{/);
-    assert.match(read("orchestration/runtime.ts"), /createSessionProxy\(ctx, input\.sessionId, state\.affinityKey, state\.config, "workflow-intake-v1", sessionRouting\(options\)\);/);
+    assert.match(read("orchestration/runtime.ts"), /createSessionProxy\(ctx, input\.sessionId, state\.affinityKey, state\.config, LIVE_SESSION_PROXY_CONTRACT, sessionRouting\(options\)\);/);
     assert.match(read("orchestration/turn.ts"), /const capacity = yield\* requestOwnerCapacity\(runtime\);/);
 });

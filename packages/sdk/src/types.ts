@@ -44,7 +44,7 @@ export type TurnAction =
     | { type: "cron_at"; action: "set"; schedule: import("./cron-at.js").CronAtSchedule; events?: CapturedEvent[] }
     | { type: "cron_at"; action: "cancel"; events?: CapturedEvent[] }
     | { type: "input_required"; question: string; choices?: string[]; allowFreeform?: boolean; events?: CapturedEvent[] }
-    | { type: "spawn_agent"; task: string; model?: string; reasoningEffort?: ReasoningEffort; contextTier?: ContextTier; systemMessage?: string | { mode: "append" | "replace"; content: string }; toolNames?: string[]; agentName?: string; /** Historical spawn selector, retained only to deserialize frozen orchestration histories. New requests reject it. */ requiredTool?: string; title?: string; contract?: Record<string, unknown>; content?: string; events?: CapturedEvent[]; /** Session workspaces (1.0.80): omitted inherits, a record is used, null gives none. */ workspace?: SessionWorkspace | null }
+    | { type: "spawn_agent"; task: string; model?: string; reasoningEffort?: ReasoningEffort; contextTier?: ContextTier; systemMessage?: string | { mode: "append" | "replace"; content: string }; toolNames?: string[]; grant?: import("./tool-grant.js").CapabilityToolGrant; tools?: import("./tool-grant.js").ToolCeiling; agentName?: string; /** Historical spawn selector, retained only to deserialize frozen orchestration histories. New requests reject it. */ requiredTool?: string; title?: string; lockTitle?: boolean; contract?: Record<string, unknown>; content?: string; events?: CapturedEvent[]; /** Session workspaces (1.0.80): omitted inherits, a record is used, null gives none. */ workspace?: SessionWorkspace | null }
     | { type: "message_agent"; agentId: string; message: string; contractPatch?: Record<string, unknown>; events?: CapturedEvent[] }
     | { type: "check_agents"; events?: CapturedEvent[] }
     | { type: "wait_for_agents"; agentIds: string[]; events?: CapturedEvent[] }
@@ -177,7 +177,7 @@ type TurnResultVariant =
     | ({ type: "cron_at"; action: "set"; schedule: import("./cron-at.js").CronAtSchedule; events?: CapturedEvent[] } & QueuedTurnActionCarrier)
     | ({ type: "cron_at"; action: "cancel"; events?: CapturedEvent[] } & QueuedTurnActionCarrier)
     | ({ type: "input_required"; question: string; choices?: string[]; allowFreeform?: boolean; events?: CapturedEvent[] } & QueuedTurnActionCarrier)
-    | ({ type: "spawn_agent"; task: string; model?: string; reasoningEffort?: ReasoningEffort; contextTier?: ContextTier; systemMessage?: string | { mode: "append" | "replace"; content: string }; toolNames?: string[]; agentName?: string; /** Historical spawn selector, retained only to deserialize frozen orchestration histories. New requests reject it. */ requiredTool?: string; title?: string; contract?: Record<string, unknown>; content?: string; events?: CapturedEvent[]; /** Session workspaces (1.0.80): omitted inherits, a record is used, null gives none. */ workspace?: SessionWorkspace | null } & QueuedTurnActionCarrier)
+    | ({ type: "spawn_agent"; task: string; model?: string; reasoningEffort?: ReasoningEffort; contextTier?: ContextTier; systemMessage?: string | { mode: "append" | "replace"; content: string }; toolNames?: string[]; grant?: import("./tool-grant.js").CapabilityToolGrant; tools?: import("./tool-grant.js").ToolCeiling; agentName?: string; /** Historical spawn selector, retained only to deserialize frozen orchestration histories. New requests reject it. */ requiredTool?: string; title?: string; lockTitle?: boolean; contract?: Record<string, unknown>; content?: string; events?: CapturedEvent[]; /** Session workspaces (1.0.80): omitted inherits, a record is used, null gives none. */ workspace?: SessionWorkspace | null } & QueuedTurnActionCarrier)
     | ({ type: "message_agent"; agentId: string; message: string; contractPatch?: Record<string, unknown>; events?: CapturedEvent[] } & QueuedTurnActionCarrier)
     | ({ type: "check_agents"; events?: CapturedEvent[] } & QueuedTurnActionCarrier)
     | ({ type: "wait_for_agents"; agentIds: string[]; events?: CapturedEvent[] } & QueuedTurnActionCarrier)
@@ -200,6 +200,8 @@ export interface CapturedEvent {
 // ─── Turn Options ────────────────────────────────────────────────
 
 export interface TurnOptions {
+    /** Host-derived required-call gate for the Workflow agent's current visit. */
+    workflowRequiredTools?: string[];
     onDelta?: (delta: string) => void;
     onToolStart?: (name: string, args: any) => void;
     /** Called for every event as it fires during the turn. */
@@ -280,7 +282,8 @@ export interface TurnOptions {
      * as its first answer, and the turn ends normally whatever it does. Set by the runTurn activity only.
      */
     stepReminder?: {
-        check(input: { scheduleCancelled: boolean }): Promise<{ remind: true; n: number; max: number; stateId: string; cycle?: string } | { remind: false; reason: string }>;
+        check(input: { scheduleCancelled: boolean }): Promise<{ remind: true; n: number; max: number; stateId: string; cycle?: string;
+            requiredTools?: string[]; missingTools?: string[] } | { remind: false; reason: string }>;
     };
     /** Internal: this turn was started by a recurring cron/cron_at timer fire. */
     cycleOrigin?: "cron" | "cron_at";
@@ -350,6 +353,8 @@ export interface TurnOptions {
          * that runs agent states.
          */
         workflowAgentSubtree?: boolean;
+        /** Direct agent child only: the deadline of this turn's captured Workflow visit, read before scheduling. */
+        workflowScheduleDeadline?(): Promise<{ deadlineAt: string }>;
         /**
          * Workflow real-agent test runs (design 05 agent mode real): this
          * session is in the subtree of a test run's agent state, so each of
@@ -377,12 +382,15 @@ export interface TurnOptions {
             context_tier?: ContextTier;
             system_message?: string;
             tool_names?: string[];
+            grant?: import("./tool-grant.js").CapabilityToolGrant;
+            tools?: import("./tool-grant.js").ToolCeiling;
             title?: string;
+            lock_title?: boolean;
             contract?: Record<string, unknown>;
             /** Session workspaces: omitted inherits, a record is used, null gives none. Text-checked by the tool handler. */
             workspace?: SessionWorkspace | null;
         }): Promise<string>;
-        setSessionModel(args: { model: string; reasoning_effort?: ReasoningEffort | null }): Promise<string>;
+        setSessionModel(args: { model?: string; title?: string; reasoning_effort?: ReasoningEffort | null }): Promise<string>;
         /** Session regeneration: enqueue the durable regenerate cmd for THIS session (sender-stamped server-side). */
         regenerateContext?(args: { handoff?: string }): Promise<string>;
         /** Session regeneration: enqueue the durable regenerate cmd for a DIRECT child (requestedBy-stamped). */
@@ -847,6 +855,10 @@ export interface SerializableSessionConfig {
      * names to actual Tool objects from its registry at activity execution time.
      */
     toolNames?: string[];
+    /** Host-captured capability grant for a 1.0.84 spawned child; absent preserves the legacy tool surface. */
+    toolGrant?: import("./workflow/tool-policy.js").WorkflowToolBinding;
+    /** Host-captured ceiling for this session and its whole subtree; an empty list removes every tool. */
+    toolCeiling?: string[];
     /**
      * Internal: identity of the bound agent for namespace access control.
      * Set from the agent definition's `id` field. Used by fact tool handlers
@@ -915,6 +927,8 @@ export interface ManagedSessionConfig extends SerializableSessionConfig {
      * was given, unchanged. Set by the runTurn activity. Runtime-only.
      */
     workflowMilestoneTurn?: boolean;
+    /** Runtime-only: this turn uses the 1.0.84 spawn grant and ceiling schema. */
+    toolCompositionTurn?: boolean;
     /**
      * Workflow: this
      * turn's session is an agent state's own child (its stored lineage), so it
@@ -924,6 +938,8 @@ export interface ManagedSessionConfig extends SerializableSessionConfig {
      * Set by the runTurn activity. Runtime-only.
      */
     workflowAgentChild?: boolean;
+    /** Current bound-copy startup contract, enforced on the Workflow child's first turn, including older Starts. */
+    workflowStartupRequiredTool?: string;
     /**
      * Workflow Simplified A1 (spec 14; E4): this turn's session is inside a
      * Workflow (an agent node's session or one of its sub-agents, by its stored
@@ -1496,14 +1512,14 @@ export interface OrchestrationInput {
     /** Names of all loaded non-system agents. Used by orchestration to validate policy. */
     allowedAgentNames?: string[];
 
-    // ─── Owner routing (1.0.84) ──────────────────────────────
+    // ─── Owner routing (1.0.86) ──────────────────────────────
     /**
      * The owner routing tag, `owner.<subject>` of the session's owner, as
      * its creation config holds it (the client copies it at start).
      * With it, every session-scoped activity goes only to a worker that
      * declares the tag (`PilotSwarmWorkerOptions.ownerTag`), and the session
      * asks for capacity (`requestOwnerCapacity`) before each turn. Carried
-     * across continue-as-new; absent = routed as before 1.0.84.
+     * across continue-as-new; absent = routed as before 1.0.86.
      */
     ownerTag?: string;
     /**
@@ -1678,7 +1694,8 @@ export interface PilotSwarmWorkerOptions {
      * Fixed for the worker's lifetime. Default: none. `examples/worker.js`
      * reads `PILOTSWARM_WORKER_OWNER_TAG`. Without `ownerOnly`, a worker with
      * a tag refuses to start with a capacity requester: its filter would hold
-     * six tags, one more than duroxide allows.
+     * seven tags, one more than the six a worker's filter may hold
+     * (MAX_OWNER_ROUTING_WORKER_TAGS in activity-routing.ts).
      */
     ownerTag?: string;
     /**

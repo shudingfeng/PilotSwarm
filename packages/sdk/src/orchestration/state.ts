@@ -419,18 +419,18 @@ export interface DurableSessionOptions {
     parentSessionId?: string;
     nestingLevel: number;
     baseSystemMessage?: string | { mode: "append" | "replace"; content: string };
-    /** 1.0.84: the owner routing tag (OrchestrationInput.ownerTag). Never set for a system session. */
+    /** 1.0.86: the owner routing tag (OrchestrationInput.ownerTag). Never set for a system session. */
     ownerTag?: string;
-    /** 1.0.84: the fast workspace busy policy (OrchestrationInput.workspaceBusyFastRelease). */
+    /** 1.0.86: the fast workspace busy policy (OrchestrationInput.workspaceBusyFastRelease). */
     workspaceBusyFastRelease?: boolean;
 }
 
-/** 1.0.84: the routing of the session's activities; undefined keeps the routing of 1.0.83. */
+/** 1.0.86: the routing of the session's activities; undefined keeps the routing of 1.0.85. */
 export function sessionRouting(options: DurableSessionOptions): { ownerTag: string } | undefined {
     return options.ownerTag ? { ownerTag: options.ownerTag } : undefined;
 }
 
-/** 1.0.84: what a session created during a turn takes from the session: its tag and busy policy. */
+/** 1.0.86: what a session created during a turn takes from the session: its tag and busy policy. */
 export function createdSessionRouting(options: DurableSessionOptions): { ownerTag?: string; workspaceBusyFastRelease?: boolean } | undefined {
     if (!options.ownerTag && !options.workspaceBusyFastRelease) return undefined;
     return {
@@ -508,13 +508,13 @@ export const INTERNAL_SYSTEM_TURN_PROMPT =
 export const WORKSPACE_RETRY_SCHEDULE_SECONDS = [30, 120, 300, 900];
 
 /**
- * 1.0.84: the schedule after a WORKSPACE_BUSY refusal of a session with the
+ * 1.0.86: the schedule after a WORKSPACE_BUSY refusal of a session with the
  * fast busy policy: 10 s, 20 s, 1 min, then every 3 min.
  */
 export const WORKSPACE_BUSY_RETRY_SCHEDULE_SECONDS = [10, 20, 60, 180];
 
 /**
- * 1.0.84: how long a set-workspace command of an owner-tagged session waits
+ * 1.0.86: how long a set-workspace command of an owner-tagged session waits
  * for its workspace check before it answers WORKSPACE_BUSY. Long enough for
  * a slow attach on a worker that had to start first.
  */
@@ -869,7 +869,7 @@ export function deriveOptions(input: OrchestrationInput): DurableSessionOptions 
             ?? (input.parentOrchId ? input.parentOrchId.replace(/^session-/, "") : undefined),
         nestingLevel: input.nestingLevel ?? 0,
         baseSystemMessage: input.baseSystemMessage ?? input.config?.systemMessage,
-        // 1.0.84: set only when the input carries them, so a session started
+        // 1.0.86: set only when the input carries them, so a session started
         // without them derives the same options as in 1.0.82.
         ...(!input.isSystem && isOwnerRoutingTag(input.ownerTag) ? { ownerTag: input.ownerTag } : {}),
         ...(input.workspaceBusyFastRelease === true ? { workspaceBusyFastRelease: true } : {}),

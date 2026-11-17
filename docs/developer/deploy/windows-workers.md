@@ -801,7 +801,7 @@ back or the dispatcher returns it.
   the dispatcher creates for an owner (`onBehalfOfOwner`) is owner-routed: the
   Portal records `owner.<ownerOid>` in its creation config, and whichever
   client starts the session copies that tag into its orchestration input,
-  whatever that client's own settings. Orchestration `1.0.84` tags every
+  whatever that client's own settings. Orchestration `1.0.86` tags every
   session-scoped activity with it. A sub-agent created during a turn takes
   that turn's tag. Sessions that people start in the Portal, system sessions
   and every session under a system root stay untagged.
@@ -823,7 +823,7 @@ back or the dispatcher returns it.
 
 See [Owner Routing](../reference/configuration.md#owner-routing-optional) and
 the orchestration design's
-[owner routing](../../architecture/orchestration/design.md#owner-routing-and-capacity-requests-1084)
+[owner routing](../../architecture/orchestration/design.md#owner-routing-and-capacity-requests-1086)
 and [owner-only workers](../../architecture/orchestration/design.md#owner-only-workers).
 
 ### Admission
@@ -897,7 +897,7 @@ sequenceDiagram
   at once and retries after 10 seconds, 20 seconds, a minute, then every 3
   minutes, instead of 30 seconds, 2 minutes, 5 minutes, then every 15 minutes.
   Sessions that people start in the Portal keep today's policy. See the
-  [fast busy policy](../../architecture/orchestration/design.md#fast-busy-policy-1084).
+  [fast busy policy](../../architecture/orchestration/design.md#fast-busy-policy-1086).
 
 ### Ending a session tree
 

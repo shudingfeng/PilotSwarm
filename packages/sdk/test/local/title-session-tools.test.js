@@ -38,6 +38,8 @@ async function generateTitle(limitSetting) {
             getSession: async (sessionId) => ({ sessionId, title: "", isSystem: false }),
             getSessionEvents: async () => [{ eventType: "user.message", data: { content: "Refactor the retry logic of the billing service" } }],
             updateSession: async (_sessionId, patch) => { titles.push(patch.title); },
+            // Durable titles (orchestration 1.0.85) write a summary title only while the title is unlocked.
+            updateSessionTitleIfUnlocked: async (_sessionId, title) => { titles.push(title); return true; },
         };
         const sessionManager = {
             resolveDefaultProvider: () => ({

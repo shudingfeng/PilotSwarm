@@ -73,7 +73,7 @@ const unfinished = (activities) => activities.filter((a) => !a.done).map((a) => 
 
 /** The session-scoped activities that carry an owner-tagged session's owner tag. */
 const OWNER_TAGGED = new Set([
-    "runTurnV5", "runTurnEpochV5", "hydrateSession", "dehydrateSession", "needsHydrationSession",
+    "runTurnV6", "runTurnEpochV6", "captureSpawnToolsV1", "hydrateSession", "dehydrateSession", "needsHydrationSession",
     "checkpointSession", "abortTurn", "checkWorkspace", "releaseWorkspace", "destroySession",
 ]);
 
@@ -170,9 +170,9 @@ describe("owner-only workers", () => {
             const system = await client.createSystemSession({ title: "Owner-only check" });
             expect(await system.sendAndWait("system hello", TIMEOUT)).toContain("ok:");
             await waitForSessionState(catalog, system.sessionId, ["idle"], 120_000);
-            await eventually(async () => (await activitiesOf(client, user.sessionId)).some((a) => a.name === "runTurnV5"), "the user's turn");
+            await eventually(async () => (await activitiesOf(client, user.sessionId)).some((a) => a.name === "runTurnV6"), "the user's turn");
             const beforeTurn = await activitiesOf(client, user.sessionId);
-            expect(unfinished(beforeTurn)).toEqual(["runTurnV5"]);
+            expect(unfinished(beforeTurn)).toEqual(["runTurnV6"]);
             expect(beforeTurn.map((a) => a.name)).toEqual(expect.arrayContaining(["getWorkerSessionPolicy", "requestOwnerCapacity", "loadKnowledgeIndex"]));
             expect(await turnWorkers(catalog, user.sessionId)).toEqual([]);
 
@@ -209,7 +209,7 @@ describe("owner-only workers", () => {
             for (const [who, sessionId] of Object.entries(sessions)) {
                 expect(unfinished(await activitiesOf(client, sessionId)), who).toEqual(waiting[who]);
             }
-            expect((await activitiesOf(client, user.sessionId)).filter((a) => a.name === "runTurnV5").map((a) => a.done)).toEqual([true]);
+            expect((await activitiesOf(client, user.sessionId)).filter((a) => a.name === "runTurnV6").map((a) => a.done)).toEqual([true]);
             expect(await turnWorkers(catalog, user.sessionId)).toEqual(["owner-a"]);
             expect(await turnWorkers(catalog, childId)).toEqual([]);
             expect(await turnWorkers(catalog, system.sessionId)).toEqual(["default"]);

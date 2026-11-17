@@ -35,9 +35,10 @@ deleted session's Workflows. Migration `0089`
 (`migrations/workflow-session-names-0089.ts`) names the session-owned
 definitions' tables `session_workflow_*` (definitions, revisions, operations,
 seen, notes), the pin columns `session_definition_id` and `session_revision`, and
-the trigger `workflow_owner_session_ended`, in one transaction. Migration `0090`
-(`migrations/dispatcher-delegation-0090.ts`) adds each user's dispatcher-delegation
-opt-in, `users.allow_dispatcher_delegation`, and its two stored procedures. Every statement
+the trigger `workflow_owner_session_ended`, in one transaction. Migration `0095`
+(`migrations/dispatcher-delegation-0095.ts`), which runs after `0090` to `0094`,
+adds each user's dispatcher-delegation opt-in, `users.allow_dispatcher_delegation`,
+and its two stored procedures. Every statement
 is idempotent; fresh and existing databases converge to the same shape.
 
 ## Table: `sessions`
@@ -67,6 +68,43 @@ accumulated ALTERs:
 | `short_summary` / `summary_state` / `summary_updated_at` | TEXT / JSONB / TIMESTAMPTZ | rolling summary machinery |
 
 Partial indexes on `(state)` and `(updated_at DESC)` where `deleted_at IS NULL`.
+
+### Creation and resurrection (migration 0094)
+
+`cms_create_session` can reuse a soft-deleted session ID. Migration `0094`
+changes its 6-, 8-, 9- and 10-argument bodies; the seven-argument form still
+delegates to eight. `cms_create_workflow_session` remains insert-only.
+
+Both SQL creation functions lock a supplied parent row `FOR SHARE` before
+reading its root or group. An existing soft-deleted parent is refused with
+`PARENT_DELETED`. An absent parent remains allowed for system-agent bootstrap.
+The catalog already enforced this rule; direct SQL now does so too.
+This includes a direct SQL call whose own row is already live: naming a
+deleted parent now refuses that call instead of leaving the row unchanged.
+
+Creation first attempts `INSERT ... ON CONFLICT DO NOTHING`. If it did not
+insert, ordinary session creation locks the existing row `FOR UPDATE`. A
+concurrent hard purge that removes the row is refused with `SESSION_DISAPPEARED`;
+there is no retry loop. An existing live row is not reparented.
+
+A deleted row may retain live descendants after a best-effort delete cascade.
+If its requested parent differs, a recursive walk includes deleted intermediate
+rows and refuses the resurrection when any descendant is live, with
+`SESSION_RESURRECTION_HAS_LIVE_DESCENDANTS`. The walk deduplicates IDs. Only
+after the guard passes does the function reset lifetime controls and revive
+the row. Refusal leaves session rows, metrics and lifetime events unchanged.
+Same-parent resurrection remains allowed.
+
+On a successful changed-parent resurrection, legacy 6/8/9-argument bodies stamp
+only the resurrected row's root. They retain their old fresh-insert and
+same-parent root behavior. Migration 0094 changes no columns, rewrites no
+descendants, and performs no backfill.
+
+Two pre-existing limitations remain separate: creating a parent ID which
+already has children created while it was absent can adopt stale-root children;
+and a live orphan can continue/resume an active orchestration and admit a child,
+but that new child's first orchestration start refuses a deleted ancestor with
+`SESSION_LINEAGE_INVALID`. This migration does not repair either limitation.
 
 ## Table: `session_events`
 
@@ -118,7 +156,7 @@ connection and also looks every 5 s while a turn runs.
 | `session_groups` / `session_group_owners` | session groups + per-user ownership (groups are private per-user organization) |
 | `user_session_group_placements` | migration 0034: `(user_id, root_session_id) → group_id` — each viewer's private placement of a session tree in one of their own groups; composite FK into `session_group_owners` makes cross-user placement structurally impossible |
 | `session_child_outcomes` | terminal outcomes of sub-agents for parent digests |
-| `users` / `session_owners` | principals, per-user profile/keys, the dispatcher-delegation opt-in (`allow_dispatcher_delegation`, migration `0090`), session ownership |
+| `users` / `session_owners` | principals, per-user profile/keys, the dispatcher-delegation opt-in (`allow_dispatcher_delegation`, migration `0095`), session ownership |
 
 ## The catalog client
 
