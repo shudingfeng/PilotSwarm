@@ -579,6 +579,17 @@ export function limitedSystemSessionOptions(): { availableTools: string[]; enabl
     return { availableTools: ["custom:*", "builtin:skill"], enableSessionStore: false, skipEmbeddingRetrieval: true };
 }
 
+/**
+ * The CLI tools of a limited system session that also has an allowlist (a
+ * Workflow agent state's limit or a spawn's tool ceiling): the limit's tools
+ * that the allowlist names too. The PilotSwarm tools are cut to the allowlist
+ * where they are declared; the skill tool stays only when the allowlist names
+ * it. So neither the limit nor the ceiling widens the other.
+ */
+export function limitedSystemSessionTools(allowlist: readonly string[]): string[] {
+    return ["custom:*", ...(allowlist.includes("skill") || allowlist.includes("builtin:skill") ? ["builtin:skill"] : [])];
+}
+
 /** The fields of a session catalog row that tell whether it is a system session. */
 export interface SystemSessionRow {
     isSystem?: boolean | null;
@@ -3555,8 +3566,11 @@ export class SessionManager {
             excludedTools,
             ...(agentToolAllowlist ? { availableTools: agentToolAllowlist } : {}),
             // A limited system session: its tools, session store and embedding retrieval. After a Workflow agent state's
-            // allowlist, so the limit holds for a system root's Workflow children too.
-            ...systemSessionLimits,
+            // allowlist, so the limit holds for a system root's Workflow children too; with an allowlist (an agent state's
+            // limit or a spawn's tool ceiling) it keeps only the tools both allow.
+            ...(systemSessionLimits && agentToolAllowlist
+                ? { ...systemSessionLimits, availableTools: limitedSystemSessionTools(agentToolAllowlist) }
+                : systemSessionLimits),
             ...(nativeEnabled ? {
                 // S2RT-F1: inside a Workflow agent state that limits its tools, every native worker (the swarm workers and the
                 // adopted repository agents) is cut to that limit, in its declaration and in the child hook above.

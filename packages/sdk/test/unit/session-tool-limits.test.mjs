@@ -159,6 +159,23 @@ test("the root's row is read only when the session's own row does not decide", a
         "a root that cannot be read counts as system");
 });
 
+test("with the setting, a system session under a tool ceiling keeps only the tools both allow", async (t) => {
+    const offered = async (id, toolCeiling) => {
+        const h = fixture(t);
+        await h.manager.getOrCreate(id, { toolCeiling }, { turnIndex: 0 });
+        return h.calls[0].config.availableTools;
+    };
+    await withSetting("1", async () => {
+        assert.deepEqual(await offered("system-child", ["skill", "bash"]), ["custom:*", "builtin:skill"], "skill and the limit's tools");
+        assert.deepEqual(await offered("system-child", ["bash"]), ["custom:*"], "a ceiling without skill takes skill away");
+        assert.deepEqual(await offered("system-child", []), ["custom:*"], "none: no CLI tool");
+        assert.deepEqual(await offered("user-child", ["bash"]), ["bash"], "an ordinary session keeps its ceiling");
+    });
+    await withSetting(undefined, async () => {
+        assert.deepEqual(await offered("system-child", ["bash"]), ["bash"], "without the setting, the ceiling alone");
+    });
+});
+
 test("a change of the setting reaches a warm system session at its next turn", async (t) => {
     const h = fixture(t);
     const turn = (turnIndex, value) => withSetting(value, () => h.manager.getOrCreate("system-root", {}, { turnIndex }));
