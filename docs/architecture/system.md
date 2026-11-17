@@ -460,9 +460,9 @@ Worker B: next orchestration turn (any worker, affinity key is new)
   +-- Session is now active on Worker B
 ```
 
-With owner routing (orchestration 1.0.84), "any worker" means, for an
+With owner routing (orchestration 1.0.86), "any worker" means, for an
 owner-routed session, any worker that declares its owner's tag: such a session
-moves only between that owner's workers. See the [orchestration design](./orchestration/design.md#owner-routing-and-capacity-requests-1084).
+moves only between that owner's workers. See the [orchestration design](./orchestration/design.md#owner-routing-and-capacity-requests-1086).
 
 ---
 

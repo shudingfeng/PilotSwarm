@@ -215,7 +215,7 @@ it ignores `onBehalfOfOwner`, as it did before the parameter existed.
   the **Dispatcher Delegation** switch in Admin Console → Model Providers →
   My Providers (`g` on the same page of the TUI), or
   `PUT /api/v1/me/dispatcher-delegation`. It is stored in
-  `users.allow_dispatcher_delegation` (CMS migration `0090`) and is off until
+  `users.allow_dispatcher_delegation` (CMS migration `0095`) and is off until
   the user turns it on. The switch shows only on deployments that name a
   dispatcher.
 - **Creating for a user.** `createSession` and `createSessionForAgent` accept
@@ -676,7 +676,7 @@ both files alone.
 
 Owner routing keeps each user's sessions on that user's own workers, for
 deployments where a worker holds one user's files or credentials. It is off
-unless you turn it on, and it needs orchestration 1.0.84 or later.
+unless you turn it on, and it needs orchestration 1.0.86 or later.
 
 | Setting | Where | What it does |
 |---|---|---|
@@ -686,18 +686,19 @@ unless you turn it on, and it needs orchestration 1.0.84 or later.
 | `worker.setOwnerCapacityRequester(fn)` | `PilotSwarmWorker`, before `start()`; a worker with an `ownerTag` and without `ownerOnly` refuses to start with one | The worker answers capacity requests: before each turn of a tagged session, the orchestration asks one worker with a requester. `fn({ sessionId, rootSessionId, ownerTag }, signal)` returns `{ decision: "ok" }`, `{ decision: "deny", message?, code? }` (the turn ends and is not retried) or `{ decision: "busy", message?, code?, retryAfterMs? }` (the prompt waits and the session asks again). After 15 s the signal fires and the session waits a minute (`CAPACITY_UNAVAILABLE`), however many busy answers came before; that doesn't count as a busy refusal and releases no worker. A worker with a requester also refuses, without a retry, a turn whose session's creation config holds an owner tag that the turn doesn't carry (`OWNER_TAG_MISSING`). With owner routing on and no worker with a requester, tagged sessions wait |
 | `workspaceBusyFastRelease: true` or `PILOTSWARM_WORKSPACE_BUSY_FAST_RELEASE=1` | `PilotSwarmClient` (the option wins over the env var) | The owner-routed top-level sessions the client starts (a tag in their creation config), and the sessions they create, use the fast busy policy: a `WORKSPACE_BUSY` refusal releases the worker at once and retries after 10 s, 20 s, 1 min, then every 3 min, instead of 30 s, 2 min, 5 min, then every 15 min with a release after two refusals on one worker. Other sessions keep the default policy. Default: off (unset) |
 
-A worker's Duroxide tag filter holds the four capability tags, plus its owner
+A worker's Duroxide tag filter holds the five capability tags, plus its owner
 tag or, with a capacity requester, the capacity tag `pilotswarm.owner-capacity.v1`:
-five tags, Duroxide's limit, so a worker never has both. It is `defaultAnd`, so
+six tags, one past Duroxide's limit, which duroxide-node 0.2.4 does not check,
+so a worker never has both. It is `defaultAnd`, so
 the worker also runs untagged activities. An owner-only worker's filter is `{ tags: [ownerTag] }`, which
 admits that one tag. Duroxide applies the filter to activities only: every
 worker runs orchestrations. But `ctx.utcNow()` and `ctx.newGuid()` are untagged
 Duroxide activities, so an orchestration also needs a worker without
 `ownerOnly` to move on. Start the workers that declare owner tags and the
 capacity requester before you turn on `PILOTSWARM_OWNER_ROUTING` on the
-portal. Sessions that started before the upgrade, on orchestration 1.0.83 or
+portal. Sessions that started before the upgrade, on orchestration 1.0.85 or
 older, stay untagged, and so does every session created without a stored tag.
-See the [orchestration design](../../architecture/orchestration/design.md#owner-routing-and-capacity-requests-1084)
+See the [orchestration design](../../architecture/orchestration/design.md#owner-routing-and-capacity-requests-1086)
 and its [owner-only workers](../../architecture/orchestration/design.md#owner-only-workers).
 
 ### Coordination Host on Azure

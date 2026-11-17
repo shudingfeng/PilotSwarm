@@ -92,7 +92,7 @@ flowchart LR
 
 | Piece | Lives in | What it does |
 |---|---|---|
-| SDK hooks, settings and orchestration `1.0.84` | `packages/sdk`, `packages/app` | Owner tags, capacity requests, admission, worker lifecycle hooks, personal secret resolution, CLI hardening, delegation |
+| SDK hooks, settings and orchestration `1.0.86` | `packages/sdk`, `packages/app` | Owner tags, capacity requests, admission, worker lifecycle hooks, personal secret resolution, CLI hardening, delegation |
 | Dev Drive workspace extension | `packages/sdk/examples/devdrive-workspaces/` | A workspace provider, loaded through `PILOTSWARM_EXTENSION_MODULES` like `repo-workspaces`. It mounts a root session's drive as `Q:`. It holds no cloud code and reaches the controller and a local attacher over HTTP |
 | Windows image and worker services | `deploy/providers/azure/windows/` | Image build, Dev Drive seeding, release packing, a launcher and a local disk attacher run as Windows services |
 | Disk pool controller and broker | `deploy/providers/azure/disk-controller/` | Drive pool and leases, attach and detach, VM lifecycle and scaling, admission, capacity, the credential broker and the upgrade freeze |
@@ -142,13 +142,13 @@ Sessions that people start in the Portal get no tag and run on the Linux workers
 an external store (below), they use the deployment's shared model providers only, because the broker releases a personal
 token only to a VM bound to its owner.
 
-In orchestration `1.0.84`, every session-scoped activity of a tagged session carries the tag:
-- the turn (`runTurnV5` and `runTurnEpochV5` today);
+In orchestration `1.0.86`, every session-scoped activity of a tagged session carries the tag:
+- the turn (`runTurnV6` and `runTurnEpochV6` today) and a spawn's tool capture (`captureSpawnToolsV1`);
 - `hydrateSession`, `dehydrateSession`, `needsHydrationSession`, `checkpointSession` and `abortTurn`;
 - `checkWorkspace`, `releaseWorkspace` and `destroySession`.
 
-duroxide gives an activity one tag. The turn and the two workspace activities carry a capability tag today. On them the
-owner tag replaces it and stands for all four capabilities, as the capability tags already stand for each other
+duroxide gives an activity one tag. The turn, the capture and the two workspace activities carry a capability tag today. On
+them the owner tag replaces it and stands for all five capabilities, as the capability tags already stand for each other
 (`activity-routing.ts:46-47, 68-69, 93-100`): only a release that has them can declare an owner tag.
 
 - **Children:** a sub-agent that a turn creates through `spawn_agent` takes the turn's tag, and `continueAsNew` carries it.
@@ -163,11 +163,14 @@ owner tag replaces it and stands for all four capabilities, as the capability ta
 - **System sessions:** system sessions, sessions that the system user owns and sessions under a system root never get a
   tag. Manager activities get no owner tag and keep their capability routing, as multitenant §2c proposes.
 - **The worker's filter:** `PilotSwarmWorker` appends the new option `ownerTag` to its default filter, which is
-  `defaultAnd` with four capability tags (`worker.ts:928`).
-  - That makes five tags, duroxide's `MAX_WORKER_TAGS`. Your Workflow design notes count four of them as used
-    (`docs/proposals/workflow-messaging-request.md:504-510`).
+  `defaultAnd` with five capability tags since v0.8.12's tool composition (`worker.ts`).
+  - That makes six tags, one past duroxide's `MAX_WORKER_TAGS` of five, which duroxide-node 0.2.4 doesn't enforce
+    ([What our local tests showed](#what-our-local-tests-showed)). Your Workflow design notes counted four of them as used
+    (`docs/proposals/workflow-messaging-request.md:504-510`); tool composition took the fifth.
   - A worker with a capacity requester (below) appends `pilotswarm.owner-capacity.v1` instead. A worker never has both: it
-    refuses to start, because six tags exceed the limit. A unit test keeps every filter at five tags or fewer.
+    refuses to start, because seven tags would be two past the limit. A unit test keeps the default filter at five tags
+    and every filter at six or fewer. A duroxide release that enforces the limit would refuse a worker with an owner tag or
+    a capacity requester (open question 9).
   - This follows the worker registry proposal, where placement tags derive from a worker's pool and owner.
 
 ### Owner-only workers and the coordination host
@@ -223,7 +226,7 @@ We'd like your view before we design it.
 
 ### Capacity requests
 
-An owner-tagged activity waits in the queue until a worker with that tag polls. To get one started, orchestration `1.0.84`
+An owner-tagged activity waits in the queue until a worker with that tag polls. To get one started, orchestration `1.0.86`
 schedules the activity `requestOwnerCapacity` before each turn, before a session's first owner-tagged activity after
 creation or an affinity release, and before a set-workspace command's check. Asking before every turn matters because a
 session can keep its affinity through a durable wait while its owner's last VM is deleted. The activity carries its own
@@ -231,7 +234,7 @@ capability tag, `pilotswarm.owner-capacity.v1`, so only a worker with a requeste
 `worker.setOwnerCapacityRequester(fn)`, which here means only the coordination host, runs it. The hook gets
 `{ sessionId, rootSessionId, ownerTag }` and an `AbortSignal`:
 
-| Answer | What `1.0.84` does |
+| Answer | What `1.0.86` does |
 |---|---|
 | OK | Schedules the turn |
 | `deny` | Ends the turn as an admission refusal that isn't retried. The Azure controller denies a root that holds no drive lease |
@@ -246,7 +249,7 @@ capability tag, `pilotswarm.owner-capacity.v1`, so only a worker with a requeste
   against the existing `WORKSPACE_RELEASE_CAP_MS` (10 seconds, `orchestration/state.ts:516`), as `releaseAffinity` already
   races `releaseWorkspace` (`orchestration/lifecycle.ts:194-210`).
 
-`1.0.84` also adds an opt-in **fast busy policy**. Today affinity is released after two `WORKSPACE_BUSY` failures in a row
+`1.0.86` also adds an opt-in **fast busy policy**. Today affinity is released after two `WORKSPACE_BUSY` failures in a row
 on one worker (`orchestration/turn.ts:1258`), with retries at 30, 120, 300 and 900 seconds (`orchestration/state.ts:489`).
 A session whose input carries `workspaceBusyFastRelease` releases on the first refusal and retries at 10, 20, 60, then
 every 180 seconds. With `PILOTSWARM_WORKSPACE_BUSY_FAST_RELEASE=1`, the client sets that flag on owner-routed sessions,
@@ -372,7 +375,7 @@ worker's environment and starts the SDK's bundled runtime (`copilot-client.ts:25
 
 ### Delegation to a dispatcher
 
-- **Opt-in:** a deployment may run a dispatcher service that creates sessions for users. Migration `0090` adds
+- **Opt-in:** a deployment may run a dispatcher service that creates sessions for users. Migration `0095` adds
   `users.allow_dispatcher_delegation` (default `false`) with two stored procedures. Users set it through
   `setMyDispatcherDelegation`, from a Portal switch or a TUI command, bound to the signed-in caller.
 - **Creating sessions:** `createSession` and `createSessionForAgent` accept `onBehalfOfOwner`, only from
@@ -524,15 +527,15 @@ makes the controller recycle outdated VMs, and the identity and resource IDs and
 ## Compatibility contract
 
 Every slice meets these rules, with two stated exceptions: U26 and U27 propose new defaults, which you decide on (C1, open
-question 7), and U26's capped destroy, if it ships in `1.0.84`, applies to every session (C4). Reviewers can check the
+question 7), and U26's capped destroy, if it ships in `1.0.86`, applies to every session (C4). Reviewers can check the
 rules, and tests cover them.
 
 | Rule | What it means |
 |---|---|
 | C1. Off by default | Each new behavior needs a setting, a registered hook, an optional parameter or a deploy flag, and its default reproduces today's behavior |
 | C2. Additive APIs | New optional parameters, methods, routes and settings only. Nothing is renamed or removed, and the regenerated protocol client keeps every existing call working |
-| C3. Additive schema | One CMS migration, `0090`, adds a column with a default and two new stored procedures. It replaces no procedure and rewrites no data |
-| C4. Versioned orchestration | `1.0.84` is a new version. `1.0.83` is frozen as `orchestration_1_0_83/`, and every version down to the floor, `1.0.47`, stays registered. `1.0.84` changes nothing for a session unless its input carries an owner tag or the fast busy flag. Orchestration code never reads `process.env`. A release that contains it changes the default orchestration version, so every deployment that takes that release upgrades by stopping every worker, deploying, then starting, as the 0.8.11 release notes ask (`CHANGELOG.md:5-21`) |
+| C3. Additive schema | One CMS migration, `0095`, adds a column with a default and two new stored procedures. It replaces no procedure and rewrites no data |
+| C4. Versioned orchestration | `1.0.86` is a new version. `1.0.85` is frozen as `orchestration_1_0_85/`, beside the frozen `1.0.83` and `1.0.84`, and every version down to the floor, `1.0.47`, stays registered. `1.0.86` changes nothing for a session unless its input carries an owner tag or the fast busy flag. Orchestration code never reads `process.env`. A release that contains it changes the default orchestration version, so every deployment that takes that release upgrades by stopping every worker, deploying, then starting, as the 0.8.11 and 0.8.12 release notes ask (`CHANGELOG.md`) |
 | C5. Platform guards | Windows code paths run only under `process.platform === "win32"`, and Linux behavior is unchanged. The required Windows unit-test job covers them |
 | C6. Cloud-neutral core | No new cloud SDK or cloud logic in core, as `.github/copilot-instructions.md` requires. New Azure code lives under `deploy/providers/azure`, including new deploy steps in `deploy/providers/azure/deploy-steps/`. Modules with npm dependencies have their own `package.json` and lockfile. `deploy.mjs` only calls the new steps, behind `WIN_WORKERS_ENABLED` or `AZURE_POLICY_RESTRICTED`. The Azure-specific scripts already under `deploy/scripts/`, such as `render-params.mjs`, `deploy-bicep.mjs` and `compose-env.mjs`, and `Setup-PortalAuth.ps1`, get only the wiring that calls code under `deploy/providers/azure`, so no new logic joins the existing exceptions (`.github/copilot-instructions.md:38-41`; open question 4). Core's existing Azure Blob code isn't extended |
 | C7. Deploy opt-in | New Bicep and deploy paths run only with `WIN_WORKERS_ENABLED=true` or `AZURE_POLICY_RESTRICTED=true`. With both off, a redeploy changes nothing: tests check that rendered parameters and manifests match today's, and an ARM what-if shows nothing beyond what changes on every run today |
@@ -553,10 +556,12 @@ tag:
   untagged, capability-tagged, capacity or other owner's activity. A five-tag `defaultAnd` worker (the three capability
   tags of that release, an owner tag and the capacity tag) ran untagged, capability, own-owner and capacity work, never
   another owner's. With the fourth capability tag that combination no longer fits, so this design never declares an owner
-  tag and the capacity tag together, and the proposed tests rerun the routing cases with the four-tag default.
+  tag and the capacity tag together, and the proposed tests rerun the routing cases with the four-tag default. Since
+  v0.8.12's fifth capability tag, the default filter alone holds five tags and an owner tag or the capacity tag makes six;
+  the local tests run the routing cases with those six-tag filters.
 - **`MAX_WORKER_TAGS` isn't enforced.** In duroxide-node 0.2.4, six-tag filters of both kinds started and claimed all six
-  tags. So PilotSwarm's own unit test that keeps a filter at five tags or fewer is the guard. This may be worth a duroxide
-  issue.
+  tags. So PilotSwarm's own unit test, which keeps the default filter at five tags and every filter at six or fewer, is the
+  guard, and the six-tag filters rely on this. This may be worth a duroxide issue.
 - **Lock lapse and handover.** PilotSwarm sets no session lock timeout unless `PILOTSWARM_SESSION_LOCK_TIMEOUT_MS` is set
   (`worker.ts:119-120`). The default lock we saw lasted 30 seconds and renewed every 25, so a stopped holder's session moved
   5 to 30 seconds later: about 30 seconds after a hard kill, and about 13 after a graceful shutdown. A worker that restarted
@@ -621,8 +626,8 @@ Slices without a dependency can land in any order.
 | U14 | System session tool limit, with no Workflow tools | — |
 | U15 | Fine-grained token gate | — |
 | U16 | External personal secrets: the store contract, catalog references, per-turn resolution and redaction | U12, U15 |
-| U17 | Dispatcher delegation: migration `0090`, `onBehalfOfOwner`, read-only sharing of the sessions it creates and the delegated end of work | U29 |
-| U18 | Orchestration `1.0.84`: owner tags for the sessions created on behalf of a user, capacity requests, the fast busy policy, the capped owner-tagged destroy and set-workspace check, and Workflows and new root sessions refused in owner-routed trees | U17 |
+| U17 | Dispatcher delegation: migration `0095`, `onBehalfOfOwner`, read-only sharing of the sessions it creates and the delegated end of work | U29 |
+| U18 | Orchestration `1.0.86`: owner tags for the sessions created on behalf of a user, capacity requests, the fast busy policy, the capped owner-tagged destroy and set-workspace check, and Workflows and new root sessions refused in owner-routed trees | U17 |
 | U19 | Dev Drive workspace extension | U5, U16, U18, U28 |
 | U20 | Windows image and worker-service scripts | U19 |
 | U21 | Disk pool controller and credential broker | U16, U18 |
@@ -648,13 +653,14 @@ U28.
 **Numbers stay provisional until U17 and U18 merge.** A migration's version and an orchestration's version end up in durable
 state. The migrator skips any version it has already recorded (`pg-migrator.ts:122-128`), and a deployed orchestration
 version can't change (`docs/architecture/system.md:928`). Holding a number for us would block or reorder your own changes.
-So we use the next free numbers, `0090` and `1.0.84` today, only on a test deployment whose data we can throw away. If
-`main` takes a number first, as v0.8.11's Workflows did with `0088`, `0089` and `1.0.83` while we drafted this, the slice
-takes the next free one and we recreate that data. We run them nowhere else until both are merged.
+So we use the next free numbers, `0095` and `1.0.86` today, only on a test deployment whose data we can throw away. If
+`main` takes a number first, as v0.8.11's Workflows did with `0088`, `0089` and `1.0.83` while we drafted this, and
+v0.8.12 did with `0090` to `0094`, `1.0.84` and `1.0.85` after our first numbers, `0090` and `1.0.84`, the slice takes
+the next free one and we recreate that data. We run them nowhere else until both are merged.
 
 **Early review: U5, U17, U18 and U29.** They need no Azure work, so they can go up as soon as their local tests pass. U18
 carries the orchestration version and the core routing design, where your input matters most, and its TLA+ updates. U17
-carries migration `0090` and changes who may create, share and end sessions. U29 is small and comes first, because U17
+carries migration `0095` and changes who may create, share and end sessions. U29 is small and comes first, because U17
 needs it: the delegated end of work may pass `force`. U18 then needs U17, whose delegated creation it tags. U5 is small
 too, and the Dev Drive extension and the admission hook need it.
 
@@ -704,7 +710,7 @@ With the message scope on, no session message crosses owners. The manual will st
 ## Open questions
 
 1. Is this design acceptable in shape, and are there settings or hooks you'd rather see differently?
-2. Will you review U5, U17, U18 and U29 early, so that `0090` and `1.0.84` become final on `main`?
+2. Will you review U5, U17, U18 and U29 early, so that `0095` and `1.0.86` become final on `main`?
 3. Will you create `feature/windows-workers` and grant write access, or do you prefer a fork?
 4. Should the new Azure deploy steps plug into the deployment-provider contract that the provider-boundary audit calls for
    (finding 7, #64), or stay as steps that `deploy.mjs` calls behind its settings until that contract exists?
@@ -715,8 +721,9 @@ With the message scope on, no session message crosses owners. The manual will st
 7. U26 and U27 propose new defaults for every deployment. Do you want them, or should both stay opt-in?
 8. We plan to ask the Copilot SDK owners to accept `--secret-env-vars` in the bundled runtime, and for one switch that turns
    off every hook, so PilotSwarm could return to the bundled runtime. Is there a better route?
-9. With four capability tags in every default filter, an owner tag takes the last of duroxide's five. Is that the right use
-   of it, and how should it fit with the worker registry's placement tags?
+9. With five capability tags in every default filter since tool composition, an owner tag or the capacity tag is a sixth,
+   one past duroxide's `MAX_WORKER_TAGS`, which duroxide-node 0.2.4 doesn't enforce. Should duroxide raise its limit, or
+   should owner routing use fewer tags, and how should it fit with the worker registry's placement tags?
 10. For Workflows in an owner-routed tree, is refusing them until U34 acceptable, and is U34's whole-tree rule (a new
     Workflow controller version that carries the owner tag to agent steps and scripts) the direction you'd take?
 11. Only sessions created on behalf of a user run on the Windows pool; sessions that people start in the Portal stay on
