@@ -27,7 +27,8 @@ state. So the owner-routing models (`CapacityHold`, `OwnerCapped`, `OwnerTagCarr
 `From = "83"` describe 1.0.86 and the hand-off of a 1.0.85 (or 1.0.84) session into it: in them, read 1.0.84 as 1.0.86
 and 1.0.83 as 1.0.85. One addition is not modelled: the spawn's tool capture (`captureSpawnToolsV1`, a session-scoped
 activity of tool composition) carries an owner-tagged session's owner tag, as its turns do, and like a turn it is not
-raced against a cap.
+raced against a cap. The latest-1.0.86 batch (section 4) binds the owner-routing models to `28197180`
+(`CORRESPONDENCE-latest-1086.md`) and ran every case of the folder again: 236 of 236 as expected.
 
 ## Upstream status at 0.8.12: 1.0.85 is the latest version (Release C); 1.0.84 is frozen
 
@@ -61,8 +62,8 @@ continue-as-new. Models and batches below name the paths of the commit they were
 |---|---|
 | Code the models are bound to | `198ad79a32084cd06d23b00083fa136a05709b3f` (PilotSwarm 0.8.6, durable-session orchestration 1.0.82) |
 | Same code at | main `7f81d217` and `e76a6133`: `packages/sdk/src/orchestration/` (the registered latest, 1.0.82) is byte-identical |
-| Last full TLC run | 2026-11-12: every case of the folder (section 4, latest-1.0.84 batch, bound to `34e73cb1`); before that 2026-11-11 (the same batch, before the two commits) and 2026-10-27 |
-| Result | 2026-11-12: 236 cases, 236 as expected (102 PASS, 134 expected violations), 0 PARTIAL, 0 VOID. 2026-10-27: 38 cases: 21 PASS, 17 FAIL, 0 VOID, 0 not run |
+| Last full TLC run | 2026-11-16: every case of the folder (section 4, latest-1.0.86 batch, bound to `28197180`); before that 2026-11-12 (the latest-1.0.84 batch, bound to `34e73cb1`), 2026-11-11 (the same batch, before the two commits) and 2026-10-27 |
+| Result | 2026-11-16: 236 cases, 236 as expected (102 PASS, 134 expected violations), 0 PARTIAL, 0 VOID. 2026-11-12: the same. 2026-10-27: 38 cases: 21 PASS, 17 FAIL, 0 VOID, 0 not run |
 | Batch so2 (2026-11-08, `e76a6133`) | 16 cases of `RehydrationNotice` and `SnapshotWarmDrop`: 16 of 16 as expected, one code finding (`rn.late-cancel`) |
 | Batch so3 (2026-11-08, `e76a6133`) | 35 cases of `OwnedRetry`, `IntakeDrain`, `WorkerShutdown` and the late-cancel fix: 36 of 36 as expected in the run (with `rn.late-cancel` again), two design limits, no new code finding |
 | Batch ws2 (2026-11-08, `bb162ed8`) | `WorkerShutdown` with steps started after the deadline and overlapping (final review): 11 of 11 as expected; the overlap breaks no invariant |
@@ -70,6 +71,7 @@ continue-as-new. Models and batches below name the paths of the commit they were
 | Latest-1.0.83 batch (2026-11-08, `5d8eaa46` to `4ffbf909`) | 50 cases of `VersionHandoff`, `RollingDeploy`, `DigestWindow`, `MergeRule`, `ForcedRefresh` and `IntakeDrain` with 1.0.83 as the latest version: every case as expected across seven runs (TLC 2.19, two workers, an isolated machine); no new code finding open |
 | Batches so4b, so5, so5b (2026-11-08) | The late-cancel give-back fixes in 1.0.83 (`CarriedGiveBack`): so4b found three gaps, so5 and so5b check their fixes; so5b, 48 cases at `bb162ed8` (`packages/sdk/src` identical at `8aaf5435` on v0.8.10): 48 of 48 as expected |
 | Latest-1.0.84 batch (2026-11-12, `34e73cb1`) | 52 cases of `CapacityHold`, `OwnerCapped`, `OwnerTagCarry` and `VersionHandoff` (1.0.83 into 1.0.84): 52 of 52 as expected, and the folder's other 184 cases as before; three findings in the code before `34e73cb1` (two at `76e4af8f`, one at `e94c62e4`), all fixed at `34e73cb1`; no finding open |
+| Latest-1.0.86 batch (2026-11-16, `28197180`) | No new case: the folder's 236 cases with owner routing as 1.0.86 on 1.0.85 (`CORRESPONDENCE-latest-1086.md`): 236 of 236 as expected; no finding |
 
 1.0.84 (`src/orchestration/`) is the latest version: new sessions start at it, and every continue-as-new targets it.
 1.0.83 (the durable Workflow intake) is frozen in `orchestration_1_0_83/`, and 1.0.82
@@ -450,6 +452,26 @@ Not covered: the coordination host's backstop (worker side), the client's taggin
 deny publishes it again after the response at `34e73cb1`; no model tracks its `responseVersion` or `response.latest`),
 duroxide itself (the drop of a queued race loser is the proposal's local observation), Workflows in owner-routed trees
 (refused), and error retries of tagged sessions (`OwnedRetry` covers them for every session).
+
+### Latest-1.0.86 batch (2026-11-16): owner routing on 1.0.85 (bound to `28197180`)
+
+The merge of v0.8.12 moved this line's owner routing from 1.0.84 on 1.0.83 to 1.0.86 on 1.0.85 (status, above). No
+module, case or settings template changed. `CORRESPONDENCE-latest-1086.md` binds the latest-1.0.84 batch to `28197180`:
+the owner-routing code is the code bound at `34e73cb1` but for comments and the proxy contract, 1.0.85 carries what
+1.0.83 carries, and v0.8.12's spawn adds the tool capture, which carries the owner tag and is not modelled.
+
+Run full3, TLC 2.19 (tla2tools v1.7.4), Microsoft Build of OpenJDK 21.0.13, two workers, 300 s per case, on Windows
+with Git for Windows' bash and an LF copy of this folder; `check-packet.sh` printed `OK: 236 cases; SHA256SUMS OK`
+first:
+
+| Run | Cases | Result |
+|---|---|---|
+| full3 | all 236 cases of the folder, bound to `28197180` | 236 of 236 as expected (102 PASS, 125 expected safety violations, 9 expected liveness violations), no PARTIAL, no VOID; SANY accepted all 22 modules; 626,134 distinct states in all, 11.4 minutes |
+
+Every expected safety violation is of one of its case's invariants, and every expected liveness violation is of a
+temporal property. No module, case or settings template changed since full2 (618,447 distinct states in all): the 102
+PASS cases search their whole state space, 542,616 distinct states, whatever the number of workers; the 134 cases that
+stop at a violation found 83,518, and with two workers such a case can stop at another state.
 
 ## 5. How to run
 
