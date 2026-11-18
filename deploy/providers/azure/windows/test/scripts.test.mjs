@@ -222,6 +222,306 @@ test("the seed manifest: the example is valid, also on a machine without its dri
     }
 });
 
+test("the seed manifest's submodule lists, folders, beforeSnapshot steps and notes are checked", { skip: noPwsh || notWindows }, () => {
+    const home = tempDir("ps-win-seedfields-");
+    try {
+        const repo = (fields = {}) => ({ name: "app", url: "https://example.test/app.git", branch: "main", ...fields });
+        const full = {
+            schemaVersion: 1,
+            notes: "free text",
+            repositories: [
+                repo({ submodules: [{ path: "libs\\core", branch: "release/2", notes: "its own branch" }, { path: "tools/" }], notes: "two submodules" }),
+                { name: "plain", url: "https://example.test/plain.git", branch: "main", submodules: [] },
+            ],
+            modifyFolders: ["Q:\\Repos\\plain"],
+            folders: [
+                { path: "Q:\\Repos\\app", access: "modify" },
+                { path: "Q:\\.cache\\http", access: "modify", notes: "a package manager's HTTP cache" },
+                { path: "Q:\\tools", access: "read" },
+            ],
+            packageCaches: [{ name: "fill", workingDirectory: "Q:\\Repos\\app", command: ["fill.exe"], notes: "fills the cache" }],
+            beforeSnapshot: [{ emptyFolder: "Q:\\.cache\\http\\", reason: "no drive needs the HTTP cache", notes: "kept free text" }],
+        };
+        const withFolders = (folders) => ({ ...full, folders });
+        const withSteps = (beforeSnapshot) => ({ ...full, beforeSnapshot });
+        const variants = {
+            subPathParent: { ...full, repositories: [repo({ submodules: [{ path: "../other" }] }), full.repositories[1]] },
+            subPathRooted: { ...full, repositories: [repo({ submodules: [{ path: "C:\\other" }] }), full.repositories[1]] },
+            subPathGit: { ...full, repositories: [repo({ submodules: [{ path: "x/.git" }] }), full.repositories[1]] },
+            subPathMissing: { ...full, repositories: [repo({ submodules: [{ branch: "main" }] }), full.repositories[1]] },
+            subTwice: { ...full, repositories: [repo({ submodules: [{ path: "lib" }, { path: "LIB/" }] }), full.repositories[1]] },
+            subBranch: { ...full, repositories: [repo({ submodules: [{ path: "lib", branch: "../main" }] }), full.repositories[1]] },
+            subUnknown: { ...full, repositories: [repo({ submodules: [{ name: "lib" }] }), full.repositories[1]] },
+            subNotObject: { ...full, repositories: [repo({ submodules: ["lib"] }), full.repositories[1]] },
+            repoNotes: { ...full, repositories: [repo({ notes: 7 }), full.repositories[1]] },
+            folderAccess: withFolders([...full.folders, { path: "Q:\\x", access: "write" }]),
+            folderNoAccess: withFolders([...full.folders, { path: "Q:\\x" }]),
+            folderUnknown: withFolders([...full.folders, { path: "Q:\\x", access: "read", create: true }]),
+            folderTwice: withFolders([...full.folders, { path: "Q:\\tools\\", access: "read" }]),
+            folderAlsoModify: withFolders([...full.folders, { path: "Q:\\Repos\\plain", access: "modify" }]),
+            folderOffDrive: withFolders([...full.folders, { path: "D:\\cache", access: "modify" }]),
+            folderRoot: withFolders([...full.folders, { path: "Q:\\Repos", access: "modify" }]),
+            readInModify: withFolders([...full.folders, { path: "Q:\\.cache\\http\\v3", access: "read" }]),
+            notCovered: withFolders(full.folders.filter((folder) => folder.path !== "Q:\\Repos\\app")),
+            stepNoReason: withSteps([{ emptyFolder: "Q:\\.cache\\http" }]),
+            stepBlankReason: withSteps([{ emptyFolder: "Q:\\.cache\\http", reason: " " }]),
+            stepUnlisted: withSteps([{ emptyFolder: "Q:\\.cache\\other", reason: "x" }]),
+            stepRepository: withSteps([{ emptyFolder: "Q:\\Repos\\app", reason: "x" }]),
+            stepInsideRepository: { ...withFolders([...full.folders, { path: "Q:\\Repos\\app\\obj", access: "modify" }]), beforeSnapshot: [{ emptyFolder: "Q:\\Repos\\app\\obj", reason: "x" }] },
+            stepAroundRepository: { ...withFolders([...full.folders, { path: "Q:\\Repos", access: "read" }]), beforeSnapshot: [{ emptyFolder: "Q:\\Repos", reason: "x" }] },
+            stepTwice: withSteps([...full.beforeSnapshot, { emptyFolder: "Q:\\.cache\\http", reason: "again" }]),
+            stepUnknown: withSteps([{ emptyFolder: "Q:\\.cache\\http", reason: "x", recursive: true }]),
+            cacheNotes: { ...full, packageCaches: [{ ...full.packageCaches[0], notes: ["not text"] }] },
+        };
+        // The same manifest, but every repository with submodules: true, as an older manifest has it.
+        const legacy = { ...full, repositories: full.repositories.map((entry) => ({ ...entry, submodules: true })) };
+        for (const [name, value] of Object.entries({ full, legacy, ...variants })) fs.writeFileSync(path.join(home, `${name}.json`), JSON.stringify(value));
+        const driver = runDriver(home, "fields.ps1", [
+            `. ${psQuote(scriptPath("Seed-WorkerReposDisk.ps1"))}`,
+            "$describe = { param($m) [ordered]@{",
+            "  repos = @($m.Repositories | ForEach-Object { [ordered]@{ name = $_.Name; all = $_.Submodules; listed = @($_.SubmoduleList | ForEach-Object { [ordered]@{ path = $_.Path; branch = $_.Branch; folder = $_.Folder } }) } })",
+            "  modify = @($m.ModifyFolders); read = @($m.ReadFolders); caches = @($m.PackageCaches | ForEach-Object { $_.Name })",
+            "  beforeSnapshot = @($m.BeforeSnapshot | ForEach-Object { [ordered]@{ emptyFolder = $_.EmptyFolder; reason = $_.Reason } }) } }",
+            `$full = & $describe (Test-SeedManifest (Read-JsonFile -Path (Join-Path ${psQuote(home)} 'full.json')))`,
+            `$legacy = & $describe (Test-SeedManifest (Read-JsonFile -Path (Join-Path ${psQuote(home)} 'legacy.json')))`,
+            "$refused = [ordered]@{}",
+            `foreach ($name in @(${Object.keys(variants).map(psQuote).join(", ")})) { try { [void](Test-SeedManifest (Read-JsonFile -Path (Join-Path ${psQuote(home)} ($name + '.json')))); $refused[$name] = 'accepted' } catch { $refused[$name] = $_.Exception.Message } }`,
+            "ConvertTo-Json -Compress -Depth 8 -InputObject ([ordered]@{ full = $full; legacy = $legacy; refused = $refused })",
+        ].join("\n"));
+        assert.equal(driver.status, 0, driver.stderr + driver.stdout);
+        assert.deepEqual(driver.json.full.repos, [
+            { name: "app", all: false, listed: [
+                { path: "libs/core", branch: "release/2", folder: "Q:\\Repos\\app\\libs\\core" },
+                { path: "tools", branch: null, folder: "Q:\\Repos\\app\\tools" },
+            ] },
+            { name: "plain", all: false, listed: [] },
+        ]);
+        assert.deepEqual(driver.json.full.modify, ["Q:\\Repos\\plain", "Q:\\Repos\\app", "Q:\\.cache\\http"]);
+        assert.deepEqual(driver.json.full.read, ["Q:\\tools"]);
+        assert.deepEqual(driver.json.full.caches, ["fill"]);
+        assert.deepEqual(driver.json.full.beforeSnapshot, [{ emptyFolder: "Q:\\.cache\\http", reason: "no drive needs the HTTP cache" }]);
+        assert.deepEqual(driver.json.legacy.repos.map((entry) => [entry.name, entry.all, entry.listed.length]), [["app", true, 0], ["plain", true, 0]]);
+        const refused = driver.json.refused;
+        for (const name of ["subPathParent", "subPathRooted", "subPathGit", "subPathMissing"]) assert.match(refused[name], /a submodule needs its relative path inside the repository/, name);
+        assert.match(refused.subTwice, /the submodule LIB is listed twice/);
+        assert.match(refused.subBranch, /the submodule lib needs a branch name/);
+        assert.match(refused.subUnknown, /a submodule has an unknown field name/);
+        assert.match(refused.subNotObject, /each submodules entry is an object with a path/);
+        assert.match(refused.repoNotes, /repository app: notes must be a string/);
+        assert.match(refused.folderAccess, /folder Q:\\x: access is "modify" or "read"/);
+        assert.match(refused.folderNoAccess, /access is "modify" or "read"/);
+        assert.match(refused.folderUnknown, /a folder has an unknown field create/);
+        assert.match(refused.folderTwice, /is listed twice/);
+        assert.match(refused.folderAlsoModify, /is listed twice/);
+        assert.match(refused.folderOffDrive, /must be a folder on the drive of reposRoot/);
+        assert.match(refused.folderRoot, /reposRoot itself stays read-only/);
+        assert.match(refused.readInModify, /the read folder Q:\\\.cache\\http\\v3 is inside a modify folder/);
+        assert.match(refused.notCovered, /no modify folder covers Q:\\Repos\\app/);
+        assert.match(refused.stepNoReason, /needs a reason/);
+        assert.match(refused.stepBlankReason, /needs a reason/);
+        assert.match(refused.stepUnlisted, /empties only folders the manifest lists/);
+        assert.match(refused.stepRepository, /would delete files of the repository app/);
+        assert.match(refused.stepInsideRepository, /would delete files of the repository app/);
+        assert.match(refused.stepAroundRepository, /would delete files of the repository app/);
+        assert.match(refused.stepTwice, /empties Q:\\\.cache\\http twice/);
+        assert.match(refused.stepUnknown, /a beforeSnapshot step has an unknown field recursive/);
+        assert.match(refused.cacheNotes, /package cache fill: notes must be a string/);
+    } finally {
+        fs.rmSync(home, { recursive: true, force: true });
+    }
+});
+
+/**
+ * A repository with two submodules, lib and other, and a docs folder. After
+ * the repository pinned lib, lib got a release branch the repository does not
+ * pin.
+ */
+function repoWithTwoSubmodules(home) {
+    const env = gitTestEnv(home);
+    const git = (cwd, ...args) => execFileSync("git", args, { cwd, env, encoding: "utf8", windowsHide: true, stdio: ["ignore", "pipe", "pipe"] }).trim();
+    const remote = (name, file) => {
+        const bare = path.join(home, `${name}.git`);
+        const work = path.join(home, `${name}-work`);
+        git(home, "init", "-q", "--bare", bare);
+        git(home, "init", "-q", "-b", "main", work);
+        fs.writeFileSync(path.join(work, file), `${name} one\n`);
+        git(work, "add", "-A");
+        git(work, "commit", "-q", "-m", `${name} one`);
+        git(work, "push", "-q", bare, "main");
+        return { bare, work };
+    };
+    const lib = remote("lib", "lib.txt");
+    const other = remote("other", "other.txt");
+    const app = remote("app", "a.txt");
+    git(app.work, "submodule", "add", "-q", lib.bare, "lib");
+    git(app.work, "submodule", "add", "-q", other.bare, "other");
+    fs.mkdirSync(path.join(app.work, "docs"));
+    fs.writeFileSync(path.join(app.work, "docs", "readme.txt"), "docs\n");
+    git(app.work, "add", "-A");
+    git(app.work, "commit", "-q", "-m", "two submodules and docs");
+    git(app.work, "push", "-q", app.bare, "main");
+    const pinned = git(lib.work, "rev-parse", "HEAD");
+    const release = () => {
+        fs.appendFileSync(path.join(lib.work, "lib.txt"), "more\n");
+        git(lib.work, "commit", "-q", "-am", "lib on release");
+        git(lib.work, "push", "-q", lib.bare, "HEAD:release");
+        return git(lib.work, "rev-parse", "HEAD");
+    };
+    return { env, git, app, pinned, release };
+}
+
+// A package cache command: it fills an HTTP cache and records the Git settings it was given.
+const FILL_CACHE = String.raw`
+const fs = require("node:fs");
+const path = require("node:path");
+const target = process.env.FILL_TARGET;
+fs.mkdirSync(path.join(target, "v3"), { recursive: true });
+fs.writeFileSync(path.join(target, "v3", "index.json"), "{}");
+fs.writeFileSync(path.join(target, "..", "fill.json"), JSON.stringify({ prompt: process.env.GIT_TERMINAL_PROMPT ?? null, gcm: process.env.GCM_INTERACTIVE ?? null }));
+`;
+
+test("the seed checks out only the listed submodules, at their own branch, empties the beforeSnapshot folders, and -Verify checks both", { skip: noRunCommandShell }, () => {
+    const home = tempDir("ps-win-seedlist-");
+    try {
+        const { env, git, app, pinned, release } = repoWithTwoSubmodules(home);
+        // Without prompts of its own, so the package cache command shows what the seed gives it.
+        const seedEnv = Object.fromEntries(Object.entries(env).filter(([name]) => !/^(GIT_TERMINAL_PROMPT|GCM_INTERACTIVE)$/i.test(name)));
+        let tip = release();
+        assert.notEqual(tip, pinned);
+        const drive = path.join(home, "Drive");
+        const reposRoot = path.join(drive, "Repos");
+        const clone = path.join(reposRoot, "app");
+        const http = path.join(drive, "cache", "http");
+        const tools = path.join(drive, "tools");
+        const fill = path.join(home, "fill.cjs");
+        fs.writeFileSync(fill, FILL_CACHE);
+        const manifest = (submodules) => ({
+            schemaVersion: 1,
+            reposRoot,
+            repositories: [{ name: "app", url: `file:///${app.bare.replace(/\\/g, "/")}`, branch: "main", submodules, notes: "only lib" }],
+            folders: [{ path: clone, access: "modify" }, { path: http, access: "modify" }, { path: tools, access: "read" }],
+            packageCaches: [{ name: "fill", workingDirectory: clone, command: [process.execPath, fill], env: { FILL_TARGET: http } }],
+            beforeSnapshot: [{ emptyFolder: http, reason: "an HTTP cache no drive needs" }],
+        });
+        const manifestPath = path.join(home, "seed-manifest.json");
+        fs.writeFileSync(manifestPath, JSON.stringify(manifest([{ path: "lib", branch: "release" }])));
+        fs.writeFileSync(path.join(home, "docs-manifest.json"), JSON.stringify(manifest([{ path: "docs", branch: "release" }])));
+        // The seed's steps in the Windows PowerShell 5.1 of the refresh's Run Command. A test cannot install the worker's
+        // service, so LOCAL SERVICE, which icacls can name, stands in for its account, and the owners stay as they are.
+        const seed = (mode, lines) => runDriver(home, `${mode}.ps1`, [
+            `. ${psQuote(scriptPath("Seed-WorkerReposDisk.ps1"))} -WorkerEnvFile ${psQuote(path.join(home, "none.env"))}`,
+            "function Assert-WorkerServiceSid { 'S-1-5-19' }",
+            "function Get-WorkerServiceSid { 'S-1-5-19' }",
+            "function Set-RepositoryOwners { param([string]$Path) }",
+            `$manifest = Test-SeedManifest (Read-JsonFile -Path ${psQuote(manifestPath)})`,
+            "Initialize-GitEnvironment $manifest",
+            ...lines,
+            "$checks = Test-SeedDrive -Manifest $manifest",
+            "Remove-Item -LiteralPath $script:EmptyHooks -Recurse -Force",
+            "ConvertTo-Json -Compress -Depth 5 -InputObject $checks",
+        ].join("\n"), { env: seedEnv, shell: windowsPowerShell() });
+        const run = (mode) => seed(mode, [`Invoke-SeedDrive -Manifest $manifest -ManifestSha256 (Get-Sha256Hex ${psQuote(manifestPath)}) -Mode '${mode}'`]);
+        const libDir = path.join(clone, "lib");
+        const passing = (checks) => {
+            for (const name of ["refs", "fsck", "hooks", "cleanRecord", "emptied"]) assert.deepEqual(checks[name], [], `${name}: ${JSON.stringify(checks[name])}`);
+            assert.ok(checks.owner.length > 0, "the owners stayed the test's");
+            // Only the roots fail outside a real drive: the folders have their grants, and the read folder is read-only.
+            const roots = [`${path.parse(reposRoot).root}: `, `${reposRoot}: `];
+            assert.ok(checks.acl.length > 0 && checks.acl.every((line) => roots.some((root) => line.startsWith(root))), JSON.stringify(checks.acl));
+        };
+
+        const seeded = run("seed");
+        assert.equal(seeded.status, 0, seeded.stderr + seeded.stdout);
+        passing(seeded.json);
+        assert.equal(git(libDir, "symbolic-ref", "--short", "HEAD"), "release");
+        assert.equal(git(libDir, "rev-parse", "HEAD"), tip, "lib is at its own branch, not at the commit app pins");
+        assert.equal(fs.existsSync(path.join(clone, "other", ".git")), false, "an unlisted submodule is not checked out");
+        assert.deepEqual(fs.readdirSync(http), [], "the HTTP cache was emptied, its folder kept");
+        assert.ok(fs.statSync(tools).isDirectory(), "the read folder exists");
+        assert.deepEqual(JSON.parse(fs.readFileSync(path.join(drive, "cache", "fill.json"), "utf8")), { prompt: "0", gcm: "never" });
+        const state = JSON.parse(fs.readFileSync(path.join(drive, ".pilotswarm", "seed-state.json"), "utf8"));
+        assert.equal(state.remoteRefs["app/lib"]["refs/remotes/origin/release"], tip);
+
+        // The refresh moves lib to the new tip of its branch and empties the cache again.
+        tip = release();
+        const refreshed = run("refresh");
+        assert.equal(refreshed.status, 0, refreshed.stderr + refreshed.stdout);
+        passing(refreshed.json);
+        assert.equal(git(libDir, "rev-parse", "HEAD"), tip);
+        assert.deepEqual(fs.readdirSync(http), []);
+
+        // -Verify sees a file left in the cache and lib moved off the fetched commit.
+        fs.writeFileSync(path.join(http, "left.bin"), "x");
+        git(libDir, "reset", "-q", "--hard", "HEAD~1");
+        const drifted = seed("verify", []);
+        assert.equal(drifted.status, 0, drifted.stderr + drifted.stdout);
+        assert.deepEqual(drifted.json.emptied, [`${http}: not empty`]);
+        assert.deepEqual(drifted.json.refs, ["app/lib: release is not at the fetched commit"]);
+
+        // A listed folder that is not a submodule is refused before any Git command runs in it.
+        const notSubmodule = runDriver(home, "docs.ps1", [
+            `. ${psQuote(scriptPath("Seed-WorkerReposDisk.ps1"))} -WorkerEnvFile ${psQuote(path.join(home, "none.env"))}`,
+            `$manifest = Test-SeedManifest (Read-JsonFile -Path ${psQuote(path.join(home, "docs-manifest.json"))})`,
+            "Initialize-GitEnvironment $manifest",
+            "try { Update-SeedRepository -Repository $manifest.Repositories[0] -ReposRoot $manifest.ReposRoot; $answer = 'accepted' } catch { $answer = $_.Exception.Message }",
+            "Remove-Item -LiteralPath $script:EmptyHooks -Recurse -Force",
+            "ConvertTo-Json -Compress -InputObject @{ answer = $answer }",
+        ].join("\n"), { env: seedEnv, shell: windowsPowerShell() });
+        assert.equal(notSubmodule.status, 0, notSubmodule.stderr + notSubmodule.stdout);
+        assert.equal(notSubmodule.json.answer, "docs is not a submodule of app");
+        assert.equal(git(clone, "symbolic-ref", "--short", "HEAD"), "main", "app stays on its branch");
+    } finally {
+        fs.rmSync(home, { recursive: true, force: true });
+    }
+});
+
+test("the drive's root gives access only to SYSTEM, Administrators and the worker, a mount leaves a right list alone, and -Verify checks it", { skip: noRunCommandShell }, () => {
+    const home = tempDir("ps-win-rootacl-");
+    const root = path.join(home, "Q");
+    try {
+        fs.mkdirSync(path.join(root, "Repos"), { recursive: true });
+        // What a new volume and the earlier treatment leave: Everyone, Users and Authenticated Users read the drive.
+        execFileSync("icacls", [root, "/grant", "*S-1-1-0:(OI)(CI)(RX)", "*S-1-5-32-545:(OI)(CI)(RX)", "*S-1-5-11:(OI)(CI)(RX)"], { windowsHide: true });
+        execFileSync("icacls", [path.join(root, "Repos"), "/grant", "*S-1-5-32-545:(OI)(CI)(RX)"], { windowsHide: true });
+        // The test's own account stands in for the worker's, so it can still read what it locked.
+        const driver = runDriver(home, "root-acl.ps1", [
+            `. ${psQuote(scriptPath("Initialize-WinWorkerDisk.ps1"))}`,
+            `. ${psQuote(scriptPath("Seed-WorkerReposDisk.ps1"))}`,
+            "$me = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value",
+            "function Get-WorkerServiceSid { $script:me }",
+            "$script:calls = 0",
+            "function Invoke-Icacls { param([string]$Path, [string[]]$Arguments) $script:calls++; PilotSwarm.WinWorker\\Invoke-Icacls -Path $Path -Arguments $Arguments }",
+            `$root = ${psQuote(root)}`,
+            "$before = @(Get-RootAclFailures -Path $root)",
+            "Set-DevDriveRootAcl -Root $root",
+            "$first = $script:calls",
+            "Set-DevDriveRootAcl -Root $root",
+            "$rules = @((Get-Acl -LiteralPath $root).GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) | ForEach-Object { $_.IdentityReference.Value + ' ' + $_.AccessControlType + ' ' + $_.IsInherited + ' ' + $_.InheritanceFlags })",
+            "$reposAcl = Get-Acl -LiteralPath (Join-Path $root 'Repos')",
+            "ConvertTo-Json -Compress -Depth 4 -InputObject ([ordered]@{ me = $me; before = $before; first = $first; second = $script:calls - $first; locked = Test-DevDriveRootAcl -Path $root; rules = $rules",
+            "  reposExplicit = @($reposAcl.GetAccessRules($true, $false, [System.Security.Principal.SecurityIdentifier])).Count; reposProtected = $reposAcl.AreAccessRulesProtected",
+            "  after = @(Get-RootAclFailures -Path $root); reposAfter = @(Get-RootAclFailures -Path (Join-Path $root 'Repos')) })",
+        ].join("\n"), { shell: windowsPowerShell() });
+        assert.equal(driver.status, 0, driver.stderr + driver.stdout);
+        const result = driver.json;
+        for (const sid of ["S-1-1-0", "S-1-5-32-545", "S-1-5-11"]) assert.ok(result.before.includes(`${root}: ${sid} has access`), `${sid}: ${JSON.stringify(result.before)}`);
+        assert.ok(result.before.includes(`${root}: the worker may write`), "the stand-in's inherited Full Control");
+        assert.ok(result.first > 0);
+        assert.equal(result.second, 0, "a mount does not rewrite a right list, which would walk the whole drive");
+        assert.equal(result.locked, true);
+        const flags = "ContainerInherit, ObjectInherit";
+        assert.deepEqual([...result.rules].sort(), [`S-1-5-18 Allow False ${flags}`, `S-1-5-32-544 Allow False ${flags}`, `${result.me} Allow False ${flags}`].sort());
+        assert.equal(result.reposExplicit, 0, "the repositories' root keeps only what it inherits");
+        assert.equal(result.reposProtected, false);
+        assert.deepEqual(result.after, []);
+        assert.deepEqual(result.reposAfter, []);
+    } finally {
+        // The test's account owns the folder, so it may give itself access again before the folder goes.
+        spawnSync("icacls", [root, "/reset", "/T", "/C", "/Q"], { windowsHide: true });
+        fs.rmSync(home, { recursive: true, force: true });
+    }
+});
+
 test("the seed starts only where Windows knows the worker's account, which icacls needs", { skip: noRunCommandShell }, () => {
     const home = tempDir("ps-win-account-");
     try {
