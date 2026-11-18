@@ -259,6 +259,18 @@ var monitorAgentExtension = {
   }
 }
 
+// How a VM gets the Standard security type depends on the Compute API version.
+// Below 2025-11-01, a model that names no securityProfile gets it, in a
+// subscription not registered for Trusted Launch as default (the preview
+// feature Microsoft.Compute/TrustedLaunchByDefaultPreview), while an explicit
+// `securityType: 'Standard'` needs the subscription feature
+// Microsoft.Compute/UseStandardSecurityType there. From 2025-11-01, Trusted
+// Launch is the default for the images and sizes that support it, and the
+// model must name `securityType: 'Standard'`, the documented opt-out. Every
+// write to the scale set's model or capacity uses this version: the Windows
+// worker deploy step's PATCH (SCALE_SET_API_VERSION in win-workers.mjs) and the
+// disk controller's capacity PATCH (lib/azure.mjs). Tests keep the model and
+// those versions in step with this one.
 resource scaleSet 'Microsoft.Compute/virtualMachineScaleSets@2024-11-01' = if (deployScaleSet && !scaleSetExists) {
   name: scaleSetName
   location: location
@@ -286,9 +298,6 @@ resource scaleSet 'Microsoft.Compute/virtualMachineScaleSets@2024-11-01' = if (d
       enabled: false
     }
     virtualMachineProfile: {
-      securityProfile: {
-        securityType: 'Standard'
-      }
       userData: userData
       osProfile: {
         computerNamePrefix: 'pswin'

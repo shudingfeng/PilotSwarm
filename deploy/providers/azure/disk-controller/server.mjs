@@ -13,7 +13,7 @@ import { pathToFileURL } from "node:url";
 
 import { COORDINATION_PORT, DISPATCHER_PORT, WORKER_PORT, loadConfig } from "./lib/config.mjs";
 import { createLogger } from "./lib/log.mjs";
-import { createAzure } from "./lib/azure.mjs";
+import { createAzure, scaleSetApiVersionPolicy } from "./lib/azure.mjs";
 import { createBlobStateBackend, createStateStore } from "./lib/state-store.mjs";
 import { createTokenVerifier } from "./lib/auth.mjs";
 import { createController } from "./lib/controller.mjs";
@@ -45,6 +45,7 @@ export async function createAzureClients(config, { importModule = (specifier) =>
     ]);
     const subscriptionId = config.scaleSet.subscriptionId;
     clients.compute = new compute.ComputeManagementClient(credential, subscriptionId);
+    clients.compute.pipeline.addPolicy(scaleSetApiVersionPolicy());
     clients.network = new network.NetworkManagementClient(credential, subscriptionId);
     clients.monitor = new monitor.MonitorClient(credential, subscriptionId);
   }

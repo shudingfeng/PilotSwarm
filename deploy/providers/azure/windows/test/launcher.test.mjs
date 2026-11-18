@@ -9,8 +9,8 @@ import fs from "node:fs";
 import path from "node:path";
 import {
     applyEnv, buildWorkerEnv, checkNodeVersion, checkPersonalSecretsOwnerOnly, clearFolderContents, createAttacherClient, createAzSignIn,
-    decodeUserData, EXPECTED_NODE_VERSION, HEARTBEAT_HANDOVER, LaunchError, LAUNCHER_SETTINGS, parseEnvFile, pinReleasePaths, runLauncher,
-    syncReleaseWithRetry, tokenObjectId, USER_DATA_SETTINGS, waitForActive,
+    CREDENTIAL_ENV_NAMES, decodeUserData, EXPECTED_NODE_VERSION, HEARTBEAT_HANDOVER, isCredentialEnvName, LaunchError, LAUNCHER_SETTINGS, parseEnvFile,
+    pinReleasePaths, runLauncher, syncReleaseWithRetry, tokenObjectId, USER_DATA_SETTINGS, waitForActive,
 } from "../launcher.mjs";
 import { takeOverHeartbeat } from "../../../../../packages/sdk/examples/devdrive-workspaces/heartbeat.mjs";
 import {
@@ -133,6 +133,21 @@ test("extra pairs may not change how sessions' Git, Azure CLI, NuGet or credenti
     // Only a name that starts with a reserved prefix is refused.
     const extraEnv = { EXAMPLE_TOOL_URL: "https://tool.example.test", TOOL_GIT_MIRROR_URL: "https://git.example.test" };
     assert.deepEqual(decodeUserData(userData({ extraEnv })).extraEnv, extraEnv);
+});
+
+test("no credential variable reaches the worker from worker.env or the extra pairs", () => {
+    const credentials = [...CREDENTIAL_ENV_NAMES, "vss_nuget_accesstoken", "GIT_CONFIG_KEY_0", "git_config_value_12", "NuGetPackageSourceCredentials_feed"];
+    for (const name of credentials) {
+        assert.ok(isCredentialEnvName(name), name);
+        assert.throws(() => decodeUserData(userData({ extraEnv: { [name]: "x" } })), /may not set/, name);
+        assert.throws(() => buildWorkerEnv({ workerEnv: parseEnvFile(`${name}=x\n`), userData: decodeUserData(userData()) }), /a credential variable/, name);
+    }
+    for (const name of ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_KEY_X", "NPM_TOKEN_FILE", "TOKEN_URL", "NUGET_PACKAGES", "GIT_TERMINAL_PROMPT"]) {
+        assert.equal(isCredentialEnvName(name), false, name);
+    }
+    const values = buildWorkerEnv({ workerEnv: parseEnvFile("GIT_TERMINAL_PROMPT=0\nGIT_ASKPASS=\n"), userData: decodeUserData(userData()) });
+    assert.equal(values.GIT_TERMINAL_PROMPT, "0");
+    assert.equal(values.GIT_ASKPASS, "", "an empty value is kept, so Git runs no askpass program");
 });
 
 test("the worker's environment: worker.env, then userData, then extra pairs that may not override worker.env", () => {
@@ -318,6 +333,7 @@ function harness(t, {
     env: userEnv = {}, extraEnv, heartbeat = () => ({ ownerOid: null, attached: null }), register = () => ({ status: "active", ownerOid: null }),
     sync = async () => ({ status: 200, body: { ok: true, commitSha: "c0ffee", changed: false } }), offline = async () => ({ ok: true }),
     detach = async () => ({ ok: true }), importWorker, workerEnv = "", oid = WORKER_OID, nodeVersion = EXPECTED_NODE_VERSION, controllerCaCert = CA_PEM,
+    serviceEnv = {},
 } = {}) {
     const root = tempDir("ps-win-launch-");
     t.after(() => {
@@ -330,7 +346,7 @@ function harness(t, {
     const releaseDir = path.join(root, "releases", "0123456789ab-cdef01234567");
     const events = [];
     const counts = { heartbeat: 0, imds: 0 };
-    const state = { env: {}, imported: null, az: null, controllerCreated: false, heartbeat: null };
+    const state = { env: { ...serviceEnv }, imported: null, az: null, controllerCreated: false, heartbeat: null, logs: [] };
     const deps = {
         root,
         env: state.env,
@@ -389,7 +405,7 @@ function harness(t, {
             events.push({ type: "import" });
             if (importWorker) await importWorker(file, state);
         },
-        log: () => {},
+        log: (message) => state.logs.push(message),
     };
     return { deps, events, counts, state, root, releaseDir, run: async () => {
         const outcome = await runLauncher(deps);
@@ -503,6 +519,28 @@ test("LUN 0 is freed before anything that can fail, retried with backoff while t
     assert.equal(h.events.filter((event) => event.type === "offline")[0].body.workerPid, process.pid);
     assert.ok(h.events.slice(start).every((event) => event.type !== "offline"), "a stale answer does not free the drive again");
     assert.equal(h.state.imported, null);
+});
+
+test("the worker and its jobs inherit no credential variable from the service's environment, and the log names no value", async (t) => {
+    const serviceEnv = {
+        GITHUB_TOKEN: "service-secret-1", Vss_Nuget_External_Feed_Endpoints: "service-secret-2", SYSTEM_ACCESSTOKEN: "service-secret-3",
+        git_config_count: "1", GIT_CONFIG_KEY_0: "http.extraheader", GIT_CONFIG_VALUE_0: "service-secret-4",
+        NuGetPackageSourceCredentials_feed: "Username=x;Password=service-secret-5", KEEP_ME: "1", Path: "C:\\Windows\\System32",
+    };
+    const h = harness(t, { serviceEnv, workerEnv: "GIT_TERMINAL_PROMPT=0\nGCM_INTERACTIVE=never\nGIT_ASKPASS=\n" });
+    assert.equal((await h.run()).workerStarted, true);
+    const imported = h.state.imported.env;
+    assert.deepEqual(Object.keys(imported).filter(isCredentialEnvName), []);
+    assert.equal(imported.KEEP_ME, "1");
+    assert.equal(imported.Path, "C:\\Windows\\System32");
+    assert.equal(imported.GIT_TERMINAL_PROMPT, "0");
+    assert.equal(imported.GCM_INTERACTIVE, "never");
+    assert.equal(imported.GIT_ASKPASS, "");
+    assert.equal(h.state.az.options.env, h.state.env, "az signs in with the same, cleaned environment");
+    const removed = h.state.logs.find((line) => /removed 7 credential variable/.test(line));
+    assert.ok(removed, h.state.logs.join("\n"));
+    for (const name of ["GITHUB_TOKEN", "Vss_Nuget_External_Feed_Endpoints", "GIT_CONFIG_VALUE_0", "NuGetPackageSourceCredentials_feed"]) assert.match(removed, new RegExp(name));
+    assert.doesNotMatch(h.state.logs.join("\n"), /service-secret/);
 });
 
 test("the worker waits for register: inactive keeps polling, active imports it with the owner's tag", async (t) => {

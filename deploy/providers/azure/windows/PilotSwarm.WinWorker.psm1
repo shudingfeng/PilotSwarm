@@ -193,6 +193,19 @@ function Get-Sha256Hex {
     }
 }
 
+function Get-Sha512Hex {
+    <# The SHA-512 of a file in lowercase hex, the form NuGet packages are pinned by. #>
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $stream = [System.IO.File]::OpenRead($Path)
+    $sha = [System.Security.Cryptography.SHA512]::Create()
+    try {
+        return (($sha.ComputeHash($stream) | ForEach-Object { $_.ToString('x2') }) -join '')
+    } finally {
+        $sha.Dispose()
+        $stream.Dispose()
+    }
+}
+
 function Get-StringSha256Hex {
     param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Text)
     $sha = [System.Security.Cryptography.SHA256]::Create()
@@ -330,11 +343,34 @@ function Test-IsAdministrator {
     return $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
+function Assert-FileHash {
+    <# Deletes the file and throws unless its SHA-256 or SHA-512 (exactly one is given) is the pinned one. #>
+    param([Parameter(Mandatory = $true)][string]$Path, [string]$Sha256, [string]$Sha512, [Parameter(Mandatory = $true)][string]$Source)
+    if ([bool]$Sha256 -eq [bool]$Sha512) { throw 'pin a file by exactly one of a SHA-256 and a SHA-512' }
+    if ($Sha256 -and $Sha256 -notmatch '^[0-9a-fA-F]{64}$') { throw ('not a SHA-256: ' + $Sha256) }
+    if ($Sha512 -and $Sha512 -notmatch '^[0-9a-fA-F]{128}$') { throw ('not a SHA-512: ' + $Sha512) }
+    if ($Sha256) {
+        $kind = 'SHA-256'
+        $pinned = $Sha256
+        $actual = Get-Sha256Hex $Path
+    } else {
+        $kind = 'SHA-512'
+        $pinned = $Sha512
+        $actual = Get-Sha512Hex $Path
+    }
+    if ($actual -ne $pinned.ToLowerInvariant()) {
+        Remove-Item -LiteralPath $Path -Force
+        throw ($kind + ' mismatch for ' + $Source + ': got ' + $actual + ', pinned ' + $pinned)
+    }
+}
+
 function Save-VerifiedDownload {
-    <# Downloads over https only, then refuses the file unless its SHA-256 is the pinned one. #>
-    param([Parameter(Mandatory = $true)][string]$Uri, [Parameter(Mandatory = $true)][string]$Sha256, [Parameter(Mandatory = $true)][string]$Destination)
+    <# Downloads over https only, then refuses the file unless its SHA-256, or SHA-512, is the pinned one. #>
+    param([Parameter(Mandatory = $true)][string]$Uri, [string]$Sha256, [string]$Sha512, [Parameter(Mandatory = $true)][string]$Destination)
     if ($Uri -notmatch '^https://') { throw ('only https:// downloads are allowed: ' + $Uri) }
-    if ($Sha256 -notmatch '^[0-9a-fA-F]{64}$') { throw ('not a SHA-256: ' + $Sha256) }
+    if ([bool]$Sha256 -eq [bool]$Sha512) { throw 'pin a file by exactly one of a SHA-256 and a SHA-512' }
+    if ($Sha256 -and $Sha256 -notmatch '^[0-9a-fA-F]{64}$') { throw ('not a SHA-256: ' + $Sha256) }
+    if ($Sha512 -and $Sha512 -notmatch '^[0-9a-fA-F]{128}$') { throw ('not a SHA-512: ' + $Sha512) }
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
     $previous = $ProgressPreference
     $ProgressPreference = 'SilentlyContinue'
@@ -343,11 +379,7 @@ function Save-VerifiedDownload {
     } finally {
         $ProgressPreference = $previous
     }
-    $actual = Get-Sha256Hex $Destination
-    if ($actual -ne $Sha256.ToLowerInvariant()) {
-        Remove-Item -LiteralPath $Destination -Force
-        throw ('SHA-256 mismatch for ' + $Uri + ': got ' + $actual + ', pinned ' + $Sha256)
-    }
+    Assert-FileHash -Path $Destination -Sha256 $Sha256 -Sha512 $Sha512 -Source $Uri
 }
 
 function Get-Lun0DiskNumber {
@@ -369,7 +401,7 @@ function Get-Lun0DiskNumber {
 
 Export-ModuleMember -Function @(
     'Test-WindowsHost', 'Join-WindowsPath', 'Get-WorkerServiceName', 'Get-WorkerServiceSid', 'Get-WellKnownSid', 'Get-ServiceSidFromName', 'Assert-WorkerServiceSid',
-    'ConvertTo-NativeArgument', 'Invoke-NativeCommand', 'Invoke-Icacls', 'Write-Utf8File', 'Get-Sha256Hex', 'Get-StringSha256Hex',
+    'ConvertTo-NativeArgument', 'Invoke-NativeCommand', 'Invoke-Icacls', 'Write-Utf8File', 'Get-Sha256Hex', 'Get-Sha512Hex', 'Get-StringSha256Hex',
     'Read-JsonFile', 'Test-JsonProperty', 'Read-EnvFile', 'Get-LongPath', 'Find-ReparsePoint', 'Remove-LinkSafeItem', 'Test-IsAdministrator',
-    'Save-VerifiedDownload', 'Get-Lun0DiskNumber'
+    'Assert-FileHash', 'Save-VerifiedDownload', 'Get-Lun0DiskNumber'
 )

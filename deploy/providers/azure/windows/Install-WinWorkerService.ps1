@@ -11,7 +11,7 @@ deployment may change, then the deployment's worker settings file
 (-WorkerSettingsFile, NAME=VALUE lines; README, "The worker settings file").
 The launcher overlays the deployment's per-stamp values from the scale set's
 userData on top at every start, so a settings file may not set those, nor the
-values the launcher sets itself.
+values the launcher sets itself, nor any credential variable.
 
 Both services run "C:\Program Files\nodejs\node.exe" by its full path under
 WinSW 2.12.0:
@@ -56,12 +56,24 @@ $script:UserDataNames = @(
 )
 # Set by the launcher itself, and credentials no worker carries.
 $script:ForbiddenNames = @('PILOTSWARM_WORKER_OWNER_TAG', 'PS_LAUNCH_ID', 'GITHUB_TOKEN', 'GH_TOKEN', 'COPILOT_GITHUB_TOKEN')
+# Every credential variable, as launcher.mjs's CREDENTIAL_ENV_NAMES lists them: jobs sign in to Git, package feeds and
+# Azure with the VM's managed identity, every process on the VM can read worker.env, and Git's own settings go in the
+# image's GIT_CONFIG_GLOBAL file. The launcher also removes them from the service's environment.
+$script:CredentialNames = @(
+    'GITHUB_TOKEN', 'GH_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN', 'COPILOT_GITHUB_TOKEN',
+    'ARTIFACTS_CREDENTIALPROVIDER_ACCESSTOKEN', 'ARTIFACTS_CREDENTIALPROVIDER_EXTERNAL_FEED_ENDPOINTS',
+    'VSS_NUGET_ACCESSTOKEN', 'VSS_NUGET_EXTERNAL_FEED_ENDPOINTS', 'NUGET_AUTH_TOKEN', 'NPM_TOKEN', 'NODE_AUTH_TOKEN',
+    'SYSTEM_ACCESSTOKEN', 'AZURE_DEVOPS_EXT_PAT', 'AZURE_CLIENT_SECRET', 'AZURE_CLIENT_CERTIFICATE_PASSWORD',
+    'GIT_CONFIG_PARAMETERS', 'GIT_CONFIG_COUNT'
+)
+$script:CredentialFamilies = '^(?:GIT_CONFIG_(?:KEY|VALUE)_\d+|NUGETPACKAGESOURCECREDENTIALS_.+)$'
 # The drain must end before WinSW's 105-minute stop timeout, with time left for the Dev Drive extension's release.
 $script:MaxShutdownTimeoutMs = 6000000
 # The image's values that agents' own git and az need. With PILOTSWARM_SCRUB_CLI_ENV=1, the SDK passes a CLI only
 # its baseline and PILOTSWARM_CLI_ENV_ALLOWLIST, so without these they would use the service profile's writable
-# configuration and extensions instead of the image's pinned ones.
-$script:CliEnvPins = @('GIT_CONFIG_GLOBAL', 'AZURE_CONFIG_DIR', 'AZURE_EXTENSION_*')
+# configuration and extensions instead of the image's pinned ones, and a build that calls git could wait on a
+# credential prompt that nobody answers.
+$script:CliEnvPins = @('GIT_CONFIG_GLOBAL', 'GIT_TERMINAL_PROMPT', 'GIT_ASKPASS', 'GCM_INTERACTIVE', 'SSH_ASKPASS', 'AZURE_CONFIG_DIR', 'AZURE_EXTENSION_*')
 
 function Get-ImageWorkerValues {
     <# The image's own values: the folders and files it creates and the hardening they rely on. A settings file may not change them. #>
@@ -80,6 +92,12 @@ function Get-ImageWorkerValues {
     $values['TEMP'] = Join-WindowsPath $Root 'temp'
     $values['TMP'] = Join-WindowsPath $Root 'temp'
     $values['GIT_CONFIG_GLOBAL'] = Join-WindowsPath $Root 'gitconfig-global'
+    # Every Git call, a build's included, fails at once instead of waiting on a prompt: no terminal prompt, no
+    # interactive Git Credential Manager and no askpass program, as the Dev Drive extension runs its own Git calls.
+    $values['GIT_TERMINAL_PROMPT'] = '0'
+    $values['GIT_ASKPASS'] = ''
+    $values['GCM_INTERACTIVE'] = 'never'
+    $values['SSH_ASKPASS'] = ''
     $values['AZURE_CONFIG_DIR'] = Join-WindowsPath $Root 'azure-cli'
     $values['AZURE_EXTENSION_USE_DYNAMIC_INSTALL'] = 'no'
     $values['AZURE_EXTENSION_DIR'] = Join-WindowsPath $Root 'az-extensions'
@@ -173,6 +191,9 @@ function New-WorkerEnvContent {
         if ($name -notmatch '^[A-Za-z_][A-Za-z0-9_]{0,127}$') { throw ($SettingsName + ': "' + $name + '" is not a valid setting name') }
         if ($script:UserDataNames -contains $name.ToUpperInvariant()) { throw ($SettingsName + ' sets ' + $name + ', which only the scale set''s userData sets') }
         if ($script:ForbiddenNames -contains $name.ToUpperInvariant()) { throw ($SettingsName + ' sets ' + $name + ', which no worker image may carry') }
+        if (($script:CredentialNames -contains $name.ToUpperInvariant()) -or ($name -match $script:CredentialFamilies)) {
+            throw ($SettingsName + ' sets ' + $name + ', a credential variable, which no worker image may carry: jobs sign in with the VM''s managed identity')
+        }
         if (Test-Contains $image $name) { throw ($SettingsName + ' sets ' + $name + ', which the image fixes') }
         if ($value.Contains("`n") -or $value.Contains("`r")) { throw ($SettingsName + ': ' + $name + ' spans more than one line') }
         $own[$name] = $value

@@ -43,7 +43,7 @@ before the manifests are published. Stamps without the setting do not change.
 | `lib/scaling.mjs`, `lib/demand.mjs`, `lib/working-hours.mjs` | The scaling target, scale-out and scale-in steps, and capacity requests |
 | `lib/broker.mjs` | The credential broker |
 | `lib/refresh.mjs` | The weekly golden-snapshot refresh |
-| `lib/azure.mjs`, `lib/run-commands.mjs` | The Azure Resource Manager calls and the Managed Run Commands it sends to VMs |
+| `lib/azure.mjs`, `lib/run-commands.mjs` | The Azure Resource Manager calls and the Managed Run Commands it sends to VMs. A write to the scale set itself (its capacity) goes at the Compute API version that base-infra's `win-workers.bicep` pins for the scale set, because how its new VMs get their security type depends on that version; every other call uses the Azure SDK's |
 | `lib/serving-tls.mjs`, `lib/log.mjs` | The server certificate and JSON-lines logs (`audit` and `alert` levels included) |
 | `tls.mjs` | The deploy step for the controller's private CA and leaf certificate, and the CA's rotation (below); not in the image |
 | `test/` | Tests with fakes for every Azure client, the clock and the timers; they need none of this package's dependencies |

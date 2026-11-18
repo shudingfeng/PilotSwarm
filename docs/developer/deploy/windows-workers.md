@@ -530,9 +530,11 @@ demand:
    session's retries renew it.
 2. **Bind or scale out.** Demand gets the ready unbound VM. Without one, the
    controller raises the scale set's capacity with a PATCH of `sku.capacity`
-   alone, and the new VM starts bound to the owner. Azure takes it from the
-   standby pool when one is ready. A deploy never writes the capacity after
-   creating the scale set, and nothing scales out while the pool is frozen.
+   alone, at the Compute API version that the scale set's Bicep pins (see
+   [Requirements](#requirements)), and the new VM starts bound to the owner.
+   Azure takes it from the standby pool when one is ready. A deploy never
+   writes the capacity after creating the scale set, and nothing scales out
+   while the pool is frozen.
 3. **Target.** The pool keeps `min(X, max(Y, bound + ready))` VMs active, where
    `ready` is 1 while a demand signal arrived within
    `WIN_WORKER_IDLE_RECYCLE_MINUTES`. While owners are active, one unbound VM
@@ -659,12 +661,17 @@ Every new drive is a copy of the golden snapshot, so its content reaches every
 session tree:
 
 - **The first snapshot.** On a VM built from the worker image, attach an empty
-  disk at LUN 0, run `Initialize-WinWorkerDisk.ps1`, then
+  disk at LUN 0, run `Initialize-WinWorkerDisk.ps1`, which leaves `Q:\`
+  readable by SYSTEM, Administrators and the worker alone, then
   `Seed-WorkerReposDisk.ps1` with the snapshot parameters. It clones the seed
-  manifest's repositories with full history, fills the package caches, grants
-  the worker Modify only on the manifest's folders, writes each repository's
-  first clean-detach record, and makes the worker's service account the owner
-  of each repository, because Git refuses a repository another account owns.
+  manifest's repositories with full history, with all their submodules, none,
+  or only the listed ones, each at the commit its repository pins or at the tip
+  of its own branch, fills the package caches, creates the manifest's folders
+  and grants the worker Modify only on its Modify folders, writes each
+  repository's first clean-detach record, and makes the worker's service
+  account the owner of each repository, because Git refuses a repository
+  another account owns. Last, it empties the folders the manifest names for
+  that, such as a package manager's HTTP cache, so no drive inherits them.
   It must run on a VM built from the image: `icacls` resolves the worker
   service's SID only where that service is installed. It waits until Azure
   reports the snapshot `Succeeded` with its background copy complete, and
@@ -675,7 +682,8 @@ session tree:
   attaches a copy of the current snapshot, and runs
   `Seed-WorkerReposDisk.ps1 -Refresh` and then `-Verify` there as Managed Run
   Commands. Only when every check passes (refs, `git fsck --connectivity-only`,
-  no Git hooks, current clean-detach records, owners and folder permissions)
+  no Git hooks, current clean-detach records, owners, folder permissions and,
+  when the manifest empties folders before the snapshot, those folders empty)
   does it take an incremental snapshot and record it as the golden snapshot.
   It keeps the snapshot it replaced, which `GET /v1/admin/status` shows as
   `previousSnapshot`, until the next refresh, which deletes it if the
@@ -1033,11 +1041,25 @@ See [Session Message Scope](../reference/configuration.md#session-message-scope)
   the Portal only audits who may open a session, and anyone could prompt an
   owner's session, which runs on that owner's VM with the owner's token.
 - **Azure capacity:** quota for `WIN_WORKER_VM_SIZE` (a size with nested
-  virtualization, which Hyper-V containers need), Premium SSD v2 in the region,
-  and a subscription whose Azure Policy allows `securityType: Standard` VMs.
+  virtualization, which Hyper-V containers need) and Premium SSD v2 in the
+  region.
+- **The Standard security type** for the workers and the image's build VM,
+  which they get by naming no security type at a Compute API version below
+  2025-11-01: the subscription must not be registered for Trusted Launch as
+  default (the preview feature
+  `Microsoft.Compute/TrustedLaunchByDefaultPreview`), and no Azure Policy may
+  deny VMs without Trusted Launch. No subscription feature is needed: only an
+  explicit `securityType: Standard` below 2025-11-01, which
+  `az vm create --security-type Standard` sends, needs
+  `Microsoft.Compute/UseStandardSecurityType`. From 2025-11-01, Trusted Launch
+  is the default, and only an explicit Standard opts out, so the scale set's
+  Bicep, the deploy step's PATCH and the controller's capacity PATCH share one
+  pinned API version.
 - **Tools:** the Azure CLI, `kubectl` and openssl 1.1.1 or later where the
-  deploy runs; a Gen2 Windows Server 2025 build VM with Standard security for
-  the image; a Windows x64 machine with Node.js 24.22.1 to pack releases.
+  deploy runs; a Gen2 Windows Server 2025 build VM with the Standard security
+  type for the image, from
+  [`build-vm.bicep`](../../../deploy/providers/azure/windows/build-vm.bicep); a
+  Windows x64 machine with Node.js 24.22.1 to pack releases.
 - **A dispatcher** (`DISPATCHER_SP_OBJECT_ID`), the only caller that claims
   drives.
 - **No personal keys in the database.** Before you turn on
@@ -1118,12 +1140,20 @@ the `stamp` profile, and the security logs go to the perimeter's workspace. See
    runs the database role Job again from
    `deploy/.tmp/portal-<env>/db-role-job.yaml`; since the first deploy already
    ran it, `-SkipMigration` works too.
-7. **The image.** Create the build VM with `--security-type Standard`, from a
-   Gen2 Windows Server 2025 image, in a resource group of its own: the gallery
-   takes no Trusted launch VM's image for this definition, and `az vm create`
-   makes a Gen2 VM Trusted launch by default. Run `Build-WorkerOsImage.ps1`
-   there with your toolchain manifest, worker settings file and seed manifest,
-   and `-Generalize`, which runs Sysprep and shuts the VM down. Deallocate and
+7. **The image.** Create the build VM from
+   [`build-vm.bicep`](../../../deploy/providers/azure/windows/build-vm.bicep)
+   with `az deployment group create`, in a resource group of its own: a Gen2
+   Windows Server 2025 VM that names no security type at a Compute API version
+   below 2025-11-01, so it gets the Standard type. The gallery takes no Trusted
+   Launch VM's image for this definition, and `az vm create` makes a Gen2 VM
+   Trusted Launch unless it gets `--security-type Standard`, which needs the
+   subscription feature `Microsoft.Compute/UseStandardSecurityType`. Run
+   `Build-WorkerOsImage.ps1` there with your toolchain manifest, worker
+   settings file and seed manifest, and `-Generalize`, which runs Sysprep and
+   shuts the VM down. A toolchain
+   that needs restarts (Windows features, Visual Studio) makes it exit with
+   code 3010 at each: restart the VM and run the same command again until it
+   finishes. Deallocate and
    generalize the VM, create the image version (`Major.Minor.Patch`) from it in
    `<alphaprefix>gallery/pilotswarm-win-worker` with
    `az sig image-version create`, and delete the build resource group. See
@@ -1147,9 +1177,10 @@ the `stamp` profile, and the security logs go to the perimeter's workspace. See
     Confirm that every log stream arrives in its workspace.
 
 After the scale set exists, a deploy changes only its VM size, image and
-`userData`, with a PATCH that never names the capacity, which the controller
-owns. It also deletes the Portal identity's old account-wide Blob grant once its
-container grant exists, and an `AllowAllAzureServices` firewall rule.
+`userData`, with a PATCH at the scale set's pinned Compute API version that
+never names the capacity, which the controller owns. It also deletes the Portal
+identity's old account-wide Blob grant once its container grant exists, and an
+`AllowAllAzureServices` firewall rule.
 
 ### What the deploy creates
 
@@ -1696,14 +1727,26 @@ lets a process read the memory and environment of other processes of the same
 account. That is why a VM serves one owner. Within that, the image keeps
 sessions from planting what later sessions would load:
 
-- **Locked-down folders.** `C:\`, `Q:\` and `Q:\Repos` grant ordinary users Read
-  and Execute only, and the image audits every top-level folder on `C:\`.
+- **Locked-down folders.** `C:\` grants ordinary users Read and Execute only,
+  and the image audits every top-level folder on `C:\`. On the drive, `Q:\`
+  and `Q:\Repos` give access to SYSTEM, Administrators and the worker alone,
+  the worker only reading, so no other account can read what a build leaves
+  there; the worker can change only the seed manifest's Modify folders.
   `C:\pilotswarm` has inheritance turned off; the worker can change only its
   CLI home, around read-only placeholders, its logs, `temp` and its Azure CLI
   folder. The service's working folder is read-only, so no `.mcp.json`,
   `AGENTS.md` or skill can be planted there. The
   [Windows image README](../../../deploy/providers/azure/windows/README.md#cpilotswarm)
   lists every folder.
+- **No credential in the environment.** Package feeds, the Azure CLI and,
+  through the deployment's Git configuration, Git sign in with the VM's managed
+  identity, so no job needs a token in its environment. The launcher removes
+  every credential variable from the environment the service starts it with,
+  and `worker.env`, the worker settings file and `userData` refuse them, so a
+  build tool that writes its whole environment to a file writes no secret. Git
+  never prompts: `GIT_TERMINAL_PROMPT=0`, `GCM_INTERACTIVE=never` and no askpass
+  program reach every agent shell and build, so a build that calls `git`
+  without a credential fails at once instead of hanging.
 - **The Copilot CLI's home.** Read-only, delete-denied placeholders, which
   only administrators can change, stand where the CLI reads instructions, MCP
   servers, language servers, tool approvals, model providers, MCP credentials,
@@ -1980,10 +2023,11 @@ each.
 `WIN_WORKER_EXTRA_ENV` refuses, at deploy time and again on the VM, a malformed
 or repeated pair, a value over 4,096 characters, a name that `worker.env` or
 `userData` already sets, a process or profile variable such as `PATH` or
-`TEMP`, `GITHUB_TOKEN`, `GH_TOKEN`, and any name starting with `NODE_`,
+`TEMP`, a credential variable such as `GITHUB_TOKEN`, `GH_TOKEN` or a package
+feed's token, and any name starting with `NODE_`,
 `COPILOT_`, `PILOTSWARM_`, `PS_`, `WIN_WORKER_`, `AZURE_`, `GIT_`, `NUGET_`,
-`GCM_` or `ARTIFACTS_CREDENTIALPROVIDER_`, all compared without case. Any process
-on a VM can read these values.
+`GCM_`, `ARTIFACTS_CREDENTIALPROVIDER_` or `NuGetPackageSourceCredentials_`, all
+compared without case. Any process on a VM can read these values.
 
 ### Portal settings
 
@@ -2024,7 +2068,7 @@ settings file adds:
 | `PILOTSWARM_REQUIRE_FINE_GRAINED_GH_PAT` | unset (off) | `1` |
 | `PILOTSWARM_SESSION_MESSAGE_SCOPE` | `fleet` | `owner` |
 | `PILOTSWARM_REDACT_SECRET_PREFIXES` | unset | The prefixes of your own credentials, such as the per-work credential's |
-| `PILOTSWARM_CLI_ENV_ALLOWLIST` | unset: the image's three pins alone (below) | The build tools' variables, for example `NUGET_*,ARTIFACTS_CREDENTIALPROVIDER_*,GCM_*,GIT_*,DOTNET_*,MSBUILD*` |
+| `PILOTSWARM_CLI_ENV_ALLOWLIST` | unset: the image's seven pins alone (below) | The build tools' variables, for example `NUGET_*,ARTIFACTS_CREDENTIALPROVIDER_*,GCM_*,GIT_*,DOTNET_*,MSBUILD*` |
 | `PILOTSWARM_CLI_ABORT_TIMEOUT_MS` | unset (no limit) | For example `30000` |
 | `PILOTSWARM_EVENT_RETENTION_MINUTES` | unset | For example `43200` (30 days) |
 | `PILOTSWARM_WORKER_CONCURRENCY`, `PILOTSWARM_ORCHESTRATION_CONCURRENCY` | `2`, `2` | What one VM sustains, for example `6` and `4` |
@@ -2034,15 +2078,19 @@ settings file adds:
 | `PLUGIN_DIRS`, `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` | auto-detected, unset | The plugins and instructions the release installs under `C:\pilotswarm` |
 
 A settings file may not set the image's own values, the `userData` names,
-`PILOTSWARM_WORKER_OWNER_TAG`, `PS_LAUNCH_ID`, `GITHUB_TOKEN`, `GH_TOKEN` or
-`COPILOT_GITHUB_TOKEN`, and holds no secret. It is part of the image, so a
+`PILOTSWARM_WORKER_OWNER_TAG`, `PS_LAUNCH_ID` or any credential variable (such
+as `GITHUB_TOKEN`, `GH_TOKEN`, `COPILOT_GITHUB_TOKEN` or a package feed's token;
+the [Windows image README](../../../deploy/providers/azure/windows/README.md#workerenv)
+lists them), and holds no secret. It is part of the image, so a
 change needs a new image version.
 
 `worker.env`'s `PILOTSWARM_CLI_ENV_ALLOWLIST` always passes the image's
-`GIT_CONFIG_GLOBAL`, `AZURE_CONFIG_DIR` and `AZURE_EXTENSION_*` to agents'
+`GIT_CONFIG_GLOBAL`, `GIT_TERMINAL_PROMPT`, `GIT_ASKPASS`, `GCM_INTERACTIVE`,
+`SSH_ASKPASS`, `AZURE_CONFIG_DIR` and `AZURE_EXTENSION_*` to agents'
 tools: with `PILOTSWARM_SCRUB_CLI_ENV=1` a CLI gets only its baseline and that
 list, and without them `git` and `az` in an agent's shell would use the
-service profile's own, writable configuration. The build keeps the settings
+service profile's own, writable configuration, and a build that calls `git`
+could wait on a credential prompt. The build keeps the settings
 file's entries as they are and appends each of these that none of them covers,
 by name or by a prefix (`GIT_*` covers `GIT_CONFIG_GLOBAL`). An entry that is
 neither a name nor a name prefix followed by `*`, which the SDK would refuse,
@@ -2163,7 +2211,9 @@ script's exit code doesn't become the command's.
 - **The Windows scripts.** `node --test deploy/providers/azure/windows/test/*.test.mjs`
   parses every script with PowerShell 7 when it is installed; on Windows, it
   also runs the disk script's process search, the drain and the seed's
-  `-Verify` for real, the way the controller's Run Commands call them. The
+  `-Verify` for real, the way the controller's Run Commands call them, the seed
+  of listed submodules and the drive root's access list, and an image build
+  that stops for its restarts, against fakes of the installers. The
   Windows job of PR checks runs it.
 - **The extension.** `packages/sdk/test/unit/devdrive-workspace-provider.test.mjs`
   runs take-backs, checks, shutdown releases and the Git paths against a fake

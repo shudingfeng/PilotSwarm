@@ -64,7 +64,9 @@ export const STANDBY_POOL_PROVIDER_NAME = "Standby Pool Resource Provider";
 // which uami-federation.bicep creates only without the Windows worker pool.
 export const WORKER_FEDERATED_CREDENTIAL = "worker-fedcred";
 export const WORKER_SERVICE_ACCOUNT = "copilot-runtime-worker";
-// The Compute API version of the model PATCH; instance protection needs
+// The Compute API version of the model PATCH: the one that win-workers.bicep
+// pins for the scale set, since how its VMs get their security type depends on
+// it (see the Bicep); a test keeps the two equal. Instance protection needs
 // 2023-09-01 or later.
 export const SCALE_SET_API_VERSION = "2024-11-01";
 // App Gateway's trusted roots for the controller's CAs: a CA that a root

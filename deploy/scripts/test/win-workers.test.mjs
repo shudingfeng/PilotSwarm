@@ -51,10 +51,12 @@ import {
   startCaRotation,
 } from "../../providers/azure/disk-controller/tls.mjs";
 import { loadConfig } from "../../providers/azure/disk-controller/lib/config.mjs";
+import * as controllerAzure from "../../providers/azure/disk-controller/lib/azure.mjs";
 import { createFakeAppGateway, createFakeAz, createFakeOpenssl, createTestPki } from "../../providers/azure/disk-controller/test/x509.mjs";
 
 const BICEP = join(REPO_ROOT, "deploy/providers/azure/services/base-infra/bicep");
 const readBicep = (file) => readFileSync(join(BICEP, file), "utf8");
+const WINDOWS = join(REPO_ROOT, "deploy/providers/azure/windows");
 const pki = createTestPki();
 
 const SUBSCRIPTION = "00000000-0000-0000-0000-000000000003";
@@ -352,9 +354,10 @@ test("userData: the workers are owner-only whatever the env map says, and the de
   });
   const { document } = renderWinWorkerUserData(env, { caPem: pki.caPem });
   assert.equal(document.env.PILOTSWARM_WORKER_OWNER_ONLY, "1");
+  // The field the credential provider reads for a managed identity is clientId: an entry without it is skipped.
   assert.deepEqual(JSON.parse(document.env.ARTIFACTS_CREDENTIALPROVIDER_FEED_ENDPOINTS).endpointCredentials, [
-    { endpoint: "https://feeds.example.com/one/index.json", azureClientId: WORKER_CLIENT },
-    { endpoint: "https://feeds.example.com/two/index.json", azureClientId: WORKER_CLIENT },
+    { endpoint: "https://feeds.example.com/one/index.json", clientId: WORKER_CLIENT },
+    { endpoint: "https://feeds.example.com/two/index.json", clientId: WORKER_CLIENT },
   ]);
   assert.deepEqual(document.extraEnv, {
     EXAMPLE_API_URL: "https://api.example.com/v1?a=b",
@@ -399,7 +402,8 @@ test("WIN_WORKER_EXTRA_ENV: NAME=VALUE pairs separated by semicolons; an empty s
 test("WIN_WORKER_EXTRA_ENV refuses every reserved prefix and name, without case, and names the userData or the launcher sets", () => {
   const refuse = (name, pattern) => assert.throws(() => winWorkerExtraEnv({ WIN_WORKER_EXTRA_ENV: `OK_NAME=1;${name}=x` }), pattern, name);
   assert.deepEqual([...WIN_WORKER_RESERVED_EXTRA_ENV_PREFIXES].sort(), [
-    "ARTIFACTS_CREDENTIALPROVIDER_", "AZURE_", "COPILOT_", "GCM_", "GIT_", "NODE_", "NUGET_", "PILOTSWARM_", "PS_", "WIN_WORKER_",
+    "ARTIFACTS_CREDENTIALPROVIDER_", "AZURE_", "COPILOT_", "GCM_", "GIT_", "NODE_", "NUGETPACKAGESOURCECREDENTIALS_", "NUGET_", "PILOTSWARM_", "PS_",
+    "WIN_WORKER_",
   ]);
   for (const prefix of WIN_WORKER_RESERVED_EXTRA_ENV_PREFIXES) {
     for (const name of [`${prefix}EXAMPLE`, `${prefix.toLowerCase()}example`]) {
@@ -407,7 +411,8 @@ test("WIN_WORKER_EXTRA_ENV refuses every reserved prefix and name, without case,
     }
   }
   for (const name of ["PATH", "PATHEXT", "COMSPEC", "SYSTEMROOT", "WINDIR", "SYSTEMDRIVE", "TEMP", "TMP", "USERPROFILE", "APPDATA",
-    "LOCALAPPDATA", "PROGRAMDATA", "PROGRAMFILES", "HOMEDRIVE", "HOMEPATH", "GITHUB_TOKEN", "GH_TOKEN", "Path", "temp", "gh_token"]) {
+    "LOCALAPPDATA", "PROGRAMDATA", "PROGRAMFILES", "HOMEDRIVE", "HOMEPATH", "GITHUB_TOKEN", "GH_TOKEN", "Path", "temp", "gh_token",
+    "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "VSS_NUGET_ACCESSTOKEN", "vss_nuget_external_feed_endpoints", "NPM_TOKEN", "SYSTEM_ACCESSTOKEN"]) {
     refuse(name, new RegExp(`may not set ${name}: it is reserved`));
   }
   // Every name the userData's env holds, whatever its prefix.
@@ -418,7 +423,7 @@ test("WIN_WORKER_EXTRA_ENV refuses every reserved prefix and name, without case,
     refuse(name, new RegExp(`may not set ${name}: the workers' launcher sets it`));
   }
   // The image's own worker.env names outside the reserved prefixes.
-  for (const name of ["SESSION_STATE_DIR", "MSBUILDDISABLENODEREUSE"]) refuse(name, /it is reserved/);
+  for (const name of ["SESSION_STATE_DIR", "MSBUILDDISABLENODEREUSE", "SSH_ASKPASS"]) refuse(name, /it is reserved/);
   // Names close to a reserved one are the deployment's own.
   assert.deepEqual(winWorkerExtraEnv({ WIN_WORKER_EXTRA_ENV: "PATHS=1;NODEX=2;GITHUB_URL=3;MY_PATH=4;EXPECTED=5" }).map(([name]) => name),
     ["PATHS", "NODEX", "GITHUB_URL", "MY_PATH", "EXPECTED"]);
@@ -538,7 +543,7 @@ test("the document check refuses what the launcher refuses: unknown, missing or 
     ["client ID", withEnv("AZURE_CLIENT_ID", "worker"), /refuses AZURE_CLIENT_ID: it must be a GUID/],
     ["feeds not JSON", withEnv("ARTIFACTS_CREDENTIALPROVIDER_FEED_ENDPOINTS", "[nope"), /refuses ARTIFACTS_CREDENTIALPROVIDER_FEED_ENDPOINTS: it is not JSON/],
     ["feeds shape", withEnv("ARTIFACTS_CREDENTIALPROVIDER_FEED_ENDPOINTS", "[]"), /it must be \{"endpointCredentials":\[\.\.\.\]\}/],
-    ["feed without endpoint", withEnv("ARTIFACTS_CREDENTIALPROVIDER_FEED_ENDPOINTS", '{"endpointCredentials":[{"azureClientId":"x"}]}'), /it needs an endpoint in every entry/],
+    ["feed without endpoint", withEnv("ARTIFACTS_CREDENTIALPROVIDER_FEED_ENDPOINTS", '{"endpointCredentials":[{"clientId":"x"}]}'), /it needs an endpoint in every entry/],
     ["feed password", withEnv("ARTIFACTS_CREDENTIALPROVIDER_FEED_ENDPOINTS", '{"endpointCredentials":[{"endpoint":"https://f.example.com/","password":"x"}]}'), /it carries a password/],
     ["configuration version", withEnv("WIN_WORKER_CONFIG_VERSION", "v 1"), /refuses WIN_WORKER_CONFIG_VERSION: it must be 1 to 128 letters, digits and \. _ : -/],
     ["long configuration version", withEnv("WIN_WORKER_CONFIG_VERSION", "a".repeat(129)), /refuses WIN_WORKER_CONFIG_VERSION/],
@@ -899,7 +904,6 @@ test("the scale set model: Flexible, one zone and fault domain, managed OS disk,
     /platformFaultDomainCount: 1\b/,
     /upgradePolicy: \{\s*mode: 'Manual'\s*\}/,
     /automaticRepairsPolicy: \{\s*enabled: false\s*\}/,
-    /securityType: 'Standard'/,
     /userData: userData/,
     /imageReference: \{\s*id: '\$\{imageDefinition\.id\}\/versions\/\$\{imageVersion\}'\s*\}/,
     /osDisk: \{\s*createOption: 'FromImage'\s*caching: 'ReadWrite'\s*diskSizeGB: 256\s*deleteOption: 'Delete'\s*managedDisk:/,
@@ -915,6 +919,54 @@ test("the scale set model: Flexible, one zone and fault domain, managed OS disk,
   assert.equal(conditionOf(winWorkers, "gallery"), undefined);
   assert.match(blockOf(winWorkers, "imageDefinition"), /osType: 'Windows'\s*osState: 'Generalized'\s*hyperVGeneration: 'V2'/);
   assert.match(winWorkers, /^var imageDefinitionName = 'pilotswarm-win-worker'\s*$/m);
+});
+
+// The Compute API version that a resource pins: `resource <symbol> '<type>@<version>'`.
+function apiVersionOf(source, symbol, type) {
+  const match = new RegExp(`^resource ${symbol} '${type.replace(/[./]/g, "\\$&")}@(\\d{4}-\\d{2}-\\d{2})'`, "m").exec(source);
+  assert.ok(match, `${symbol} pins a ${type} API version`);
+  return match[1];
+}
+
+// How a VM or scale set model gets the Standard security type at a Compute API
+// version: below 2025-11-01 by naming no security type (an explicit Standard
+// needs a subscription feature there), from 2025-11-01 only by naming Standard,
+// since Trusted Launch is the default. Comment lines don't count.
+function assertStandardSecurity(block, apiVersion, what) {
+  const code = block.replace(/^\s*\/\/.*$/gm, "");
+  if (apiVersion < "2025-11-01") {
+    assert.doesNotMatch(code, /securityProfile|securityType/, `${what} at ${apiVersion} names no security type`);
+  } else {
+    assert.match(code, /securityProfile: \{\s*securityType: 'Standard'\s*\}/, `${what} at ${apiVersion} names the Standard type`);
+  }
+}
+
+test("the scale set gets the Standard security type the way its pinned Compute API version needs: no securityProfile below 2025-11-01, an explicit Standard from then on", () => {
+  const version = apiVersionOf(winWorkers, "scaleSet", "Microsoft.Compute/virtualMachineScaleSets");
+  assertStandardSecurity(blockOf(winWorkers, "scaleSet"), version, "the scale set's model");
+
+  // The rule both ways, whichever version the Bicep pins today.
+  const named = "virtualMachineProfile: {\n  securityProfile: {\n    securityType: 'Standard'\n  }\n}";
+  const unnamed = "virtualMachineProfile: {\n  // no securityProfile here\n  userData: userData\n}";
+  assertStandardSecurity(unnamed, "2024-11-01", "unnamed");
+  assert.throws(() => assertStandardSecurity(named, "2024-11-01", "named"), /named at 2024-11-01 names no security type/);
+  assertStandardSecurity(named, "2025-11-01", "named");
+  assert.throws(() => assertStandardSecurity(unnamed, "2025-11-01", "unnamed"), /unnamed at 2025-11-01 names the Standard type/);
+});
+
+test("every write to the scale set's model or capacity goes at the Bicep's pinned Compute API version: the deploy step's PATCH and the disk controller's", () => {
+  const version = apiVersionOf(winWorkers, "scaleSet", "Microsoft.Compute/virtualMachineScaleSets");
+  assert.equal(step.SCALE_SET_API_VERSION, version, "the deploy step's model PATCH");
+  assert.equal(controllerAzure.SCALE_SET_API_VERSION, version, "the disk controller's capacity PATCH");
+});
+
+test("the image build VM: Gen2 Windows Server 2025 with the Standard security type the way its Compute API version needs, no public IP, and a password the Azure CLI asks for", () => {
+  const template = readFileSync(join(WINDOWS, "build-vm.bicep"), "utf8");
+  const vm = blockOf(template, "vm");
+  assertStandardSecurity(vm, apiVersionOf(template, "vm", "Microsoft.Compute/virtualMachines"), "the build VM");
+  assert.match(vm, /imageReference: \{\s*publisher: 'MicrosoftWindowsServer'\s*offer: 'WindowsServer'\s*sku: '2025-datacenter-g2'/);
+  assert.doesNotMatch(blockOf(template, "nic"), /publicIPAddress/i);
+  assert.match(template, /^@secure\(\)\r?\n(?:@description\('(?:[^'\\]|\\.)*'\)\r?\n)?param adminPassword string\s*$/m, "a secure password without a default");
 });
 
 test("the Azure Monitor Agent signs in as the workers' identity, and their data collection rule feeds the main workspace", () => {
@@ -1264,9 +1316,9 @@ function azAsync(args) {
   });
 }
 
-async function buildBicep(dir, file) {
+async function buildBicep(dir, file, folder = BICEP) {
   const outfile = join(dir, `${file}.json`);
-  const result = await azAsync(["bicep", "build", "--file", join(BICEP, file), "--outfile", outfile]);
+  const result = await azAsync(["bicep", "build", "--file", join(folder, file), "--outfile", outfile]);
   assert.equal(result.status, 0, `${file}: ${result.stderr}`);
   assert.doesNotMatch(result.stderr, /\bError\b/, file);
   return JSON.parse(readFileSync(outfile, "utf8"));
@@ -1298,6 +1350,12 @@ test("every template the pool adds or changes compiles, and the compiled scale s
   assert.equal(inner.find((r) => r.type === "Microsoft.StandbyPool/standbyVirtualMachinePools").condition, "[variables('deployScaleSet')]");
   const gated = template.resources.filter((r) => r.type === "Microsoft.Resources/deployments" && r.condition === "[parameters('winWorkersEnabled')]");
   assert.equal(gated.length, 9, "the pool's nine modules");
+
+  // The image build VM's template, and the security type of both, compiled.
+  const vm = (await buildBicep(dir, "build-vm.bicep", WINDOWS)).resources.find((r) => r.type === "Microsoft.Compute/virtualMachines");
+  for (const resource of [scaleSet, vm]) {
+    if (resource.apiVersion < "2025-11-01") assert.doesNotMatch(JSON.stringify(resource.properties), /securityProfile/, resource.type);
+  }
 });
 
 // ─── The Windows worker deploy step ───
@@ -1985,6 +2043,7 @@ test("the rendered userData is what the Windows image's launcher and attacher re
     ...launcher.PROTECTED_EXTRA_PREFIXES.map((prefix) => `${prefix}EXAMPLE`),
     ...launcher.USER_DATA_SETTINGS,
     ...launcher.LAUNCHER_SETTINGS,
+    ...launcher.CREDENTIAL_ENV_NAMES, "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "NuGetPackageSourceCredentials_feed",
   ];
   for (const name of protectedNames) {
     assert.ok(launcher.isProtectedExtraName(name), name);

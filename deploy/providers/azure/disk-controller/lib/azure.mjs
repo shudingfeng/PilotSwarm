@@ -4,12 +4,39 @@
 // so the tests replace the SDK clients with in-memory fakes.
 //
 // Every write names only what it changes: the scale set's capacity is a PATCH
-// of `sku.capacity` alone, a drive's growth a PATCH of `diskSizeGB` alone, and
-// an attach or detach goes through `attachDetachDataDisks`, never a write of
-// the VM's model.
+// of `sku.capacity` alone, at the scale set's pinned Compute API version, a
+// drive's growth a PATCH of `diskSizeGB` alone, and an attach or detach goes
+// through `attachDetachDataDisks`, never a write of the VM's model.
 export const DRIVE_TAG = "pilotswarm-disk-pool";
 export const DCR_ASSOCIATION_NAME = "pilotswarm-win-worker";
 export const PREMIUM_V2 = "PremiumV2_LRS";
+// The Compute API version of every write to the scale set itself: the one that
+// win-workers.bicep pins for it, since how the VMs it creates get their
+// security type depends on that version (see the Bicep). A test keeps the two
+// equal. Every other call keeps the Azure SDK's version.
+export const SCALE_SET_API_VERSION = "2024-11-01";
+const SCALE_SET_PATH = /\/providers\/Microsoft\.Compute\/virtualMachineScaleSets\/[^/]+\/?$/i;
+
+/**
+ * A policy for the compute client's request pipeline: a PUT or PATCH of a
+ * scale set itself, such as a capacity change, goes at `apiVersion`.
+ */
+export function scaleSetApiVersionPolicy(apiVersion = SCALE_SET_API_VERSION) {
+  return {
+    name: "scaleSetApiVersion",
+    sendRequest(request, next) {
+      if (request.method === "PUT" || request.method === "PATCH") {
+        const url = new URL(request.url);
+        if (SCALE_SET_PATH.test(url.pathname)) {
+          // The SDK may name the parameter `api%2Dversion`; set() replaces either form.
+          url.searchParams.set("api-version", apiVersion);
+          request.url = url.toString();
+        }
+      }
+      return next(request);
+    },
+  };
+}
 
 export function isNotFound(err) {
   return err?.statusCode === 404 || err?.code === "ResourceNotFound" || err?.code === "NotFound";

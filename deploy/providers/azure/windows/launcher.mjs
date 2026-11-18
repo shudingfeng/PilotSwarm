@@ -6,7 +6,10 @@
  *
  * On every service start it:
  *
- *   1. refuses any Node.js but the image's (EXPECTED_NODE_VERSION);
+ *   1. refuses any Node.js but the image's (EXPECTED_NODE_VERSION), and removes
+ *      every credential variable that the service's own environment holds
+ *      (CREDENTIAL_ENV_NAMES), so neither the worker nor any job it runs
+ *      inherits one;
  *   2. loads C:\pilotswarm\worker.env and overlays the deployment's values from
  *      the scale set's userData (IMDS), failing closed when one is missing or
  *      invalid (README, "userData"), and refuses external personal secrets
@@ -84,6 +87,32 @@ export const PROTECTED_EXTRA_NAMES = Object.freeze([
 export const PROTECTED_EXTRA_PREFIXES = Object.freeze([
     "NODE_", "COPILOT_", "PILOTSWARM_", "PS_", "WIN_WORKER_", "AZURE_", "GIT_", "NUGET_", "GCM_", "ARTIFACTS_CREDENTIALPROVIDER_",
 ]);
+
+/**
+ * Variables that hand whatever reads them a credential: a GitHub, Azure
+ * DevOps, package feed or Azure sign-in secret, or Git configuration taken
+ * from the environment, which can add an Authorization header to every
+ * request (GIT_CONFIG_PARAMETERS, and GIT_CONFIG_COUNT with GIT_CONFIG_KEY_<n>
+ * and GIT_CONFIG_VALUE_<n>). Jobs on the worker sign in with the VM's managed
+ * identity instead, so none of these reaches the worker: the launcher removes
+ * them from the environment the service starts it with, and refuses them in
+ * worker.env and in the extra pairs, which every process on the VM can read.
+ * Git's settings go in the image's GIT_CONFIG_GLOBAL file.
+ */
+export const CREDENTIAL_ENV_NAMES = Object.freeze([
+    "GITHUB_TOKEN", "GH_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "COPILOT_GITHUB_TOKEN",
+    "ARTIFACTS_CREDENTIALPROVIDER_ACCESSTOKEN", "ARTIFACTS_CREDENTIALPROVIDER_EXTERNAL_FEED_ENDPOINTS",
+    "VSS_NUGET_ACCESSTOKEN", "VSS_NUGET_EXTERNAL_FEED_ENDPOINTS", "NUGET_AUTH_TOKEN", "NPM_TOKEN", "NODE_AUTH_TOKEN",
+    "SYSTEM_ACCESSTOKEN", "AZURE_DEVOPS_EXT_PAT", "AZURE_CLIENT_SECRET", "AZURE_CLIENT_CERTIFICATE_PASSWORD",
+    "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT",
+]);
+/** The numbered Git configuration pairs, and NuGet's per-source credentials (NuGetPackageSourceCredentials_<source>). */
+const CREDENTIAL_ENV_FAMILIES = /^(?:GIT_CONFIG_(?:KEY|VALUE)_\d+|NUGETPACKAGESOURCECREDENTIALS_.+)$/i;
+
+/** True for a credential variable (CREDENTIAL_ENV_NAMES and their families), compared without case. */
+export function isCredentialEnvName(name) {
+    return CREDENTIAL_ENV_NAMES.includes(String(name).toUpperCase()) || CREDENTIAL_ENV_FAMILIES.test(String(name));
+}
 
 const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
@@ -177,7 +206,7 @@ function checkUserDataValue(name, value) {
             }
             for (const entry of parsed.endpointCredentials) {
                 if (!isPlainObject(entry) || typeof entry.endpoint !== "string") throw new LaunchError(`userData: every ${name} entry needs an endpoint`);
-                if ("password" in entry) throw new LaunchError(`userData: ${name} carries a password; use a managed identity (azureClientId) instead`);
+                if ("password" in entry) throw new LaunchError(`userData: ${name} carries a password; use a managed identity (clientId) instead`);
             }
             return;
         }
@@ -198,7 +227,8 @@ export function isProtectedExtraName(name) {
     return PROTECTED_EXTRA_NAMES.includes(upper)
         || PROTECTED_EXTRA_PREFIXES.some((prefix) => upper.startsWith(prefix))
         || USER_DATA_SETTINGS.includes(upper)
-        || LAUNCHER_SETTINGS.includes(upper);
+        || LAUNCHER_SETTINGS.includes(upper)
+        || isCredentialEnvName(name);
 }
 
 /** One PEM certificate exactly: base64 lines between its two markers. */
@@ -304,6 +334,7 @@ export function buildWorkerEnv({ workerEnv, userData }) {
     for (const { name, value } of workerEnv) {
         if (USER_DATA_SETTINGS.includes(name.toUpperCase())) throw new LaunchError(`worker.env sets ${name}, which only userData may set`);
         if (LAUNCHER_SETTINGS.includes(name.toUpperCase())) throw new LaunchError(`worker.env sets ${name}, which only the launcher sets`);
+        if (isCredentialEnvName(name)) throw new LaunchError(`worker.env sets ${name}, a credential variable; jobs sign in with the VM's managed identity`);
         set(name, value);
     }
     for (const [name, value] of Object.entries(userData.env)) set(name, value);
@@ -951,6 +982,13 @@ export async function runLauncher(deps = {}) {
     const randomId = deps.randomId ?? randomUUID;
 
     checkNodeVersion(deps.nodeVersion ?? process.versions.node, deps.expectedNodeVersion ?? EXPECTED_NODE_VERSION);
+
+    // Only names are logged, never a value.
+    const inherited = Object.keys(env).filter(isCredentialEnvName);
+    if (inherited.length) {
+        applyEnv(env, {}, inherited);
+        log(`launcher: removed ${inherited.length} credential variable(s) from the service's environment, so no job inherits them: ${inherited.join(", ")}`);
+    }
 
     let workerEnvText;
     try {

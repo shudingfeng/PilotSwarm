@@ -1,5 +1,6 @@
 {
   "schemaVersion": 1,
+  "notes": "Example seed: two public repositories, the npm cache and a scratch folder that every drive gets empty.",
   "reposRoot": "Q:\\Repos",
   "repositories": [
     {
@@ -19,9 +20,19 @@
   ],
   "modifyFolders": [
     "Q:\\Repos\\PilotSwarm",
-    "Q:\\Repos\\Hello-World",
-    "Q:\\.cache\\npm",
-    "Q:\\temp"
+    "Q:\\Repos\\Hello-World"
+  ],
+  "folders": [
+    {
+      "path": "Q:\\.cache\\npm",
+      "access": "modify",
+      "notes": "npm_config_cache in the example worker settings"
+    },
+    {
+      "path": "Q:\\temp",
+      "access": "modify",
+      "notes": "scratch space for builds"
+    }
   ],
   "packageCaches": [
     {
@@ -31,6 +42,12 @@
       "env": {
         "npm_config_cache": "Q:\\.cache\\npm"
       }
+    }
+  ],
+  "beforeSnapshot": [
+    {
+      "emptyFolder": "Q:\\temp",
+      "reason": "scratch files of the seed's own commands; every drive starts with an empty scratch folder"
     }
   ]
 }

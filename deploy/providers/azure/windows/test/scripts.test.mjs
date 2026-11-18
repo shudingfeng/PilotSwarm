@@ -7,7 +7,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { buildWorkerEnv, decodeUserData, parseEnvFile, USER_DATA_SETTINGS } from "../launcher.mjs";
+import { buildWorkerEnv, CREDENTIAL_ENV_NAMES, decodeUserData, parseEnvFile, USER_DATA_SETTINGS } from "../launcher.mjs";
 import { validateReleaseManifest } from "../disk-attacher.mjs";
 import { createGitRunner, listRepositories, writeCleanRecord } from "../../../../../packages/sdk/examples/devdrive-workspaces/git-repos.mjs";
 import { gitTestEnv, psQuote, pwsh, REPO_ROOT, runDriver, serviceEnv, tempDir, userData, windowsPowerShell, WINDOWS_DIR } from "./fixtures.mjs";
@@ -186,7 +186,7 @@ test("the seed manifest: the example is valid, also on a machine without its dri
     try {
         const base = JSON.parse(fs.readFileSync(path.join(WINDOWS_DIR, "examples", "seed-manifest.json"), "utf8"));
         const variants = {
-            outside: { ...base, modifyFolders: ["Q:\\temp"] },
+            outside: { ...base, modifyFolders: ["Q:\\elsewhere"] },
             rootModify: { ...base, modifyFolders: [...base.modifyFolders, "Q:\\Repos"] },
             credentials: { ...base, repositories: [{ ...base.repositories[0], url: "https://user:pat@example.test/repo.git" }] },
             branch: { ...base, repositories: [{ ...base.repositories[0], branch: "../main" }] },
@@ -198,18 +198,24 @@ test("the seed manifest: the example is valid, also on a machine without its dri
         const missingDrive = [..."ZYXWVUTSRPONMLKJIHGF"].find((letter) => !fs.existsSync(`${letter}:\\`));
         assert.ok(missingDrive, "this machine has a free drive letter");
         const onMissingDrive = (folder) => folder.replace(/^Q:/i, `${missingDrive}:`);
-        fs.writeFileSync(path.join(home, "elsewhere.json"), JSON.stringify({ ...base, reposRoot: onMissingDrive(base.reposRoot), modifyFolders: base.modifyFolders.map(onMissingDrive) }));
+        fs.writeFileSync(path.join(home, "elsewhere.json"), JSON.stringify({
+            ...base, reposRoot: onMissingDrive(base.reposRoot), modifyFolders: base.modifyFolders.map(onMissingDrive),
+            folders: base.folders.map((folder) => ({ ...folder, path: onMissingDrive(folder.path) })),
+            beforeSnapshot: base.beforeSnapshot.map((step) => ({ ...step, emptyFolder: onMissingDrive(step.emptyFolder) })),
+        }));
         const driver = runDriver(home, "manifest.ps1", [
             `. ${psQuote(scriptPath("Seed-WorkerReposDisk.ps1"))}`,
             `$example = Test-SeedManifest (Read-JsonFile -Path ${psQuote(path.join(WINDOWS_DIR, "examples", "seed-manifest.json"))})`,
             `$elsewhere = Test-SeedManifest (Read-JsonFile -Path ${psQuote(path.join(home, "elsewhere.json"))})`,
             "$refused = [ordered]@{}",
             `foreach ($name in @(${Object.keys(variants).map(psQuote).join(", ")})) { try { [void](Test-SeedManifest (Read-JsonFile -Path (Join-Path ${psQuote(home)} ($name + '.json')))); $refused[$name] = 'accepted' } catch { $refused[$name] = $_.Exception.Message } }`,
-            "ConvertTo-Json -Compress -Depth 5 -InputObject @{ repos = @($example.Repositories | ForEach-Object { $_.Path }); elsewhere = @($elsewhere.Repositories | ForEach-Object { $_.Path }); modify = $example.ModifyFolders; caches = @($example.PackageCaches | ForEach-Object { $_.Name }); refused = $refused }",
+            "ConvertTo-Json -Compress -Depth 5 -InputObject @{ repos = @($example.Repositories | ForEach-Object { $_.Path }); elsewhere = @($elsewhere.Repositories | ForEach-Object { $_.Path }); modify = $example.ModifyFolders; emptied = @($example.BeforeSnapshot | ForEach-Object { $_.EmptyFolder }); caches = @($example.PackageCaches | ForEach-Object { $_.Name }); refused = $refused }",
         ].join("\n"));
         assert.equal(driver.status, 0, driver.stderr + driver.stdout);
         assert.deepEqual(driver.json.repos, ["Q:\\Repos\\PilotSwarm", "Q:\\Repos\\Hello-World"]);
         assert.deepEqual(driver.json.elsewhere, [`${missingDrive}:\\Repos\\PilotSwarm`, `${missingDrive}:\\Repos\\Hello-World`]);
+        assert.deepEqual(driver.json.modify, ["Q:\\Repos\\PilotSwarm", "Q:\\Repos\\Hello-World", "Q:\\.cache\\npm", "Q:\\temp"]);
+        assert.deepEqual(driver.json.emptied, ["Q:\\temp"]);
         assert.deepEqual(driver.json.caches, ["npm"]);
         assert.match(driver.json.refused.outside, /no modify folder covers/);
         assert.match(driver.json.refused.rootModify, /reposRoot itself stays read-only/);
@@ -218,6 +224,311 @@ test("the seed manifest: the example is valid, also on a machine without its dri
         assert.match(driver.json.refused.twice, /listed twice/);
         assert.match(driver.json.refused.unknown, /unknown field extra/);
     } finally {
+        fs.rmSync(home, { recursive: true, force: true });
+    }
+});
+
+test("the seed manifest's submodule lists, folders, beforeSnapshot steps and notes are checked", { skip: noPwsh || notWindows }, () => {
+    const home = tempDir("ps-win-seedfields-");
+    try {
+        const repo = (fields = {}) => ({ name: "app", url: "https://example.test/app.git", branch: "main", ...fields });
+        const full = {
+            schemaVersion: 1,
+            notes: "free text",
+            repositories: [
+                repo({ submodules: [{ path: "libs\\core", branch: "release/2", notes: "its own branch" }, { path: "tools/" }], notes: "two submodules" }),
+                { name: "plain", url: "https://example.test/plain.git", branch: "main", submodules: [] },
+            ],
+            modifyFolders: ["Q:\\Repos\\plain"],
+            folders: [
+                { path: "Q:\\Repos\\app", access: "modify" },
+                { path: "Q:\\.cache\\http", access: "modify", notes: "a package manager's HTTP cache" },
+                { path: "Q:\\tools", access: "read" },
+            ],
+            packageCaches: [{ name: "fill", workingDirectory: "Q:\\Repos\\app", command: ["fill.exe"], notes: "fills the cache" }],
+            beforeSnapshot: [{ emptyFolder: "Q:\\.cache\\http\\", reason: "no drive needs the HTTP cache", notes: "kept free text" }],
+        };
+        const withFolders = (folders) => ({ ...full, folders });
+        const withSteps = (beforeSnapshot) => ({ ...full, beforeSnapshot });
+        const variants = {
+            subPathParent: { ...full, repositories: [repo({ submodules: [{ path: "../other" }] }), full.repositories[1]] },
+            subPathRooted: { ...full, repositories: [repo({ submodules: [{ path: "C:\\other" }] }), full.repositories[1]] },
+            subPathGit: { ...full, repositories: [repo({ submodules: [{ path: "x/.git" }] }), full.repositories[1]] },
+            subPathMissing: { ...full, repositories: [repo({ submodules: [{ branch: "main" }] }), full.repositories[1]] },
+            subTwice: { ...full, repositories: [repo({ submodules: [{ path: "lib" }, { path: "LIB/" }] }), full.repositories[1]] },
+            subBranch: { ...full, repositories: [repo({ submodules: [{ path: "lib", branch: "../main" }] }), full.repositories[1]] },
+            subUnknown: { ...full, repositories: [repo({ submodules: [{ name: "lib" }] }), full.repositories[1]] },
+            subNotObject: { ...full, repositories: [repo({ submodules: ["lib"] }), full.repositories[1]] },
+            repoNotes: { ...full, repositories: [repo({ notes: 7 }), full.repositories[1]] },
+            folderAccess: withFolders([...full.folders, { path: "Q:\\x", access: "write" }]),
+            folderNoAccess: withFolders([...full.folders, { path: "Q:\\x" }]),
+            folderUnknown: withFolders([...full.folders, { path: "Q:\\x", access: "read", create: true }]),
+            folderTwice: withFolders([...full.folders, { path: "Q:\\tools\\", access: "read" }]),
+            folderAlsoModify: withFolders([...full.folders, { path: "Q:\\Repos\\plain", access: "modify" }]),
+            folderOffDrive: withFolders([...full.folders, { path: "D:\\cache", access: "modify" }]),
+            folderRoot: withFolders([...full.folders, { path: "Q:\\Repos", access: "modify" }]),
+            readInModify: withFolders([...full.folders, { path: "Q:\\.cache\\http\\v3", access: "read" }]),
+            notCovered: withFolders(full.folders.filter((folder) => folder.path !== "Q:\\Repos\\app")),
+            stepNoReason: withSteps([{ emptyFolder: "Q:\\.cache\\http" }]),
+            stepBlankReason: withSteps([{ emptyFolder: "Q:\\.cache\\http", reason: " " }]),
+            stepUnlisted: withSteps([{ emptyFolder: "Q:\\.cache\\other", reason: "x" }]),
+            stepRepository: withSteps([{ emptyFolder: "Q:\\Repos\\app", reason: "x" }]),
+            stepInsideRepository: { ...withFolders([...full.folders, { path: "Q:\\Repos\\app\\obj", access: "modify" }]), beforeSnapshot: [{ emptyFolder: "Q:\\Repos\\app\\obj", reason: "x" }] },
+            stepAroundRepository: { ...withFolders([...full.folders, { path: "Q:\\Repos", access: "read" }]), beforeSnapshot: [{ emptyFolder: "Q:\\Repos", reason: "x" }] },
+            stepAroundFolder: { ...withFolders([full.folders[0], { path: "Q:\\.cache", access: "read" }, { path: "Q:\\.cache\\npm", access: "modify" }]), beforeSnapshot: [{ emptyFolder: "Q:\\.cache", reason: "x" }] },
+            stepAroundModifyFolder: { ...withFolders([...full.folders, { path: "Q:\\temp", access: "modify" }]), modifyFolders: [...full.modifyFolders, "Q:\\temp\\keep"], beforeSnapshot: [{ emptyFolder: "Q:\\temp", reason: "x" }] },
+            stepTwice: withSteps([...full.beforeSnapshot, { emptyFolder: "Q:\\.cache\\http", reason: "again" }]),
+            stepUnknown: withSteps([{ emptyFolder: "Q:\\.cache\\http", reason: "x", recursive: true }]),
+            cacheNotes: { ...full, packageCaches: [{ ...full.packageCaches[0], notes: ["not text"] }] },
+        };
+        // The same manifest, but every repository with submodules: true, as an older manifest has it.
+        const legacy = { ...full, repositories: full.repositories.map((entry) => ({ ...entry, submodules: true })) };
+        for (const [name, value] of Object.entries({ full, legacy, ...variants })) fs.writeFileSync(path.join(home, `${name}.json`), JSON.stringify(value));
+        const driver = runDriver(home, "fields.ps1", [
+            `. ${psQuote(scriptPath("Seed-WorkerReposDisk.ps1"))}`,
+            "$describe = { param($m) [ordered]@{",
+            "  repos = @($m.Repositories | ForEach-Object { [ordered]@{ name = $_.Name; all = $_.Submodules; listed = @($_.SubmoduleList | ForEach-Object { [ordered]@{ path = $_.Path; branch = $_.Branch; folder = $_.Folder } }) } })",
+            "  modify = @($m.ModifyFolders); read = @($m.ReadFolders); caches = @($m.PackageCaches | ForEach-Object { $_.Name })",
+            "  beforeSnapshot = @($m.BeforeSnapshot | ForEach-Object { [ordered]@{ emptyFolder = $_.EmptyFolder; reason = $_.Reason } }) } }",
+            `$full = & $describe (Test-SeedManifest (Read-JsonFile -Path (Join-Path ${psQuote(home)} 'full.json')))`,
+            `$legacy = & $describe (Test-SeedManifest (Read-JsonFile -Path (Join-Path ${psQuote(home)} 'legacy.json')))`,
+            "$refused = [ordered]@{}",
+            `foreach ($name in @(${Object.keys(variants).map(psQuote).join(", ")})) { try { [void](Test-SeedManifest (Read-JsonFile -Path (Join-Path ${psQuote(home)} ($name + '.json')))); $refused[$name] = 'accepted' } catch { $refused[$name] = $_.Exception.Message } }`,
+            "ConvertTo-Json -Compress -Depth 8 -InputObject ([ordered]@{ full = $full; legacy = $legacy; refused = $refused })",
+        ].join("\n"));
+        assert.equal(driver.status, 0, driver.stderr + driver.stdout);
+        assert.deepEqual(driver.json.full.repos, [
+            { name: "app", all: false, listed: [
+                { path: "libs/core", branch: "release/2", folder: "Q:\\Repos\\app\\libs\\core" },
+                { path: "tools", branch: null, folder: "Q:\\Repos\\app\\tools" },
+            ] },
+            { name: "plain", all: false, listed: [] },
+        ]);
+        assert.deepEqual(driver.json.full.modify, ["Q:\\Repos\\plain", "Q:\\Repos\\app", "Q:\\.cache\\http"]);
+        assert.deepEqual(driver.json.full.read, ["Q:\\tools"]);
+        assert.deepEqual(driver.json.full.caches, ["fill"]);
+        assert.deepEqual(driver.json.full.beforeSnapshot, [{ emptyFolder: "Q:\\.cache\\http", reason: "no drive needs the HTTP cache" }]);
+        assert.deepEqual(driver.json.legacy.repos.map((entry) => [entry.name, entry.all, entry.listed.length]), [["app", true, 0], ["plain", true, 0]]);
+        const refused = driver.json.refused;
+        for (const name of ["subPathParent", "subPathRooted", "subPathGit", "subPathMissing"]) assert.match(refused[name], /a submodule needs its relative path inside the repository/, name);
+        assert.match(refused.subTwice, /the submodule LIB is listed twice/);
+        assert.match(refused.subBranch, /the submodule lib needs a branch name/);
+        assert.match(refused.subUnknown, /a submodule has an unknown field name/);
+        assert.match(refused.subNotObject, /each submodules entry is an object with a path/);
+        assert.match(refused.repoNotes, /repository app: notes must be a string/);
+        assert.match(refused.folderAccess, /folder Q:\\x: access is "modify" or "read"/);
+        assert.match(refused.folderNoAccess, /access is "modify" or "read"/);
+        assert.match(refused.folderUnknown, /a folder has an unknown field create/);
+        assert.match(refused.folderTwice, /is listed twice/);
+        assert.match(refused.folderAlsoModify, /is listed twice/);
+        assert.match(refused.folderOffDrive, /must be a folder on the drive of reposRoot/);
+        assert.match(refused.folderRoot, /reposRoot itself stays read-only/);
+        assert.match(refused.readInModify, /the read folder Q:\\\.cache\\http\\v3 is inside a modify folder/);
+        assert.match(refused.notCovered, /no modify folder covers Q:\\Repos\\app/);
+        assert.match(refused.stepNoReason, /needs a reason/);
+        assert.match(refused.stepBlankReason, /needs a reason/);
+        assert.match(refused.stepUnlisted, /empties only folders the manifest lists/);
+        assert.match(refused.stepRepository, /would delete files of the repository app/);
+        assert.match(refused.stepInsideRepository, /would delete files of the repository app/);
+        assert.match(refused.stepAroundRepository, /would delete files of the repository app/);
+        // The seed creates every listed folder before it empties these, so one inside would never reach the snapshot.
+        assert.match(refused.stepAroundFolder, /may not empty Q:\\\.cache, which would delete the listed folder Q:\\\.cache\\npm inside it/);
+        assert.match(refused.stepAroundModifyFolder, /may not empty Q:\\temp, which would delete the listed folder Q:\\temp\\keep inside it/);
+        assert.match(refused.stepTwice, /empties Q:\\\.cache\\http twice/);
+        assert.match(refused.stepUnknown, /a beforeSnapshot step has an unknown field recursive/);
+        assert.match(refused.cacheNotes, /package cache fill: notes must be a string/);
+    } finally {
+        fs.rmSync(home, { recursive: true, force: true });
+    }
+});
+
+/**
+ * A repository with two submodules, lib and other, and a docs folder. After
+ * the repository pinned lib, lib got a release branch the repository does not
+ * pin.
+ */
+function repoWithTwoSubmodules(home) {
+    const env = gitTestEnv(home);
+    const git = (cwd, ...args) => execFileSync("git", args, { cwd, env, encoding: "utf8", windowsHide: true, stdio: ["ignore", "pipe", "pipe"] }).trim();
+    const remote = (name, file) => {
+        const bare = path.join(home, `${name}.git`);
+        const work = path.join(home, `${name}-work`);
+        git(home, "init", "-q", "--bare", bare);
+        git(home, "init", "-q", "-b", "main", work);
+        fs.writeFileSync(path.join(work, file), `${name} one\n`);
+        git(work, "add", "-A");
+        git(work, "commit", "-q", "-m", `${name} one`);
+        git(work, "push", "-q", bare, "main");
+        return { bare, work };
+    };
+    const lib = remote("lib", "lib.txt");
+    const other = remote("other", "other.txt");
+    const app = remote("app", "a.txt");
+    git(app.work, "submodule", "add", "-q", lib.bare, "lib");
+    git(app.work, "submodule", "add", "-q", other.bare, "other");
+    fs.mkdirSync(path.join(app.work, "docs"));
+    fs.writeFileSync(path.join(app.work, "docs", "readme.txt"), "docs\n");
+    git(app.work, "add", "-A");
+    git(app.work, "commit", "-q", "-m", "two submodules and docs");
+    git(app.work, "push", "-q", app.bare, "main");
+    const pinned = git(lib.work, "rev-parse", "HEAD");
+    const release = () => {
+        fs.appendFileSync(path.join(lib.work, "lib.txt"), "more\n");
+        git(lib.work, "commit", "-q", "-am", "lib on release");
+        git(lib.work, "push", "-q", lib.bare, "HEAD:release");
+        return git(lib.work, "rev-parse", "HEAD");
+    };
+    return { env, git, app, pinned, release };
+}
+
+// A package cache command: it fills an HTTP cache and records the Git settings it was given.
+const FILL_CACHE = String.raw`
+const fs = require("node:fs");
+const path = require("node:path");
+const target = process.env.FILL_TARGET;
+fs.mkdirSync(path.join(target, "v3"), { recursive: true });
+fs.writeFileSync(path.join(target, "v3", "index.json"), "{}");
+fs.writeFileSync(path.join(target, "..", "fill.json"), JSON.stringify({ prompt: process.env.GIT_TERMINAL_PROMPT ?? null, gcm: process.env.GCM_INTERACTIVE ?? null }));
+`;
+
+test("the seed checks out only the listed submodules, at their own branch, empties the beforeSnapshot folders, and -Verify checks both", { skip: noRunCommandShell }, () => {
+    const home = tempDir("ps-win-seedlist-");
+    try {
+        const { env, git, app, pinned, release } = repoWithTwoSubmodules(home);
+        // Without prompts of its own, so the package cache command shows what the seed gives it.
+        const seedEnv = Object.fromEntries(Object.entries(env).filter(([name]) => !/^(GIT_TERMINAL_PROMPT|GCM_INTERACTIVE)$/i.test(name)));
+        let tip = release();
+        assert.notEqual(tip, pinned);
+        const drive = path.join(home, "Drive");
+        const reposRoot = path.join(drive, "Repos");
+        const clone = path.join(reposRoot, "app");
+        const http = path.join(drive, "cache", "http");
+        const tools = path.join(drive, "tools");
+        const fill = path.join(home, "fill.cjs");
+        fs.writeFileSync(fill, FILL_CACHE);
+        const manifest = (submodules) => ({
+            schemaVersion: 1,
+            reposRoot,
+            repositories: [{ name: "app", url: `file:///${app.bare.replace(/\\/g, "/")}`, branch: "main", submodules, notes: "only lib" }],
+            folders: [{ path: clone, access: "modify" }, { path: http, access: "modify" }, { path: tools, access: "read" }],
+            packageCaches: [{ name: "fill", workingDirectory: clone, command: [process.execPath, fill], env: { FILL_TARGET: http } }],
+            beforeSnapshot: [{ emptyFolder: http, reason: "an HTTP cache no drive needs" }],
+        });
+        const manifestPath = path.join(home, "seed-manifest.json");
+        fs.writeFileSync(manifestPath, JSON.stringify(manifest([{ path: "lib", branch: "release" }])));
+        fs.writeFileSync(path.join(home, "docs-manifest.json"), JSON.stringify(manifest([{ path: "docs", branch: "release" }])));
+        // The seed's steps in the Windows PowerShell 5.1 of the refresh's Run Command. A test cannot install the worker's
+        // service, so LOCAL SERVICE, which icacls can name, stands in for its account, and the owners stay as they are.
+        const seed = (mode, lines) => runDriver(home, `${mode}.ps1`, [
+            `. ${psQuote(scriptPath("Seed-WorkerReposDisk.ps1"))} -WorkerEnvFile ${psQuote(path.join(home, "none.env"))}`,
+            "function Assert-WorkerServiceSid { 'S-1-5-19' }",
+            "function Get-WorkerServiceSid { 'S-1-5-19' }",
+            "function Set-RepositoryOwners { param([string]$Path) }",
+            `$manifest = Test-SeedManifest (Read-JsonFile -Path ${psQuote(manifestPath)})`,
+            "Initialize-GitEnvironment $manifest",
+            ...lines,
+            "$checks = Test-SeedDrive -Manifest $manifest",
+            "Remove-Item -LiteralPath $script:EmptyHooks -Recurse -Force",
+            "ConvertTo-Json -Compress -Depth 5 -InputObject $checks",
+        ].join("\n"), { env: seedEnv, shell: windowsPowerShell() });
+        const run = (mode) => seed(mode, [`Invoke-SeedDrive -Manifest $manifest -ManifestSha256 (Get-Sha256Hex ${psQuote(manifestPath)}) -Mode '${mode}'`]);
+        const libDir = path.join(clone, "lib");
+        const passing = (checks) => {
+            for (const name of ["refs", "fsck", "hooks", "cleanRecord", "emptied"]) assert.deepEqual(checks[name], [], `${name}: ${JSON.stringify(checks[name])}`);
+            assert.ok(checks.owner.length > 0, "the owners stayed the test's");
+            // Only the roots fail outside a real drive: the folders have their grants, and the read folder is read-only.
+            const roots = [`${path.parse(reposRoot).root}: `, `${reposRoot}: `];
+            assert.ok(checks.acl.length > 0 && checks.acl.every((line) => roots.some((root) => line.startsWith(root))), JSON.stringify(checks.acl));
+        };
+
+        const seeded = run("seed");
+        assert.equal(seeded.status, 0, seeded.stderr + seeded.stdout);
+        passing(seeded.json);
+        assert.equal(git(libDir, "symbolic-ref", "--short", "HEAD"), "release");
+        assert.equal(git(libDir, "rev-parse", "HEAD"), tip, "lib is at its own branch, not at the commit app pins");
+        assert.equal(fs.existsSync(path.join(clone, "other", ".git")), false, "an unlisted submodule is not checked out");
+        assert.deepEqual(fs.readdirSync(http), [], "the HTTP cache was emptied, its folder kept");
+        assert.ok(fs.statSync(tools).isDirectory(), "the read folder exists");
+        assert.deepEqual(JSON.parse(fs.readFileSync(path.join(drive, "cache", "fill.json"), "utf8")), { prompt: "0", gcm: "never" });
+        const state = JSON.parse(fs.readFileSync(path.join(drive, ".pilotswarm", "seed-state.json"), "utf8"));
+        assert.equal(state.remoteRefs["app/lib"]["refs/remotes/origin/release"], tip);
+
+        // The refresh moves lib to the new tip of its branch and empties the cache again.
+        tip = release();
+        const refreshed = run("refresh");
+        assert.equal(refreshed.status, 0, refreshed.stderr + refreshed.stdout);
+        passing(refreshed.json);
+        assert.equal(git(libDir, "rev-parse", "HEAD"), tip);
+        assert.deepEqual(fs.readdirSync(http), []);
+
+        // -Verify sees a file left in the cache and lib moved off the fetched commit.
+        fs.writeFileSync(path.join(http, "left.bin"), "x");
+        git(libDir, "reset", "-q", "--hard", "HEAD~1");
+        const drifted = seed("verify", []);
+        assert.equal(drifted.status, 0, drifted.stderr + drifted.stdout);
+        assert.deepEqual(drifted.json.emptied, [`${http}: not empty`]);
+        assert.deepEqual(drifted.json.refs, ["app/lib: release is not at the fetched commit"]);
+
+        // A listed folder that is not a submodule is refused before any Git command runs in it.
+        const notSubmodule = runDriver(home, "docs.ps1", [
+            `. ${psQuote(scriptPath("Seed-WorkerReposDisk.ps1"))} -WorkerEnvFile ${psQuote(path.join(home, "none.env"))}`,
+            `$manifest = Test-SeedManifest (Read-JsonFile -Path ${psQuote(path.join(home, "docs-manifest.json"))})`,
+            "Initialize-GitEnvironment $manifest",
+            "try { Update-SeedRepository -Repository $manifest.Repositories[0] -ReposRoot $manifest.ReposRoot; $answer = 'accepted' } catch { $answer = $_.Exception.Message }",
+            "Remove-Item -LiteralPath $script:EmptyHooks -Recurse -Force",
+            "ConvertTo-Json -Compress -InputObject @{ answer = $answer }",
+        ].join("\n"), { env: seedEnv, shell: windowsPowerShell() });
+        assert.equal(notSubmodule.status, 0, notSubmodule.stderr + notSubmodule.stdout);
+        assert.equal(notSubmodule.json.answer, "docs is not a submodule of app");
+        assert.equal(git(clone, "symbolic-ref", "--short", "HEAD"), "main", "app stays on its branch");
+    } finally {
+        fs.rmSync(home, { recursive: true, force: true });
+    }
+});
+
+test("the drive's root gives access only to SYSTEM, Administrators and the worker, a mount leaves a right list alone, and -Verify checks it", { skip: noRunCommandShell }, () => {
+    const home = tempDir("ps-win-rootacl-");
+    const root = path.join(home, "Q");
+    try {
+        fs.mkdirSync(path.join(root, "Repos"), { recursive: true });
+        // What a new volume and the earlier treatment leave: Everyone, Users and Authenticated Users read the drive.
+        execFileSync("icacls", [root, "/grant", "*S-1-1-0:(OI)(CI)(RX)", "*S-1-5-32-545:(OI)(CI)(RX)", "*S-1-5-11:(OI)(CI)(RX)"], { windowsHide: true });
+        execFileSync("icacls", [path.join(root, "Repos"), "/grant", "*S-1-5-32-545:(OI)(CI)(RX)"], { windowsHide: true });
+        // The test's own account stands in for the worker's, so it can still read what it locked.
+        const driver = runDriver(home, "root-acl.ps1", [
+            `. ${psQuote(scriptPath("Initialize-WinWorkerDisk.ps1"))}`,
+            `. ${psQuote(scriptPath("Seed-WorkerReposDisk.ps1"))}`,
+            "$me = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value",
+            "function Get-WorkerServiceSid { $script:me }",
+            "$script:calls = 0",
+            "function Invoke-Icacls { param([string]$Path, [string[]]$Arguments) $script:calls++; PilotSwarm.WinWorker\\Invoke-Icacls -Path $Path -Arguments $Arguments }",
+            `$root = ${psQuote(root)}`,
+            "$before = @(Get-RootAclFailures -Path $root)",
+            "Set-DevDriveRootAcl -Root $root",
+            "$first = $script:calls",
+            "Set-DevDriveRootAcl -Root $root",
+            "$rules = @((Get-Acl -LiteralPath $root).GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) | ForEach-Object { $_.IdentityReference.Value + ' ' + $_.AccessControlType + ' ' + $_.IsInherited + ' ' + $_.InheritanceFlags })",
+            "$reposAcl = Get-Acl -LiteralPath (Join-Path $root 'Repos')",
+            "ConvertTo-Json -Compress -Depth 4 -InputObject ([ordered]@{ me = $me; before = $before; first = $first; second = $script:calls - $first; locked = Test-DevDriveRootAcl -Path $root; rules = $rules",
+            "  reposExplicit = @($reposAcl.GetAccessRules($true, $false, [System.Security.Principal.SecurityIdentifier])).Count; reposProtected = $reposAcl.AreAccessRulesProtected",
+            "  after = @(Get-RootAclFailures -Path $root); reposAfter = @(Get-RootAclFailures -Path (Join-Path $root 'Repos')) })",
+        ].join("\n"), { shell: windowsPowerShell() });
+        assert.equal(driver.status, 0, driver.stderr + driver.stdout);
+        const result = driver.json;
+        for (const sid of ["S-1-1-0", "S-1-5-32-545", "S-1-5-11"]) assert.ok(result.before.includes(`${root}: ${sid} has access`), `${sid}: ${JSON.stringify(result.before)}`);
+        assert.ok(result.before.includes(`${root}: the worker may write`), "the stand-in's inherited Full Control");
+        assert.ok(result.first > 0);
+        assert.equal(result.second, 0, "a mount does not rewrite a right list, which would walk the whole drive");
+        assert.equal(result.locked, true);
+        const flags = "ContainerInherit, ObjectInherit";
+        assert.deepEqual([...result.rules].sort(), [`S-1-5-18 Allow False ${flags}`, `S-1-5-32-544 Allow False ${flags}`, `${result.me} Allow False ${flags}`].sort());
+        assert.equal(result.reposExplicit, 0, "the repositories' root keeps only what it inherits");
+        assert.equal(result.reposProtected, false);
+        assert.deepEqual(result.after, []);
+        assert.deepEqual(result.reposAfter, []);
+    } finally {
+        // The test's account owns the folder, so it may give itself access again before the folder goes.
+        spawnSync("icacls", [root, "/reset", "/T", "/C", "/Q"], { windowsHide: true });
         fs.rmSync(home, { recursive: true, force: true });
     }
 });
@@ -368,6 +679,331 @@ test("the image's Copilot settings files hold exactly the texts the worker check
     }
 });
 
+test("the toolchain manifest's steps and workerAccount are checked", { skip: noPwsh }, () => {
+    const home = tempDir("ps-win-steps-");
+    try {
+        const sha = (character, length = 64) => character.repeat(length);
+        const steps = [
+            { step: "installer", name: "git", url: "https://example.test/git.exe", sha256: sha("a"), type: "exe", arguments: ["/VERYSILENT"], notes: "Git for Windows" },
+            { step: "windowsFeatures", name: "features", features: ["Containers", "Hyper-V"], includeManagementTools: true },
+            { step: "restart", name: "after-features", reason: "Hyper-V needs it" },
+            { step: "visualStudio", name: "vs", bootstrapper: { url: "https://download.example.test/vs_enterprise.exe", sha256: sha("b") }, vsconfig: "{manifestDir}\\.vsconfig", version: "17.14.7" },
+            { step: "visualStudio", name: "vs-layout", layout: { path: "\\\\share\\layouts\\vs", bootstrapper: "vs_enterprise.exe", sha256: sha("c") }, vsconfig: "C:\\cfg\\x.vsconfig", version: "17.14.36301.6", successExitCodes: [0, 3010] },
+            { step: "extendPartition", name: "os-disk", driveLetter: "C" },
+            { step: "package", name: "pack", url: "https://example.test/pack.nupkg", sha512: sha("d", 128), format: "nupkg", destination: "C:\\Program Files\\dotnet\\packs\\Pack\\1.0.0" },
+            { step: "package", name: "zip", url: "https://example.test/tool.zip", sha256: sha("e"), format: "zip", destination: "C:\\tools\\zip" },
+            { step: "dockerService", name: "docker", dockerd: "C:\\Program Files\\docker\\dockerd.exe", pipeGroup: "docker-users", dataRoot: "D:\\docker" },
+            { step: "command", name: "lfs", command: ["git.exe", "lfs", "install", "--system"], successExitCodes: [0] },
+        ];
+        const full = { schemaVersion: 1, steps, mcpServers: [{ name: "fs", package: "p", version: "1.0.0" }], workerAccount: { userRights: ["SeCreateSymbolicLinkPrivilege"], groups: ["docker-users"], notes: "for symbolic links and the engine's pipe" } };
+        const replace = (name, change) => ({ ...full, steps: steps.map((step) => (step.name === name ? change(step) : step)) });
+        const withoutField = (name, field) => replace(name, (step) => Object.fromEntries(Object.entries(step).filter(([key]) => key !== field)));
+        const account = (workerAccount) => ({ ...full, workerAccount });
+        const bad = {
+            mixed: { ...full, installers: [] },
+            empty: { ...full, steps: [] },
+            noKind: replace("git", ({ step, ...rest }) => rest),
+            unknownKind: replace("git", (step) => ({ ...step, step: "reboot" })),
+            noName: replace("lfs", ({ name, ...rest }) => rest),
+            nameTwice: { ...full, mcpServers: [{ name: "GIT", package: "p", version: "1.0.0" }] },
+            unknownField: replace("os-disk", (step) => ({ ...step, size: 1 })),
+            otherKindsField: replace("os-disk", (step) => ({ ...step, features: ["x"] })),
+            notesNotText: replace("git", (step) => ({ ...step, notes: 1 })),
+            codesNotNumbers: replace("lfs", (step) => ({ ...step, successExitCodes: ["0"] })),
+            installerHash: replace("git", (step) => ({ ...step, sha256: sha("A") })),
+            featuresEmpty: replace("features", (step) => ({ ...step, features: [] })),
+            featureName: replace("features", (step) => ({ ...step, features: ["Hyper V"] })),
+            restartReason: replace("after-features", (step) => ({ ...step, reason: 3 })),
+            vsBoth: replace("vs", (step) => ({ ...step, layout: steps[4].layout })),
+            vsNeither: withoutField("vs", "bootstrapper"),
+            vsEvergreen: replace("vs", (step) => ({ ...step, bootstrapper: { url: "https://aka.ms/vs/17/release/vs_enterprise.exe", sha256: sha("b") } })),
+            vsNoHash: replace("vs", (step) => ({ ...step, bootstrapper: { url: step.bootstrapper.url } })),
+            vsBootstrapperField: replace("vs", (step) => ({ ...step, bootstrapper: { ...step.bootstrapper, channel: "release" } })),
+            vsNoConfig: withoutField("vs", "vsconfig"),
+            vsVersion: replace("vs", (step) => ({ ...step, version: "17" })),
+            vsLayoutPath: replace("vs-layout", (step) => ({ ...step, layout: { ...step.layout, path: "layouts\\vs" } })),
+            partitionLetter: replace("os-disk", (step) => ({ ...step, driveLetter: "C:" })),
+            packageTwoHashes: replace("pack", (step) => ({ ...step, sha256: sha("a") })),
+            packageNoHash: withoutField("pack", "sha512"),
+            packageUpperHash: replace("pack", (step) => ({ ...step, sha512: sha("D", 128) })),
+            packageFormat: replace("pack", (step) => ({ ...step, format: "msi" })),
+            packageRoot: replace("pack", (step) => ({ ...step, destination: "C:\\" })),
+            packageHttp: replace("pack", (step) => ({ ...step, url: "http://example.test/pack.nupkg" })),
+            dockerPath: replace("docker", (step) => ({ ...step, dockerd: "dockerd.exe" })),
+            dockerGroup: replace("docker", ({ pipeGroup, ...rest }) => rest),
+            accountField: account({ userRights: [], admin: true }),
+            accountRight: account({ userRights: ["CreateSymbolicLinks"] }),
+            accountStrongRight: account({ userRights: ["SeDebugPrivilege"] }),
+            accountDelegateRight: account({ userRights: ["SeDelegateSessionUserImpersonatePrivilege"] }),
+            accountRightTwice: account({ userRights: ["SeCreateSymbolicLinkPrivilege", "SeCreateSymbolicLinkPrivilege"] }),
+            accountGroup: account({ groups: ["docker\\users"] }),
+        };
+        // An older manifest, with installers and commands, may now carry notes on each.
+        const legacy = { schemaVersion: 1, installers: [{ ...steps[0], step: undefined, notes: "kept" }], commands: [{ name: "lfs", command: ["git.exe"] }] };
+        for (const [name, value] of Object.entries({ full, legacy, ...bad })) fs.writeFileSync(path.join(home, `${name}.json`), JSON.stringify(value));
+        const driver = runDriver(home, "steps.ps1", [
+            `. ${psQuote(scriptPath("Build-WorkerOsImage.ps1"))}`,
+            `$full = Test-ToolchainManifest (Read-JsonFile -Path (Join-Path ${psQuote(home)} 'full.json'))`,
+            `$legacy = Test-ToolchainManifest (Read-JsonFile -Path (Join-Path ${psQuote(home)} 'legacy.json'))`,
+            `$example = Test-ToolchainManifest (Read-JsonFile -Path ${psQuote(path.join(WINDOWS_DIR, "examples", "toolchain-manifest.steps.json"))})`,
+            "$refused = [ordered]@{}",
+            `foreach ($name in @(${Object.keys(bad).map(psQuote).join(", ")})) { try { [void](Test-ToolchainManifest (Read-JsonFile -Path (Join-Path ${psQuote(home)} ($name + '.json')))); $refused[$name] = 'accepted' } catch { $refused[$name] = $_.Exception.Message } }`,
+            "ConvertTo-Json -Compress -Depth 5 -InputObject ([ordered]@{ steps = @($full.steps | ForEach-Object { $_.name }); legacy = @($legacy.installers | ForEach-Object { $_.name }); example = @($example.steps | ForEach-Object { $_.step }); exampleVsconfig = @($example.steps | Where-Object { $_.step -eq 'visualStudio' } | ForEach-Object { $_.vsconfig }); refused = $refused })",
+        ].join("\n"));
+        assert.equal(driver.status, 0, driver.stderr + driver.stdout);
+        assert.deepEqual(driver.json.steps, steps.map((step) => step.name));
+        assert.deepEqual(driver.json.legacy, ["git"]);
+        // The example in steps is valid, and the .vsconfig it names ships next to it.
+        assert.deepEqual(driver.json.example, ["installer", "command", "windowsFeatures", "restart", "visualStudio", "package", "extendPartition"]);
+        for (const vsconfig of driver.json.exampleVsconfig) {
+            // The example names a Windows path, whose backslash Linux would read as part of the file's name.
+            const file = vsconfig.replace("{manifestDir}", path.join(WINDOWS_DIR, "examples")).replace(/[\\/]/g, path.sep);
+            assert.ok(Array.isArray(JSON.parse(fs.readFileSync(file, "utf8")).components), file);
+        }
+        const expected = {
+            mixed: /steps replaces installers and commands/,
+            empty: /steps lists no step/,
+            noKind: /every step names its kind in step: installer, command, windowsFeatures, restart, visualStudio, extendPartition, package, dockerService/,
+            unknownKind: /every step names its kind/,
+            noName: /every command step needs a name/,
+            nameTwice: /the name GIT is used twice/,
+            unknownField: /extendPartition step os-disk has an unknown field size/,
+            otherKindsField: /has an unknown field features/,
+            notesNotText: /installer step git: notes must be a string/,
+            codesNotNumbers: /command step lfs successExitCodes must be a list of integers/,
+            installerHash: /installer step git needs a lowercase sha256/,
+            featuresEmpty: /windowsFeatures step features needs a list of feature names/,
+            featureName: /needs a list of feature names/,
+            restartReason: /reason must be a string/,
+            vsBoth: /needs either a bootstrapper or a layout/,
+            vsNeither: /needs either a bootstrapper or a layout/,
+            vsEvergreen: /aka\.ms links to whatever version is current/,
+            vsNoHash: /needs the bootstrapper's lowercase sha256/,
+            vsBootstrapperField: /bootstrapper is \{ url, sha256 \}/,
+            vsNoConfig: /needs the path of its \.vsconfig/,
+            vsVersion: /needs the exact version it installs/,
+            vsLayoutPath: /needs the layout's absolute path/,
+            partitionLetter: /needs a driveLetter/,
+            packageTwoHashes: /needs either a sha512 or a sha256/,
+            packageNoHash: /needs either a sha512 or a sha256/,
+            packageUpperHash: /needs a lowercase sha512/,
+            packageFormat: /needs a format: nupkg or zip/,
+            packageRoot: /needs an absolute destination folder below a drive's root/,
+            packageHttp: /needs an https:\/\/ url/,
+            dockerPath: /needs the absolute path of dockerd\.exe/,
+            dockerGroup: /needs the name of the local group/,
+            accountField: /workerAccount has an unknown field admin/,
+            accountRight: /holds user right names/,
+            accountStrongRight: /may not grant SeDebugPrivilege, which would make the worker as strong as an administrator/,
+            accountDelegateRight: /may not grant SeDelegateSessionUserImpersonatePrivilege, which would make the worker as strong as an administrator/,
+            accountRightTwice: /lists SeCreateSymbolicLinkPrivilege twice/,
+            accountGroup: /holds local group names/,
+        };
+        assert.deepEqual(Object.keys(driver.json.refused), Object.keys(expected));
+        for (const [name, pattern] of Object.entries(expected)) assert.match(driver.json.refused[name], pattern, name);
+    } finally {
+        fs.rmSync(home, { recursive: true, force: true });
+    }
+});
+
+// A toolchain command for the restart test: it appends its first argument to a log and exits with its second.
+const STEP_COMMAND = String.raw`
+require("node:fs").appendFileSync(process.env.STEP_LOG, process.argv[2] + "\n");
+process.exit(Number(process.argv[3] || 0));
+`;
+
+for (const [label, shell, skip] of [["PowerShell 7", pwsh(), noPwsh], ["Windows PowerShell 5.1", windowsPowerShell(), noRunCommandShell]]) {
+    test(`a build with steps stops for each restart, carries on once the VM has restarted, and runs a step again only when it changed, in ${label}`, { skip }, () => {
+        const home = tempDir("ps-win-restart-");
+        try {
+            const script = path.join(home, "step.cjs");
+            fs.writeFileSync(script, STEP_COMMAND);
+            const log = path.join(home, "steps.log");
+            fs.writeFileSync(log, "");
+            const command = (name, ...args) => ({ step: "command", name, command: [process.execPath, script, ...args], successExitCodes: [0, 3010] });
+            const manifest = (second) => ({
+                schemaVersion: 1,
+                steps: [
+                    command("first", "first"),
+                    { step: "windowsFeatures", name: "features", features: ["Containers", "Hyper-V"], includeManagementTools: true },
+                    { step: "restart", name: "after-features", reason: "the features need it" },
+                    second,
+                ],
+                mcpServers: [{ name: "fs", package: "example-mcp", version: "1.0.0" }],
+            });
+            fs.writeFileSync(path.join(home, "manifest.json"), JSON.stringify(manifest(command("second", "second", "3010"))));
+            fs.writeFileSync(path.join(home, "changed.json"), JSON.stringify(manifest(command("second", "second again", "3010"))));
+            // Each run reads the state the one before saved; Get-LastBootTime stands in for the VM's restarts.
+            const runs = [["A", "manifest"], ["A", "manifest"], ["B", "manifest"], ["B", "manifest"], ["C", "manifest"], ["C", "changed"], ["D", "changed"]];
+            const driver = runDriver(home, "restart.ps1", [
+                `. ${psQuote(scriptPath("Build-WorkerOsImage.ps1"))} -Root ${psQuote(path.join(home, "root"))}`,
+                // The image's node.exe is on C:, a drive Linux doesn't have: npm's path, which the stand-in below catches, comes from this node.
+                `$script:NodeExe = ${psQuote(process.execPath)}`,
+                "$script:boot = ''",
+                "function Get-LastBootTime { $script:boot }",
+                "function Test-PendingRestart { $false }",
+                `function Install-WindowsFeature { param([string[]]$Name, [switch]$IncludeManagementTools) [System.IO.File]::AppendAllText(${psQuote(log)}, ('features ' + ($Name -join ',') + ' ' + [bool]$IncludeManagementTools + [char]10)); [pscustomobject]@{ Success = $true; RestartNeeded = 'Yes' } }`,
+                // npm installs the MCP server only in the log; every other program runs.
+                `function Invoke-NativeCommand { [CmdletBinding()] param([string]$FilePath, [string[]]$ArgumentList = @(), [string]$WorkingDirectory, [hashtable]$Environment, [int]$TimeoutSeconds = 7200, [int[]]$SuccessExitCode = @(0), [switch]$NoThrow) if ($FilePath -match 'npm\\.cmd$') { [System.IO.File]::AppendAllText(${psQuote(log)}, ('npm ' + $ArgumentList[-1] + [char]10)); return [pscustomobject]@{ ExitCode = 0; StdOut = ''; StdErr = '' } }`,
+                // Outside Windows an exit status keeps only its low 8 bits, so a step's 3010 arrives as 194: report it as Windows does.
+                "    if (-not (Test-WindowsHost) -and $ArgumentList.Count -gt 0 -and $ArgumentList[-1] -eq '3010') { $PSBoundParameters['SuccessExitCode'] = @($SuccessExitCode) + 194; $result = PilotSwarm.WinWorker\\Invoke-NativeCommand @PSBoundParameters; if ($result.ExitCode -eq 194) { $result.ExitCode = 3010 }; return $result }",
+                "    PilotSwarm.WinWorker\\Invoke-NativeCommand @PSBoundParameters }",
+                "$results = @()",
+                `foreach ($run in @(${runs.map(([boot, file]) => `@('${boot}', '${file}')`).join(", ")})) {`,
+                "    $script:boot = $run[0]",
+                `    $manifest = Test-ToolchainManifest (Read-JsonFile -Path (Join-Path ${psQuote(home)} ($run[1] + '.json')))`,
+                `    $outcome = Install-Toolchain -Manifest $manifest -ManifestDir ${psQuote(home)} -State (Read-BuildState)`,
+                "    $steps = @()",
+                "    if (-not $outcome.Stop -and $outcome.Record.Contains('steps')) { $steps = @($outcome.Record.steps | ForEach-Object { $_.name + ':' + $_.step }) }",
+                `    $results += ,([ordered]@{ stop = $outcome.Stop; log = [System.IO.File]::ReadAllText(${psQuote(log)}); steps = $steps })`,
+                "}",
+                "ConvertTo-Json -Compress -Depth 6 -InputObject @{ runs = $results; state = Test-Path -LiteralPath (Get-BuildStatePath) }",
+            ].join("\n"), { shell, env: { ...process.env, STEP_LOG: log } });
+            assert.equal(driver.status, 0, driver.stderr + driver.stdout);
+            const [first, notRestarted, afterRestart, notRestartedAgain, done, changed, doneAgain] = driver.json.runs;
+            const ranFirst = "first\nfeatures Containers,Hyper-V True\n";
+            assert.deepEqual(first, { stop: "the after-features step restarts the VM: the features need it", log: ranFirst, steps: [] });
+            assert.deepEqual(notRestarted, { stop: "the VM has not restarted yet. the after-features step restarts the VM: the features need it", log: ranFirst, steps: [] });
+            const beforeServices = "a step asked for a restart, which the VM needs before its services and Sysprep";
+            const ranSecond = `${ranFirst}second\nnpm example-mcp@1.0.0\n`;
+            assert.deepEqual(afterRestart, { stop: beforeServices, log: ranSecond, steps: [] }, "the second step's exit code 3010 asks for a restart before the services");
+            assert.deepEqual(notRestartedAgain, { stop: `the VM has not restarted yet. ${beforeServices}`, log: ranSecond, steps: [] });
+            assert.deepEqual(done, { stop: null, log: ranSecond, steps: ["first:command", "features:windowsFeatures", "after-features:restart", "second:command"] });
+            assert.deepEqual(changed, { stop: beforeServices, log: `${ranSecond}second again\n`, steps: [] }, "only the changed step runs again, and asks for its restart");
+            assert.equal(doneAgain.stop, null);
+            assert.equal(doneAgain.log, `${ranSecond}second again\n`, "the MCP server was installed once");
+            assert.equal(driver.json.state, true, "the state stays until the whole build has finished");
+        } finally {
+            fs.rmSync(home, { recursive: true, force: true });
+        }
+    });
+}
+
+// A program that records its arguments and exits with 3010, as a Visual Studio bootstrapper asking for a restart does.
+const FAKE_VS_BOOTSTRAPPER = "@echo %*> \"%~dp0args.txt\"\r\n@exit /b 3010\r\n";
+/** An argument as a Windows command line quotes it. */
+const quoteArgument = (value) => (/[\s"]/.test(value) ? `"${value}"` : value);
+
+for (const [label, shell, skip] of [["PowerShell 7", pwsh(), noPwsh || notWindows], ["Windows PowerShell 5.1", windowsPowerShell(), noRunCommandShell]]) {
+    test(`the image's package, Visual Studio, partition, docker and worker account steps, with Windows' own tools faked, in ${label}`, { skip }, () => {
+        const home = tempDir("ps-win-step-kinds-");
+        try {
+            const layout = path.join(home, "layout");
+            fs.mkdirSync(layout);
+            fs.writeFileSync(path.join(layout, "vs_fake.cmd"), FAKE_VS_BOOTSTRAPPER);
+            fs.writeFileSync(path.join(home, "x.vsconfig"), JSON.stringify({ version: "1.0", components: ["Microsoft.VisualStudio.Workload.ManagedDesktop"] }));
+            fs.writeFileSync(path.join(home, "instances.json"), JSON.stringify([{ installationVersion: "18.12.12405.243", catalog: { productDisplayVersion: "18.12.0" } }]));
+            fs.writeFileSync(path.join(home, "vswhere.cmd"), `@type "${path.join(home, "instances.json")}"\r\n`);
+            fs.writeFileSync(path.join(home, "dockerd.exe"), "");
+            const exported = "[Unicode]\r\nUnicode=yes\r\n[Privilege Rights]\r\nSeCreateSymbolicLinkPrivilege = *S-1-5-32-544\r\nSeServiceLogonRight = *S-1-5-80-0\r\n";
+            const driver = runDriver(home, "kinds.ps1", [
+                `. ${psQuote(scriptPath("Build-WorkerOsImage.ps1"))} -Root ${psQuote(path.join(home, "root"))}`,
+                `$home2 = ${psQuote(home)}`,
+                "$out = [ordered]@{}",
+                "Add-Type -AssemblyName System.IO.Compression.FileSystem",
+                "function New-TestZip([string]$Path, [string[]]$Names) { $zip = [System.IO.Compression.ZipFile]::Open($Path, 'Create'); foreach ($n in $Names) { $w = New-Object System.IO.StreamWriter(($zip.CreateEntry($n)).Open()); $w.Write($n); $w.Dispose() }; $zip.Dispose() }",
+                "$list = { param($Folder) @(Get-ChildItem -LiteralPath $Folder -Recurse -File | ForEach-Object { $_.FullName.Substring($Folder.Length + 1).Replace('\\', '/') } | Sort-Object) }",
+                // Packages: a NuGet package loses its packaging parts and gets its names unescaped; a zip keeps both; no entry leaves the folder.
+                "$names = @('[Content_Types].xml', '_rels/.rels', 'package/services/metadata/core-properties/1.psmdcp', 'data/FrameworkList.xml', 'ref/net8.0/A%20B.dll', 'Pack.nuspec')",
+                "New-TestZip (Join-Path $home2 'p.nupkg') $names",
+                "Expand-PackageArchive -Path (Join-Path $home2 'p.nupkg') -Destination (Join-Path $home2 'nupkg') -Format nupkg",
+                "$out.nupkg = & $list (Join-Path $home2 'nupkg')",
+                "Expand-PackageArchive -Path (Join-Path $home2 'p.nupkg') -Destination (Join-Path $home2 'zip') -Format zip",
+                "$out.zip = & $list (Join-Path $home2 'zip')",
+                "New-TestZip (Join-Path $home2 'evil.zip') @('ok.txt', '../evil.txt')",
+                "try { Expand-PackageArchive -Path (Join-Path $home2 'evil.zip') -Destination (Join-Path $home2 'evil') -Format zip; $out.evil = 'accepted' } catch { $out.evil = $_.Exception.Message }",
+                "$out.escaped = Test-Path -LiteralPath (Join-Path $home2 'evil.txt')",
+                // File hashes: SHA-512 as well as SHA-256, exactly one of them; a mismatch deletes the file.
+                "$file = Join-Path $home2 'hashed.bin'",
+                "[System.IO.File]::WriteAllText($file, 'payload')",
+                "Assert-FileHash -Path $file -Sha512 (Get-Sha512Hex $file) -Source 'test'",
+                "try { Assert-FileHash -Path $file -Sha256 (Get-Sha256Hex $file) -Sha512 (Get-Sha512Hex $file) -Source 'test'; $out.both = 'accepted' } catch { $out.both = $_.Exception.Message }",
+                "try { Assert-FileHash -Path $file -Sha512 ('0' * 128) -Source 'test'; $out.mismatch = 'accepted' } catch { $out.mismatch = $_.Exception.Message }",
+                "$out.deleted = -not (Test-Path -LiteralPath $file)",
+                // Visual Studio from a layout: its bootstrapper checked first, the .vsconfig and --noWeb passed, then vswhere must list the version.
+                "$script:VsWhere = Join-Path $home2 'vswhere.cmd'",
+                "$expand = { param([string]$Value) $Value.Replace('{manifestDir}', $home2) }",
+                "$vs = [pscustomobject]@{ step = 'visualStudio'; name = 'vs'; layout = [pscustomobject]@{ path = (Join-Path $home2 'layout'); bootstrapper = 'vs_fake.cmd'; sha256 = (Get-Sha256Hex (Join-Path $home2 'layout\\vs_fake.cmd')) }; vsconfig = '{manifestDir}\\x.vsconfig'; version = '18.12.0'; arguments = @('--includeRecommended') }",
+                "$installed = Install-VisualStudio -Step $vs -Expand $expand",
+                "$out.vs = [ordered]@{ exitCode = $installed.ExitCode; installationVersion = $installed.InstallationVersion; args = ([System.IO.File]::ReadAllText((Join-Path $home2 'layout\\args.txt'))).Trim() }",
+                "$vs.version = '18.13.0'",
+                "try { [void](Install-VisualStudio -Step $vs -Expand $expand); $out.vsOtherVersion = 'accepted' } catch { $out.vsOtherVersion = $_.Exception.Message }",
+                "Remove-Item -LiteralPath (Join-Path $home2 'layout\\args.txt')",
+                "$vs.layout.sha256 = '0' * 64",
+                "try { [void](Install-VisualStudio -Step $vs -Expand $expand); $out.vsTampered = 'accepted' } catch { $out.vsTampered = $_.Exception.Message }",
+                "$out.vsTamperedRan = Test-Path -LiteralPath (Join-Path $home2 'layout\\args.txt')",
+                // The partition grows only when there is at least 1 MB to gain.
+                "$script:size = 127GB; $script:resized = @()",
+                "function Get-PartitionSupportedSize { param($DriveLetter) [pscustomobject]@{ SizeMax = 256GB } }",
+                "function Get-Partition { param($DriveLetter) [pscustomobject]@{ Size = $script:size } }",
+                "function Resize-Partition { param($DriveLetter, $Size) $script:resized += ($DriveLetter + '=' + $Size); $script:size = $Size }",
+                "$out.grown = Resize-PartitionToMaximum -DriveLetter 'C'",
+                "$out.unchanged = Resize-PartitionToMaximum -DriveLetter 'C'",
+                "$out.resized = $script:resized",
+                // The docker service: the group made when missing, an existing service registered again, the data root passed on.
+                "$script:calls = @(); $script:service = $true",
+                "function Invoke-NetLocalGroup { param([string[]]$Arguments, [switch]$NoThrow) $script:calls += ('net localgroup ' + ($Arguments -join ' ')); if ($Arguments.Count -eq 1) { [pscustomobject]@{ ExitCode = 2; StdOut = '' } } else { [pscustomobject]@{ ExitCode = 0; StdOut = '' } } }",
+                "function Get-Service { [CmdletBinding()] param($Name) if ($script:service) { [pscustomobject]@{ Name = $Name } } }",
+                "function Stop-Service { [CmdletBinding()] param($Name, [switch]$Force) $script:calls += ('stop ' + $Name) }",
+                "function Invoke-NativeCommand { param($FilePath, [string[]]$ArgumentList) $script:calls += ([System.IO.Path]::GetFileName($FilePath) + ' ' + ($ArgumentList -join ' ')); [pscustomobject]@{ ExitCode = 0; StdOut = '' } }",
+                "Register-DockerService -Step ([pscustomobject]@{ name = 'docker'; dockerd = (Join-Path $home2 'dockerd.exe'); pipeGroup = 'docker-users'; dataRoot = 'D:\\docker' })",
+                "$out.docker = $script:calls",
+                // The worker account: a missing right goes to the worker's SID, the rest of the right's accounts kept; groups by SID.
+                `$script:exported = ${psQuote(exported)}; $script:secedit = @(); $script:template = ''; $script:members = @()`,
+                "function Get-WorkerServiceSid { 'S-1-5-19' }",
+                "function Invoke-SecEdit { param([string[]]$Arguments) $script:secedit += $Arguments[0]; $cfg = $Arguments[[array]::IndexOf($Arguments, '/cfg') + 1]; if ($Arguments[0] -eq '/export') { [System.IO.File]::WriteAllText($cfg, $script:exported, [System.Text.Encoding]::Unicode) } else { $script:template = [System.IO.File]::ReadAllText($cfg); foreach ($line in ($script:template -split \"`r`n\")) { if ($line -match '^(Se\\w+) = (.+)$') { $script:exported = $script:exported -replace ('(?m)^' + $Matches[1] + ' = .*$'), $line } } } }",
+                "function Get-LocalGroupSid { param($Name) if ($Name -eq 'Administrators') { 'S-1-5-32-544' } else { 'S-1-5-21-1-2-3-1001' } }",
+                "function Invoke-NetLocalGroup { param([string[]]$Arguments, [switch]$NoThrow) if ($Arguments.Count -gt 1) { $script:members += $Arguments[1] }; [pscustomobject]@{ ExitCode = 0; StdOut = ('Members' + [char]10 + '-----' + [char]10 + ($script:members -join [char]10)) } }",
+                "$out.account = Grant-WorkerAccount -Settings ([pscustomobject]@{ userRights = @('SeCreateSymbolicLinkPrivilege'); groups = @('docker-users') })",
+                "$out.template = $script:template",
+                "$out.members = $script:members",
+                "$again = Grant-WorkerAccount -Settings ([pscustomobject]@{ userRights = @('SeCreateSymbolicLinkPrivilege'); groups = @('docker-users') })",
+                "$out.secedit = $script:secedit",
+                "$out.membersAgain = $script:members",
+                "$out.accountName = (New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-19').Translate([System.Security.Principal.NTAccount]).Value",
+                "try { [void](Grant-WorkerAccount -Settings ([pscustomobject]@{ groups = @('Administrators') })); $out.builtIn = 'accepted' } catch { $out.builtIn = $_.Exception.Message }",
+                "ConvertTo-Json -Compress -Depth 6 -InputObject $out",
+            ].join("\n"), { shell });
+            assert.equal(driver.status, 0, driver.stderr + driver.stdout);
+            const out = driver.json;
+            assert.deepEqual([...out.nupkg].sort(), ["Pack.nuspec", "data/FrameworkList.xml", "ref/net8.0/A B.dll"]);
+            assert.deepEqual([...out.zip].sort(), ["Pack.nuspec", "[Content_Types].xml", "_rels/.rels", "data/FrameworkList.xml", "package/services/metadata/core-properties/1.psmdcp", "ref/net8.0/A%20B.dll"]);
+            assert.match(out.evil, /has an entry outside its folder: \.\.\/evil\.txt/);
+            assert.equal(out.escaped, false);
+            assert.match(out.both, /exactly one of a SHA-256 and a SHA-512/);
+            assert.match(out.mismatch, /^SHA-512 mismatch for test: got [0-9a-f]{128}, pinned 0{128}$/);
+            assert.equal(out.deleted, true);
+            assert.deepEqual(out.vs, {
+                exitCode: 3010,
+                installationVersion: "18.12.12405.243",
+                args: `--quiet --wait --norestart --nocache --config ${quoteArgument(path.join(home, "x.vsconfig"))} --noWeb --includeRecommended`,
+            });
+            assert.match(out.vsOtherVersion, /vswhere lists no Visual Studio 18\.13\.0 after the vs step/);
+            assert.match(out.vsTampered, /SHA-256 mismatch for .*vs_fake\.cmd/);
+            assert.equal(out.vsTamperedRan, false, "a bootstrapper that fails its hash never runs");
+            assert.equal(out.grown, 256 * 1024 ** 3);
+            assert.equal(out.unchanged, 256 * 1024 ** 3);
+            assert.deepEqual(out.resized, [`C=${256 * 1024 ** 3}`]);
+            assert.deepEqual(out.docker, [
+                "net localgroup docker-users",
+                "net localgroup docker-users /add",
+                "stop docker",
+                "dockerd.exe --unregister-service",
+                "dockerd.exe --register-service --group docker-users --data-root D:\\docker",
+            ]);
+            assert.deepEqual(out.account, { userRights: ["SeCreateSymbolicLinkPrivilege"], groups: ["docker-users"] });
+            assert.match(out.template, /\[Privilege Rights\]\r\nSeCreateSymbolicLinkPrivilege = \*S-1-5-32-544,\*S-1-5-19\r\n$/);
+            assert.doesNotMatch(out.template, /SeServiceLogonRight/, "only the rights that change are configured");
+            assert.deepEqual(out.secedit, ["/export", "/configure", "/export", "/export"], "a right the worker holds is not configured again");
+            assert.deepEqual(out.members, [out.accountName], "the worker's account by the name Windows gives it");
+            assert.deepEqual(out.membersAgain, [out.accountName], "a member is not added again");
+            assert.match(out.builtIn, /Administrators is a built-in group, which the worker never joins/);
+        } finally {
+            fs.rmSync(home, { recursive: true, force: true });
+        }
+    });
+}
+
 test("the CLI home's placeholders hold what the Copilot CLI reads as no configuration, and the folders are folders", { skip: noPwsh }, () => {
     const home = tempDir("ps-win-cli-home-");
     try {
@@ -408,8 +1044,11 @@ test("worker.env and the two WinSW services, from the example worker settings", 
         const refusals = {
             userData: "DATABASE_URL=postgresql://x@db/y",
             fixed: "COPILOT_HOME=C:\\elsewhere",
+            prompt: "GIT_TERMINAL_PROMPT=1",
             launcher: "PS_LAUNCH_ID=x",
             token: "GITHUB_TOKEN=x",
+            ...Object.fromEntries([...CREDENTIAL_ENV_NAMES, "git_config_key_0", "GIT_CONFIG_VALUE_12", "NuGetPackageSourceCredentials_feed"]
+                .map((name) => [`credential-${name}`, `${name}=x`])),
             timeout: "PILOTSWARM_WORKER_SHUTDOWN_TIMEOUT_MS=7200000",
             extension: "PILOTSWARM_EXTENSION_MODULES=C:\\other\\index.mjs",
         };
@@ -438,6 +1077,11 @@ test("worker.env and the two WinSW services, from the example worker settings", 
         assert.equal(values.AZURE_EXTENSION_USE_DYNAMIC_INSTALL, "no");
         assert.equal(values.AZURE_EXTENSION_DIR, "C:\\pilotswarm\\az-extensions");
         assert.equal(values.TEMP, "C:\\pilotswarm\\temp");
+        // Git never waits on a prompt, in a build or anywhere else: the Dev Drive extension's own settings for its Git calls.
+        assert.equal(values.GIT_TERMINAL_PROMPT, "0");
+        assert.equal(values.GCM_INTERACTIVE, "never");
+        assert.equal(values.GIT_ASKPASS, "");
+        assert.equal(values.SSH_ASKPASS, "");
         assert.equal(values.GIT_AUTHOR_NAME, "PilotSwarm Agent");
         assert.equal(values.PILOTSWARM_WORKER_CONCURRENCY, "4");
         assert.equal(values.PILOTSWARM_WORKER_SHUTDOWN_TIMEOUT_MS, "6000000");
@@ -447,8 +1091,13 @@ test("worker.env and the two WinSW services, from the example worker settings", 
 
         assert.match(driver.json.refused.userData, /only the scale set's userData sets/);
         assert.match(driver.json.refused.fixed, /the image fixes/);
+        assert.match(driver.json.refused.prompt, /the image fixes/);
         assert.match(driver.json.refused.launcher, /no worker image may carry|only/);
         assert.match(driver.json.refused.token, /no worker image may carry/);
+        for (const [name, refusal] of Object.entries(driver.json.refused).filter(([name]) => name.startsWith("credential-"))) {
+            assert.match(refusal, /which no worker image may carry/, name);
+        }
+        assert.match(driver.json.refused["credential-VSS_NUGET_EXTERNAL_FEED_ENDPOINTS"], /a credential variable/);
         assert.match(driver.json.refused.timeout, /105-minute stop timeout/);
         assert.match(driver.json.refused.extension, /Dev Drive extension/);
 
@@ -489,8 +1138,9 @@ test("worker.env's CLI allowlist always passes the image's Git and Azure CLI pin
             unset: null,
             empty: "",
             partial: "npm_config_*, AZURE_CONFIG_DIR",
-            prefixes: "GIT_*,AZURE_*,MSBUILD*",
-            exact: "git_config_global,AZURE_CONFIG_DIR,AZURE_EXTENSION_USE_DYNAMIC_INSTALL,AZURE_EXTENSION_DIR,AZURE_EXTENSION_DEV_SOURCES,AZURE_EXTENSION_SYS_DIR",
+            prefixes: "GIT_*,GCM_*,SSH_ASKPASS,AZURE_*,MSBUILD*",
+            exact: "git_config_global,GIT_TERMINAL_PROMPT,GIT_ASKPASS,GCM_INTERACTIVE,SSH_ASKPASS,AZURE_CONFIG_DIR,AZURE_EXTENSION_USE_DYNAMIC_INSTALL,"
+                + "AZURE_EXTENSION_DIR,AZURE_EXTENSION_DEV_SOURCES,AZURE_EXTENSION_SYS_DIR",
             invalid: "GIT_*,NOT-A-NAME",
         };
         for (const [name, value] of Object.entries(cases)) {
@@ -510,14 +1160,16 @@ test("worker.env's CLI allowlist always passes the image's Git and Azure CLI pin
             assert.equal(lists.length, 1, name);
             written[name] = lists[0].value;
             for (const entry of written[name].split(",")) assert.match(entry, sdkEntry, `${name}: ${entry}`);
-            // Every value the image pins for agents' git and az reaches their CLI.
-            const pinned = entries.filter((e) => e.name === "GIT_CONFIG_GLOBAL" || e.name === "AZURE_CONFIG_DIR" || e.name.startsWith("AZURE_EXTENSION_"));
-            assert.equal(pinned.length, 6, name);
+            // Every value the image pins for agents' git and az reaches their CLI, the non-interactive Git settings included.
+            const pinned = entries.filter((e) => ["GIT_CONFIG_GLOBAL", "GIT_TERMINAL_PROMPT", "GIT_ASKPASS", "GCM_INTERACTIVE", "SSH_ASKPASS", "AZURE_CONFIG_DIR"]
+                .includes(e.name) || e.name.startsWith("AZURE_EXTENSION_"));
+            assert.equal(pinned.length, 10, name);
             for (const { name: pin } of pinned) assert.ok(passes(pin, written[name]), `${name}: ${pin}`);
         }
-        assert.equal(written.unset, "GIT_CONFIG_GLOBAL,AZURE_CONFIG_DIR,AZURE_EXTENSION_*");
-        assert.equal(written.empty, "GIT_CONFIG_GLOBAL,AZURE_CONFIG_DIR,AZURE_EXTENSION_*");
-        assert.equal(written.partial, "npm_config_*,AZURE_CONFIG_DIR,GIT_CONFIG_GLOBAL,AZURE_EXTENSION_*");
+        const pins = "GIT_CONFIG_GLOBAL,GIT_TERMINAL_PROMPT,GIT_ASKPASS,GCM_INTERACTIVE,SSH_ASKPASS,AZURE_CONFIG_DIR,AZURE_EXTENSION_*";
+        assert.equal(written.unset, pins);
+        assert.equal(written.empty, pins);
+        assert.equal(written.partial, "npm_config_*,AZURE_CONFIG_DIR,GIT_CONFIG_GLOBAL,GIT_TERMINAL_PROMPT,GIT_ASKPASS,GCM_INTERACTIVE,SSH_ASKPASS,AZURE_EXTENSION_*");
         assert.equal(written.prefixes, cases.prefixes, "prefixes that cover every pin add nothing");
         assert.equal(written.exact, cases.exact, "names that cover every pin add nothing");
         assert.match(driver.json.invalid, /refused: .*"NOT-A-NAME" is neither a variable name nor a name prefix followed by \*/);

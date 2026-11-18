@@ -854,15 +854,22 @@ owner-only must not hold an owner's token.
 
 The image's `worker.env` also pins the tools' own settings, which a worker
 settings file can't change: Git's `GIT_CONFIG_GLOBAL`, a read-only global
-configuration; the Azure CLI's `AZURE_CONFIG_DIR`, which the launcher clears
+configuration, with `GIT_TERMINAL_PROMPT=0`, `GCM_INTERACTIVE=never` and empty
+`GIT_ASKPASS` and `SSH_ASKPASS`, so no Git call, a build's included, waits on a
+credential prompt; the Azure CLI's `AZURE_CONFIG_DIR`, which the launcher clears
 and signs in again as the workers' identity at every service start; and
 `AZURE_EXTENSION_USE_DYNAMIC_INSTALL=no`, `AZURE_EXTENSION_DIR` and
 `AZURE_EXTENSION_DEV_SOURCES`, an empty read-only folder, and
 `AZURE_EXTENSION_SYS_DIR`, the system extension folder, so no session installs
 an Azure CLI extension. Its `PILOTSWARM_CLI_ENV_ALLOWLIST` always passes
-`GIT_CONFIG_GLOBAL`, `AZURE_CONFIG_DIR` and `AZURE_EXTENSION_*` to agents'
-tools: the image build appends each that no entry of the settings file covers,
-and an entry the SDK would refuse fails the build.
+`GIT_CONFIG_GLOBAL`, the four Git prompt settings, `AZURE_CONFIG_DIR` and
+`AZURE_EXTENSION_*` to agents' tools: the image build appends each that no entry
+of the settings file covers, and an entry the SDK would refuse fails the build.
+No credential variable reaches a Windows worker through its environment: the
+launcher removes them from the service's own, and `worker.env`, the worker
+settings file and `userData` refuse them (the
+[Windows image README](../../../deploy/providers/azure/windows/README.md#workerenv)
+lists them).
 
 ### Disk controller
 
