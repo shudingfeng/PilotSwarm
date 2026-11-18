@@ -226,6 +226,12 @@ function Test-SeedManifest {
                     throw ('seed manifest: beforeSnapshot may not empty ' + $step.emptyFolder + ', which would delete files of the repository ' + $repository.Name)
                 }
             }
+            # The seed creates and grants every listed folder before it empties these: one inside would go, grant and all.
+            foreach ($other in @($modify + $read)) {
+                if (($other -ine $full) -and (& $inside $other $full)) {
+                    throw ('seed manifest: beforeSnapshot may not empty ' + $step.emptyFolder + ', which would delete the listed folder ' + $other + ' inside it')
+                }
+            }
             if ($beforeSnapshot | Where-Object { $_.EmptyFolder -ieq $full }) { throw ('seed manifest: beforeSnapshot empties ' + $step.emptyFolder + ' twice') }
             $beforeSnapshot += [pscustomobject]@{ EmptyFolder = $full; Reason = $step.reason.Trim() }
         }

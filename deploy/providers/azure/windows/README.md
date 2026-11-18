@@ -670,7 +670,7 @@ with the VM's managed identity; without it, a minimal one is written.
 | `modifyFolders` | Absolute folders on the drive that the worker may change; each repository's folder must be one of them or inside one |
 | `folders` | Folders the seed creates: `path` (absolute, on the drive), `access` (`modify`: the worker may change it, as in `modifyFolders`; `read`: it inherits the drive's read access, and no `read` folder may be inside a `modify` one) and optional `notes`. A folder is listed once, here or in `modifyFolders` |
 | `packageCaches` | Commands that fill caches: `command` (program and arguments, no shell), `workingDirectory`, optional `env` and `notes` |
-| `beforeSnapshot` | What the seed and its refresh do last, so that no copy of the drive carries it: `emptyFolder`, a folder that `folders` or `modifyFolders` lists, which may be neither a repository's folder nor inside or around one, a `reason`, and optional `notes`. The folder and its grant stay; whatever is in it goes, never through a link |
+| `beforeSnapshot` | What the seed and its refresh do last, so that no copy of the drive carries it: `emptyFolder`, a folder that `folders` or `modifyFolders` lists, which may be neither a repository's folder nor inside or around one, nor hold another listed folder, a `reason`, and optional `notes`. The folder and its grant stay; whatever is in it goes, never through a link |
 | `env` | Optional settings for every command, for example a credential helper's |
 | `notes` | Optional free text, at the top level and in each repository, submodule, folder, package cache and `beforeSnapshot` step; the seed ignores it |
 

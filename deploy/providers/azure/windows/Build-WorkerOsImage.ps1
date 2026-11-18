@@ -123,9 +123,9 @@ $script:StepFields = [ordered]@{
     dockerService   = @('dockerd', 'pipeGroup', 'dataRoot')
 }
 # User rights that would make the worker as strong as an administrator: workerAccount refuses them.
-$script:RefusedUserRights = @('SeAssignPrimaryTokenPrivilege', 'SeBackupPrivilege', 'SeCreateTokenPrivilege', 'SeDebugPrivilege', 'SeEnableDelegationPrivilege',
-    'SeImpersonatePrivilege', 'SeLoadDriverPrivilege', 'SeManageVolumePrivilege', 'SeRelabelPrivilege', 'SeRestorePrivilege', 'SeSecurityPrivilege',
-    'SeSyncAgentPrivilege', 'SeSystemEnvironmentPrivilege', 'SeTakeOwnershipPrivilege', 'SeTcbPrivilege', 'SeTrustedCredManAccessPrivilege')
+$script:RefusedUserRights = @('SeAssignPrimaryTokenPrivilege', 'SeBackupPrivilege', 'SeCreateTokenPrivilege', 'SeDebugPrivilege', 'SeDelegateSessionUserImpersonatePrivilege',
+    'SeEnableDelegationPrivilege', 'SeImpersonatePrivilege', 'SeLoadDriverPrivilege', 'SeManageVolumePrivilege', 'SeRelabelPrivilege', 'SeRestorePrivilege',
+    'SeSecurityPrivilege', 'SeSyncAgentPrivilege', 'SeSystemEnvironmentPrivilege', 'SeTakeOwnershipPrivilege', 'SeTcbPrivilege', 'SeTrustedCredManAccessPrivilege')
 
 function Test-ToolchainManifest {
     <# Checks a toolchain manifest (schemaVersion 1) and returns it; throws on the first problem. #>

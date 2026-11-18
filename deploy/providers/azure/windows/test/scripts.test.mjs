@@ -275,6 +275,8 @@ test("the seed manifest's submodule lists, folders, beforeSnapshot steps and not
             stepRepository: withSteps([{ emptyFolder: "Q:\\Repos\\app", reason: "x" }]),
             stepInsideRepository: { ...withFolders([...full.folders, { path: "Q:\\Repos\\app\\obj", access: "modify" }]), beforeSnapshot: [{ emptyFolder: "Q:\\Repos\\app\\obj", reason: "x" }] },
             stepAroundRepository: { ...withFolders([...full.folders, { path: "Q:\\Repos", access: "read" }]), beforeSnapshot: [{ emptyFolder: "Q:\\Repos", reason: "x" }] },
+            stepAroundFolder: { ...withFolders([full.folders[0], { path: "Q:\\.cache", access: "read" }, { path: "Q:\\.cache\\npm", access: "modify" }]), beforeSnapshot: [{ emptyFolder: "Q:\\.cache", reason: "x" }] },
+            stepAroundModifyFolder: { ...withFolders([...full.folders, { path: "Q:\\temp", access: "modify" }]), modifyFolders: [...full.modifyFolders, "Q:\\temp\\keep"], beforeSnapshot: [{ emptyFolder: "Q:\\temp", reason: "x" }] },
             stepTwice: withSteps([...full.beforeSnapshot, { emptyFolder: "Q:\\.cache\\http", reason: "again" }]),
             stepUnknown: withSteps([{ emptyFolder: "Q:\\.cache\\http", reason: "x", recursive: true }]),
             cacheNotes: { ...full, packageCaches: [{ ...full.packageCaches[0], notes: ["not text"] }] },
@@ -329,6 +331,9 @@ test("the seed manifest's submodule lists, folders, beforeSnapshot steps and not
         assert.match(refused.stepRepository, /would delete files of the repository app/);
         assert.match(refused.stepInsideRepository, /would delete files of the repository app/);
         assert.match(refused.stepAroundRepository, /would delete files of the repository app/);
+        // The seed creates every listed folder before it empties these, so one inside would never reach the snapshot.
+        assert.match(refused.stepAroundFolder, /may not empty Q:\\\.cache, which would delete the listed folder Q:\\\.cache\\npm inside it/);
+        assert.match(refused.stepAroundModifyFolder, /may not empty Q:\\temp, which would delete the listed folder Q:\\temp\\keep inside it/);
         assert.match(refused.stepTwice, /empties Q:\\\.cache\\http twice/);
         assert.match(refused.stepUnknown, /a beforeSnapshot step has an unknown field recursive/);
         assert.match(refused.cacheNotes, /package cache fill: notes must be a string/);
@@ -729,6 +734,7 @@ test("the toolchain manifest's steps and workerAccount are checked", { skip: noP
             accountField: account({ userRights: [], admin: true }),
             accountRight: account({ userRights: ["CreateSymbolicLinks"] }),
             accountStrongRight: account({ userRights: ["SeDebugPrivilege"] }),
+            accountDelegateRight: account({ userRights: ["SeDelegateSessionUserImpersonatePrivilege"] }),
             accountRightTwice: account({ userRights: ["SeCreateSymbolicLinkPrivilege", "SeCreateSymbolicLinkPrivilege"] }),
             accountGroup: account({ groups: ["docker\\users"] }),
         };
@@ -789,6 +795,7 @@ test("the toolchain manifest's steps and workerAccount are checked", { skip: noP
             accountField: /workerAccount has an unknown field admin/,
             accountRight: /holds user right names/,
             accountStrongRight: /may not grant SeDebugPrivilege, which would make the worker as strong as an administrator/,
+            accountDelegateRight: /may not grant SeDelegateSessionUserImpersonatePrivilege, which would make the worker as strong as an administrator/,
             accountRightTwice: /lists SeCreateSymbolicLinkPrivilege twice/,
             accountGroup: /holds local group names/,
         };
