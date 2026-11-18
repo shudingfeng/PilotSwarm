@@ -352,9 +352,10 @@ test("userData: the workers are owner-only whatever the env map says, and the de
   });
   const { document } = renderWinWorkerUserData(env, { caPem: pki.caPem });
   assert.equal(document.env.PILOTSWARM_WORKER_OWNER_ONLY, "1");
+  // The field the credential provider reads for a managed identity is clientId: an entry without it is skipped.
   assert.deepEqual(JSON.parse(document.env.ARTIFACTS_CREDENTIALPROVIDER_FEED_ENDPOINTS).endpointCredentials, [
-    { endpoint: "https://feeds.example.com/one/index.json", azureClientId: WORKER_CLIENT },
-    { endpoint: "https://feeds.example.com/two/index.json", azureClientId: WORKER_CLIENT },
+    { endpoint: "https://feeds.example.com/one/index.json", clientId: WORKER_CLIENT },
+    { endpoint: "https://feeds.example.com/two/index.json", clientId: WORKER_CLIENT },
   ]);
   assert.deepEqual(document.extraEnv, {
     EXAMPLE_API_URL: "https://api.example.com/v1?a=b",
@@ -540,7 +541,7 @@ test("the document check refuses what the launcher refuses: unknown, missing or 
     ["client ID", withEnv("AZURE_CLIENT_ID", "worker"), /refuses AZURE_CLIENT_ID: it must be a GUID/],
     ["feeds not JSON", withEnv("ARTIFACTS_CREDENTIALPROVIDER_FEED_ENDPOINTS", "[nope"), /refuses ARTIFACTS_CREDENTIALPROVIDER_FEED_ENDPOINTS: it is not JSON/],
     ["feeds shape", withEnv("ARTIFACTS_CREDENTIALPROVIDER_FEED_ENDPOINTS", "[]"), /it must be \{"endpointCredentials":\[\.\.\.\]\}/],
-    ["feed without endpoint", withEnv("ARTIFACTS_CREDENTIALPROVIDER_FEED_ENDPOINTS", '{"endpointCredentials":[{"azureClientId":"x"}]}'), /it needs an endpoint in every entry/],
+    ["feed without endpoint", withEnv("ARTIFACTS_CREDENTIALPROVIDER_FEED_ENDPOINTS", '{"endpointCredentials":[{"clientId":"x"}]}'), /it needs an endpoint in every entry/],
     ["feed password", withEnv("ARTIFACTS_CREDENTIALPROVIDER_FEED_ENDPOINTS", '{"endpointCredentials":[{"endpoint":"https://f.example.com/","password":"x"}]}'), /it carries a password/],
     ["configuration version", withEnv("WIN_WORKER_CONFIG_VERSION", "v 1"), /refuses WIN_WORKER_CONFIG_VERSION: it must be 1 to 128 letters, digits and \. _ : -/],
     ["long configuration version", withEnv("WIN_WORKER_CONFIG_VERSION", "a".repeat(129)), /refuses WIN_WORKER_CONFIG_VERSION/],

@@ -206,7 +206,7 @@ function checkUserDataValue(name, value) {
             }
             for (const entry of parsed.endpointCredentials) {
                 if (!isPlainObject(entry) || typeof entry.endpoint !== "string") throw new LaunchError(`userData: every ${name} entry needs an endpoint`);
-                if ("password" in entry) throw new LaunchError(`userData: ${name} carries a password; use a managed identity (azureClientId) instead`);
+                if ("password" in entry) throw new LaunchError(`userData: ${name} carries a password; use a managed identity (clientId) instead`);
             }
             return;
         }

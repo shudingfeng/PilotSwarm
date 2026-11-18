@@ -151,7 +151,8 @@ export function winWorkerExtraEnv(env) {
 }
 
 // WIN_WORKER_FEED_ENDPOINTS: comma-separated https package feed URLs that the
-// workers' NuGet credential provider signs in to with their managed identity.
+// workers' NuGet credential provider signs in to with their managed identity,
+// which each entry names by its clientId, the field the provider reads.
 // Unset, the workers get an empty list.
 export function winWorkerFeedEndpoints(env, clientId) {
   const endpointCredentials = [];
@@ -163,7 +164,7 @@ export function winWorkerFeedEndpoints(env, clientId) {
       throw new Error(`WIN_WORKER_FEED_ENDPOINTS entry '${endpoint}' is not a plain https URL.`);
     }
     if (!endpointCredentials.some((known) => known.endpoint === endpoint)) {
-      endpointCredentials.push({ endpoint, azureClientId: clientId });
+      endpointCredentials.push({ endpoint, clientId });
     }
   }
   return JSON.stringify({ endpointCredentials });
