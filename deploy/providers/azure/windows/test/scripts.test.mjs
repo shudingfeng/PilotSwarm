@@ -668,6 +668,316 @@ test("the image's Copilot settings files hold exactly the texts the worker check
     }
 });
 
+test("the toolchain manifest's steps and workerAccount are checked", { skip: noPwsh }, () => {
+    const home = tempDir("ps-win-steps-");
+    try {
+        const sha = (character, length = 64) => character.repeat(length);
+        const steps = [
+            { step: "installer", name: "git", url: "https://example.test/git.exe", sha256: sha("a"), type: "exe", arguments: ["/VERYSILENT"], notes: "Git for Windows" },
+            { step: "windowsFeatures", name: "features", features: ["Containers", "Hyper-V"], includeManagementTools: true },
+            { step: "restart", name: "after-features", reason: "Hyper-V needs it" },
+            { step: "visualStudio", name: "vs", bootstrapper: { url: "https://download.example.test/vs_enterprise.exe", sha256: sha("b") }, vsconfig: "{manifestDir}\\.vsconfig", version: "17.14.7" },
+            { step: "visualStudio", name: "vs-layout", layout: { path: "\\\\share\\layouts\\vs", bootstrapper: "vs_enterprise.exe", sha256: sha("c") }, vsconfig: "C:\\cfg\\x.vsconfig", version: "17.14.36301.6", successExitCodes: [0, 3010] },
+            { step: "extendPartition", name: "os-disk", driveLetter: "C" },
+            { step: "package", name: "pack", url: "https://example.test/pack.nupkg", sha512: sha("d", 128), format: "nupkg", destination: "C:\\Program Files\\dotnet\\packs\\Pack\\1.0.0" },
+            { step: "package", name: "zip", url: "https://example.test/tool.zip", sha256: sha("e"), format: "zip", destination: "C:\\tools\\zip" },
+            { step: "dockerService", name: "docker", dockerd: "C:\\Program Files\\docker\\dockerd.exe", pipeGroup: "docker-users", dataRoot: "D:\\docker" },
+            { step: "command", name: "lfs", command: ["git.exe", "lfs", "install", "--system"], successExitCodes: [0] },
+        ];
+        const full = { schemaVersion: 1, steps, mcpServers: [{ name: "fs", package: "p", version: "1.0.0" }], workerAccount: { userRights: ["SeCreateSymbolicLinkPrivilege"], groups: ["docker-users"], notes: "for symbolic links and the engine's pipe" } };
+        const replace = (name, change) => ({ ...full, steps: steps.map((step) => (step.name === name ? change(step) : step)) });
+        const withoutField = (name, field) => replace(name, (step) => Object.fromEntries(Object.entries(step).filter(([key]) => key !== field)));
+        const account = (workerAccount) => ({ ...full, workerAccount });
+        const bad = {
+            mixed: { ...full, installers: [] },
+            empty: { ...full, steps: [] },
+            noKind: replace("git", ({ step, ...rest }) => rest),
+            unknownKind: replace("git", (step) => ({ ...step, step: "reboot" })),
+            noName: replace("lfs", ({ name, ...rest }) => rest),
+            nameTwice: { ...full, mcpServers: [{ name: "GIT", package: "p", version: "1.0.0" }] },
+            unknownField: replace("os-disk", (step) => ({ ...step, size: 1 })),
+            otherKindsField: replace("os-disk", (step) => ({ ...step, features: ["x"] })),
+            notesNotText: replace("git", (step) => ({ ...step, notes: 1 })),
+            codesNotNumbers: replace("lfs", (step) => ({ ...step, successExitCodes: ["0"] })),
+            installerHash: replace("git", (step) => ({ ...step, sha256: sha("A") })),
+            featuresEmpty: replace("features", (step) => ({ ...step, features: [] })),
+            featureName: replace("features", (step) => ({ ...step, features: ["Hyper V"] })),
+            restartReason: replace("after-features", (step) => ({ ...step, reason: 3 })),
+            vsBoth: replace("vs", (step) => ({ ...step, layout: steps[4].layout })),
+            vsNeither: withoutField("vs", "bootstrapper"),
+            vsEvergreen: replace("vs", (step) => ({ ...step, bootstrapper: { url: "https://aka.ms/vs/17/release/vs_enterprise.exe", sha256: sha("b") } })),
+            vsNoHash: replace("vs", (step) => ({ ...step, bootstrapper: { url: step.bootstrapper.url } })),
+            vsBootstrapperField: replace("vs", (step) => ({ ...step, bootstrapper: { ...step.bootstrapper, channel: "release" } })),
+            vsNoConfig: withoutField("vs", "vsconfig"),
+            vsVersion: replace("vs", (step) => ({ ...step, version: "17" })),
+            vsLayoutPath: replace("vs-layout", (step) => ({ ...step, layout: { ...step.layout, path: "layouts\\vs" } })),
+            partitionLetter: replace("os-disk", (step) => ({ ...step, driveLetter: "C:" })),
+            packageTwoHashes: replace("pack", (step) => ({ ...step, sha256: sha("a") })),
+            packageNoHash: withoutField("pack", "sha512"),
+            packageUpperHash: replace("pack", (step) => ({ ...step, sha512: sha("D", 128) })),
+            packageFormat: replace("pack", (step) => ({ ...step, format: "msi" })),
+            packageRoot: replace("pack", (step) => ({ ...step, destination: "C:\\" })),
+            packageHttp: replace("pack", (step) => ({ ...step, url: "http://example.test/pack.nupkg" })),
+            dockerPath: replace("docker", (step) => ({ ...step, dockerd: "dockerd.exe" })),
+            dockerGroup: replace("docker", ({ pipeGroup, ...rest }) => rest),
+            accountField: account({ userRights: [], admin: true }),
+            accountRight: account({ userRights: ["CreateSymbolicLinks"] }),
+            accountStrongRight: account({ userRights: ["SeDebugPrivilege"] }),
+            accountRightTwice: account({ userRights: ["SeCreateSymbolicLinkPrivilege", "SeCreateSymbolicLinkPrivilege"] }),
+            accountGroup: account({ groups: ["docker\\users"] }),
+        };
+        // An older manifest, with installers and commands, may now carry notes on each.
+        const legacy = { schemaVersion: 1, installers: [{ ...steps[0], step: undefined, notes: "kept" }], commands: [{ name: "lfs", command: ["git.exe"] }] };
+        for (const [name, value] of Object.entries({ full, legacy, ...bad })) fs.writeFileSync(path.join(home, `${name}.json`), JSON.stringify(value));
+        const driver = runDriver(home, "steps.ps1", [
+            `. ${psQuote(scriptPath("Build-WorkerOsImage.ps1"))}`,
+            `$full = Test-ToolchainManifest (Read-JsonFile -Path (Join-Path ${psQuote(home)} 'full.json'))`,
+            `$legacy = Test-ToolchainManifest (Read-JsonFile -Path (Join-Path ${psQuote(home)} 'legacy.json'))`,
+            "$refused = [ordered]@{}",
+            `foreach ($name in @(${Object.keys(bad).map(psQuote).join(", ")})) { try { [void](Test-ToolchainManifest (Read-JsonFile -Path (Join-Path ${psQuote(home)} ($name + '.json')))); $refused[$name] = 'accepted' } catch { $refused[$name] = $_.Exception.Message } }`,
+            "ConvertTo-Json -Compress -Depth 5 -InputObject ([ordered]@{ steps = @($full.steps | ForEach-Object { $_.name }); legacy = @($legacy.installers | ForEach-Object { $_.name }); refused = $refused })",
+        ].join("\n"));
+        assert.equal(driver.status, 0, driver.stderr + driver.stdout);
+        assert.deepEqual(driver.json.steps, steps.map((step) => step.name));
+        assert.deepEqual(driver.json.legacy, ["git"]);
+        const expected = {
+            mixed: /steps replaces installers and commands/,
+            empty: /steps lists no step/,
+            noKind: /every step names its kind in step: installer, command, windowsFeatures, restart, visualStudio, extendPartition, package, dockerService/,
+            unknownKind: /every step names its kind/,
+            noName: /every command step needs a name/,
+            nameTwice: /the name GIT is used twice/,
+            unknownField: /extendPartition step os-disk has an unknown field size/,
+            otherKindsField: /has an unknown field features/,
+            notesNotText: /installer step git: notes must be a string/,
+            codesNotNumbers: /command step lfs successExitCodes must be a list of integers/,
+            installerHash: /installer step git needs a lowercase sha256/,
+            featuresEmpty: /windowsFeatures step features needs a list of feature names/,
+            featureName: /needs a list of feature names/,
+            restartReason: /reason must be a string/,
+            vsBoth: /needs either a bootstrapper or a layout/,
+            vsNeither: /needs either a bootstrapper or a layout/,
+            vsEvergreen: /aka\.ms links to whatever version is current/,
+            vsNoHash: /needs the bootstrapper's lowercase sha256/,
+            vsBootstrapperField: /bootstrapper is \{ url, sha256 \}/,
+            vsNoConfig: /needs the path of its \.vsconfig/,
+            vsVersion: /needs the exact version it installs/,
+            vsLayoutPath: /needs the layout's absolute path/,
+            partitionLetter: /needs a driveLetter/,
+            packageTwoHashes: /needs either a sha512 or a sha256/,
+            packageNoHash: /needs either a sha512 or a sha256/,
+            packageUpperHash: /needs a lowercase sha512/,
+            packageFormat: /needs a format: nupkg or zip/,
+            packageRoot: /needs an absolute destination folder below a drive's root/,
+            packageHttp: /needs an https:\/\/ url/,
+            dockerPath: /needs the absolute path of dockerd\.exe/,
+            dockerGroup: /needs the name of the local group/,
+            accountField: /workerAccount has an unknown field admin/,
+            accountRight: /holds user right names/,
+            accountStrongRight: /may not grant SeDebugPrivilege, which would make the worker as strong as an administrator/,
+            accountRightTwice: /lists SeCreateSymbolicLinkPrivilege twice/,
+            accountGroup: /holds local group names/,
+        };
+        assert.deepEqual(Object.keys(driver.json.refused), Object.keys(expected));
+        for (const [name, pattern] of Object.entries(expected)) assert.match(driver.json.refused[name], pattern, name);
+    } finally {
+        fs.rmSync(home, { recursive: true, force: true });
+    }
+});
+
+// A toolchain command for the restart test: it appends its first argument to a log and exits with its second.
+const STEP_COMMAND = String.raw`
+require("node:fs").appendFileSync(process.env.STEP_LOG, process.argv[2] + "\n");
+process.exit(Number(process.argv[3] || 0));
+`;
+
+for (const [label, shell, skip] of [["PowerShell 7", pwsh(), noPwsh], ["Windows PowerShell 5.1", windowsPowerShell(), noRunCommandShell]]) {
+    test(`a build with steps stops for each restart, carries on once the VM has restarted, and runs a step again only when it changed, in ${label}`, { skip }, () => {
+        const home = tempDir("ps-win-restart-");
+        try {
+            const script = path.join(home, "step.cjs");
+            fs.writeFileSync(script, STEP_COMMAND);
+            const log = path.join(home, "steps.log");
+            fs.writeFileSync(log, "");
+            const command = (name, ...args) => ({ step: "command", name, command: [process.execPath, script, ...args], successExitCodes: [0, 3010] });
+            const manifest = (second) => ({
+                schemaVersion: 1,
+                steps: [
+                    command("first", "first"),
+                    { step: "windowsFeatures", name: "features", features: ["Containers", "Hyper-V"], includeManagementTools: true },
+                    { step: "restart", name: "after-features", reason: "the features need it" },
+                    second,
+                ],
+                mcpServers: [{ name: "fs", package: "example-mcp", version: "1.0.0" }],
+            });
+            fs.writeFileSync(path.join(home, "manifest.json"), JSON.stringify(manifest(command("second", "second", "3010"))));
+            fs.writeFileSync(path.join(home, "changed.json"), JSON.stringify(manifest(command("second", "second again", "3010"))));
+            // Each run reads the state the one before saved; Get-LastBootTime stands in for the VM's restarts.
+            const runs = [["A", "manifest"], ["A", "manifest"], ["B", "manifest"], ["B", "manifest"], ["C", "manifest"], ["C", "changed"], ["D", "changed"]];
+            const driver = runDriver(home, "restart.ps1", [
+                `. ${psQuote(scriptPath("Build-WorkerOsImage.ps1"))} -Root ${psQuote(path.join(home, "root"))}`,
+                "$script:boot = ''",
+                "function Get-LastBootTime { $script:boot }",
+                "function Test-PendingRestart { $false }",
+                `function Install-WindowsFeature { param([string[]]$Name, [switch]$IncludeManagementTools) [System.IO.File]::AppendAllText(${psQuote(log)}, ('features ' + ($Name -join ',') + ' ' + [bool]$IncludeManagementTools + [char]10)); [pscustomobject]@{ Success = $true; RestartNeeded = 'Yes' } }`,
+                // npm installs the MCP server only in the log; every other program runs.
+                `function Invoke-NativeCommand { [CmdletBinding()] param([string]$FilePath, [string[]]$ArgumentList = @(), [string]$WorkingDirectory, [hashtable]$Environment, [int]$TimeoutSeconds = 7200, [int[]]$SuccessExitCode = @(0), [switch]$NoThrow) if ($FilePath -match 'npm\\.cmd$') { [System.IO.File]::AppendAllText(${psQuote(log)}, ('npm ' + $ArgumentList[-1] + [char]10)); return [pscustomobject]@{ ExitCode = 0; StdOut = ''; StdErr = '' } }; PilotSwarm.WinWorker\\Invoke-NativeCommand @PSBoundParameters }`,
+                "$results = @()",
+                `foreach ($run in @(${runs.map(([boot, file]) => `@('${boot}', '${file}')`).join(", ")})) {`,
+                "    $script:boot = $run[0]",
+                `    $manifest = Test-ToolchainManifest (Read-JsonFile -Path (Join-Path ${psQuote(home)} ($run[1] + '.json')))`,
+                `    $outcome = Install-Toolchain -Manifest $manifest -ManifestDir ${psQuote(home)} -State (Read-BuildState)`,
+                "    $steps = @()",
+                "    if (-not $outcome.Stop -and $outcome.Record.Contains('steps')) { $steps = @($outcome.Record.steps | ForEach-Object { $_.name + ':' + $_.step }) }",
+                `    $results += ,([ordered]@{ stop = $outcome.Stop; log = [System.IO.File]::ReadAllText(${psQuote(log)}); steps = $steps })`,
+                "}",
+                "ConvertTo-Json -Compress -Depth 6 -InputObject @{ runs = $results; state = Test-Path -LiteralPath (Get-BuildStatePath) }",
+            ].join("\n"), { shell, env: { ...process.env, STEP_LOG: log } });
+            assert.equal(driver.status, 0, driver.stderr + driver.stdout);
+            const [first, notRestarted, afterRestart, notRestartedAgain, done, changed, doneAgain] = driver.json.runs;
+            const ranFirst = "first\nfeatures Containers,Hyper-V True\n";
+            assert.deepEqual(first, { stop: "the after-features step restarts the VM: the features need it", log: ranFirst, steps: [] });
+            assert.deepEqual(notRestarted, { stop: "the VM has not restarted yet. the after-features step restarts the VM: the features need it", log: ranFirst, steps: [] });
+            const beforeServices = "a step asked for a restart, which the VM needs before its services and Sysprep";
+            const ranSecond = `${ranFirst}second\nnpm example-mcp@1.0.0\n`;
+            assert.deepEqual(afterRestart, { stop: beforeServices, log: ranSecond, steps: [] }, "the second step's exit code 3010 asks for a restart before the services");
+            assert.deepEqual(notRestartedAgain, { stop: `the VM has not restarted yet. ${beforeServices}`, log: ranSecond, steps: [] });
+            assert.deepEqual(done, { stop: null, log: ranSecond, steps: ["first:command", "features:windowsFeatures", "after-features:restart", "second:command"] });
+            assert.deepEqual(changed, { stop: beforeServices, log: `${ranSecond}second again\n`, steps: [] }, "only the changed step runs again, and asks for its restart");
+            assert.equal(doneAgain.stop, null);
+            assert.equal(doneAgain.log, `${ranSecond}second again\n`, "the MCP server was installed once");
+            assert.equal(driver.json.state, true, "the state stays until the whole build has finished");
+        } finally {
+            fs.rmSync(home, { recursive: true, force: true });
+        }
+    });
+}
+
+// A program that records its arguments and exits with 3010, as a Visual Studio bootstrapper asking for a restart does.
+const FAKE_VS_BOOTSTRAPPER = "@echo %*> \"%~dp0args.txt\"\r\n@exit /b 3010\r\n";
+/** An argument as a Windows command line quotes it. */
+const quoteArgument = (value) => (/[\s"]/.test(value) ? `"${value}"` : value);
+
+for (const [label, shell, skip] of [["PowerShell 7", pwsh(), noPwsh || notWindows], ["Windows PowerShell 5.1", windowsPowerShell(), noRunCommandShell]]) {
+    test(`the image's package, Visual Studio, partition, docker and worker account steps, with Windows' own tools faked, in ${label}`, { skip }, () => {
+        const home = tempDir("ps-win-step-kinds-");
+        try {
+            const layout = path.join(home, "layout");
+            fs.mkdirSync(layout);
+            fs.writeFileSync(path.join(layout, "vs_fake.cmd"), FAKE_VS_BOOTSTRAPPER);
+            fs.writeFileSync(path.join(home, "x.vsconfig"), JSON.stringify({ version: "1.0", components: ["Microsoft.VisualStudio.Workload.ManagedDesktop"] }));
+            fs.writeFileSync(path.join(home, "instances.json"), JSON.stringify([{ installationVersion: "18.12.12405.243", catalog: { productDisplayVersion: "18.12.0" } }]));
+            fs.writeFileSync(path.join(home, "vswhere.cmd"), `@type "${path.join(home, "instances.json")}"\r\n`);
+            fs.writeFileSync(path.join(home, "dockerd.exe"), "");
+            const exported = "[Unicode]\r\nUnicode=yes\r\n[Privilege Rights]\r\nSeCreateSymbolicLinkPrivilege = *S-1-5-32-544\r\nSeServiceLogonRight = *S-1-5-80-0\r\n";
+            const driver = runDriver(home, "kinds.ps1", [
+                `. ${psQuote(scriptPath("Build-WorkerOsImage.ps1"))} -Root ${psQuote(path.join(home, "root"))}`,
+                `$home2 = ${psQuote(home)}`,
+                "$out = [ordered]@{}",
+                "Add-Type -AssemblyName System.IO.Compression.FileSystem",
+                "function New-TestZip([string]$Path, [string[]]$Names) { $zip = [System.IO.Compression.ZipFile]::Open($Path, 'Create'); foreach ($n in $Names) { $w = New-Object System.IO.StreamWriter(($zip.CreateEntry($n)).Open()); $w.Write($n); $w.Dispose() }; $zip.Dispose() }",
+                "$list = { param($Folder) @(Get-ChildItem -LiteralPath $Folder -Recurse -File | ForEach-Object { $_.FullName.Substring($Folder.Length + 1).Replace('\\', '/') } | Sort-Object) }",
+                // Packages: a NuGet package loses its packaging parts and gets its names unescaped; a zip keeps both; no entry leaves the folder.
+                "$names = @('[Content_Types].xml', '_rels/.rels', 'package/services/metadata/core-properties/1.psmdcp', 'data/FrameworkList.xml', 'ref/net8.0/A%20B.dll', 'Pack.nuspec')",
+                "New-TestZip (Join-Path $home2 'p.nupkg') $names",
+                "Expand-PackageArchive -Path (Join-Path $home2 'p.nupkg') -Destination (Join-Path $home2 'nupkg') -Format nupkg",
+                "$out.nupkg = & $list (Join-Path $home2 'nupkg')",
+                "Expand-PackageArchive -Path (Join-Path $home2 'p.nupkg') -Destination (Join-Path $home2 'zip') -Format zip",
+                "$out.zip = & $list (Join-Path $home2 'zip')",
+                "New-TestZip (Join-Path $home2 'evil.zip') @('ok.txt', '../evil.txt')",
+                "try { Expand-PackageArchive -Path (Join-Path $home2 'evil.zip') -Destination (Join-Path $home2 'evil') -Format zip; $out.evil = 'accepted' } catch { $out.evil = $_.Exception.Message }",
+                "$out.escaped = Test-Path -LiteralPath (Join-Path $home2 'evil.txt')",
+                // File hashes: SHA-512 as well as SHA-256, exactly one of them; a mismatch deletes the file.
+                "$file = Join-Path $home2 'hashed.bin'",
+                "[System.IO.File]::WriteAllText($file, 'payload')",
+                "Assert-FileHash -Path $file -Sha512 (Get-Sha512Hex $file) -Source 'test'",
+                "try { Assert-FileHash -Path $file -Sha256 (Get-Sha256Hex $file) -Sha512 (Get-Sha512Hex $file) -Source 'test'; $out.both = 'accepted' } catch { $out.both = $_.Exception.Message }",
+                "try { Assert-FileHash -Path $file -Sha512 ('0' * 128) -Source 'test'; $out.mismatch = 'accepted' } catch { $out.mismatch = $_.Exception.Message }",
+                "$out.deleted = -not (Test-Path -LiteralPath $file)",
+                // Visual Studio from a layout: its bootstrapper checked first, the .vsconfig and --noWeb passed, then vswhere must list the version.
+                "$script:VsWhere = Join-Path $home2 'vswhere.cmd'",
+                "$expand = { param([string]$Value) $Value.Replace('{manifestDir}', $home2) }",
+                "$vs = [pscustomobject]@{ step = 'visualStudio'; name = 'vs'; layout = [pscustomobject]@{ path = (Join-Path $home2 'layout'); bootstrapper = 'vs_fake.cmd'; sha256 = (Get-Sha256Hex (Join-Path $home2 'layout\\vs_fake.cmd')) }; vsconfig = '{manifestDir}\\x.vsconfig'; version = '18.12.0'; arguments = @('--includeRecommended') }",
+                "$installed = Install-VisualStudio -Step $vs -Expand $expand",
+                "$out.vs = [ordered]@{ exitCode = $installed.ExitCode; installationVersion = $installed.InstallationVersion; args = ([System.IO.File]::ReadAllText((Join-Path $home2 'layout\\args.txt'))).Trim() }",
+                "$vs.version = '18.13.0'",
+                "try { [void](Install-VisualStudio -Step $vs -Expand $expand); $out.vsOtherVersion = 'accepted' } catch { $out.vsOtherVersion = $_.Exception.Message }",
+                "Remove-Item -LiteralPath (Join-Path $home2 'layout\\args.txt')",
+                "$vs.layout.sha256 = '0' * 64",
+                "try { [void](Install-VisualStudio -Step $vs -Expand $expand); $out.vsTampered = 'accepted' } catch { $out.vsTampered = $_.Exception.Message }",
+                "$out.vsTamperedRan = Test-Path -LiteralPath (Join-Path $home2 'layout\\args.txt')",
+                // The partition grows only when there is at least 1 MB to gain.
+                "$script:size = 127GB; $script:resized = @()",
+                "function Get-PartitionSupportedSize { param($DriveLetter) [pscustomobject]@{ SizeMax = 256GB } }",
+                "function Get-Partition { param($DriveLetter) [pscustomobject]@{ Size = $script:size } }",
+                "function Resize-Partition { param($DriveLetter, $Size) $script:resized += ($DriveLetter + '=' + $Size); $script:size = $Size }",
+                "$out.grown = Resize-PartitionToMaximum -DriveLetter 'C'",
+                "$out.unchanged = Resize-PartitionToMaximum -DriveLetter 'C'",
+                "$out.resized = $script:resized",
+                // The docker service: the group made when missing, an existing service registered again, the data root passed on.
+                "$script:calls = @(); $script:service = $true",
+                "function Invoke-NetLocalGroup { param([string[]]$Arguments, [switch]$NoThrow) $script:calls += ('net localgroup ' + ($Arguments -join ' ')); if ($Arguments.Count -eq 1) { [pscustomobject]@{ ExitCode = 2; StdOut = '' } } else { [pscustomobject]@{ ExitCode = 0; StdOut = '' } } }",
+                "function Get-Service { [CmdletBinding()] param($Name) if ($script:service) { [pscustomobject]@{ Name = $Name } } }",
+                "function Stop-Service { [CmdletBinding()] param($Name, [switch]$Force) $script:calls += ('stop ' + $Name) }",
+                "function Invoke-NativeCommand { param($FilePath, [string[]]$ArgumentList) $script:calls += ([System.IO.Path]::GetFileName($FilePath) + ' ' + ($ArgumentList -join ' ')); [pscustomobject]@{ ExitCode = 0; StdOut = '' } }",
+                "Register-DockerService -Step ([pscustomobject]@{ name = 'docker'; dockerd = (Join-Path $home2 'dockerd.exe'); pipeGroup = 'docker-users'; dataRoot = 'D:\\docker' })",
+                "$out.docker = $script:calls",
+                // The worker account: a missing right goes to the worker's SID, the rest of the right's accounts kept; groups by SID.
+                `$script:exported = ${psQuote(exported)}; $script:secedit = @(); $script:template = ''; $script:members = @()`,
+                "function Get-WorkerServiceSid { 'S-1-5-19' }",
+                "function Invoke-SecEdit { param([string[]]$Arguments) $script:secedit += $Arguments[0]; $cfg = $Arguments[[array]::IndexOf($Arguments, '/cfg') + 1]; if ($Arguments[0] -eq '/export') { [System.IO.File]::WriteAllText($cfg, $script:exported, [System.Text.Encoding]::Unicode) } else { $script:template = [System.IO.File]::ReadAllText($cfg); foreach ($line in ($script:template -split \"`r`n\")) { if ($line -match '^(Se\\w+) = (.+)$') { $script:exported = $script:exported -replace ('(?m)^' + $Matches[1] + ' = .*$'), $line } } } }",
+                "function Get-LocalGroupSid { param($Name) if ($Name -eq 'Administrators') { 'S-1-5-32-544' } else { 'S-1-5-21-1-2-3-1001' } }",
+                "function Invoke-NetLocalGroup { param([string[]]$Arguments, [switch]$NoThrow) if ($Arguments.Count -gt 1) { $script:members += $Arguments[1] }; [pscustomobject]@{ ExitCode = 0; StdOut = ('Members' + [char]10 + '-----' + [char]10 + ($script:members -join [char]10)) } }",
+                "$out.account = Grant-WorkerAccount -Settings ([pscustomobject]@{ userRights = @('SeCreateSymbolicLinkPrivilege'); groups = @('docker-users') })",
+                "$out.template = $script:template",
+                "$out.members = $script:members",
+                "$again = Grant-WorkerAccount -Settings ([pscustomobject]@{ userRights = @('SeCreateSymbolicLinkPrivilege'); groups = @('docker-users') })",
+                "$out.secedit = $script:secedit",
+                "$out.membersAgain = $script:members",
+                "$out.accountName = (New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-19').Translate([System.Security.Principal.NTAccount]).Value",
+                "try { [void](Grant-WorkerAccount -Settings ([pscustomobject]@{ groups = @('Administrators') })); $out.builtIn = 'accepted' } catch { $out.builtIn = $_.Exception.Message }",
+                "ConvertTo-Json -Compress -Depth 6 -InputObject $out",
+            ].join("\n"), { shell });
+            assert.equal(driver.status, 0, driver.stderr + driver.stdout);
+            const out = driver.json;
+            assert.deepEqual([...out.nupkg].sort(), ["Pack.nuspec", "data/FrameworkList.xml", "ref/net8.0/A B.dll"]);
+            assert.deepEqual([...out.zip].sort(), ["Pack.nuspec", "[Content_Types].xml", "_rels/.rels", "data/FrameworkList.xml", "package/services/metadata/core-properties/1.psmdcp", "ref/net8.0/A%20B.dll"]);
+            assert.match(out.evil, /has an entry outside its folder: \.\.\/evil\.txt/);
+            assert.equal(out.escaped, false);
+            assert.match(out.both, /exactly one of a SHA-256 and a SHA-512/);
+            assert.match(out.mismatch, /^SHA-512 mismatch for test: got [0-9a-f]{128}, pinned 0{128}$/);
+            assert.equal(out.deleted, true);
+            assert.deepEqual(out.vs, {
+                exitCode: 3010,
+                installationVersion: "18.12.12405.243",
+                args: `--quiet --wait --norestart --nocache --config ${quoteArgument(path.join(home, "x.vsconfig"))} --noWeb --includeRecommended`,
+            });
+            assert.match(out.vsOtherVersion, /vswhere lists no Visual Studio 18\.13\.0 after the vs step/);
+            assert.match(out.vsTampered, /SHA-256 mismatch for .*vs_fake\.cmd/);
+            assert.equal(out.vsTamperedRan, false, "a bootstrapper that fails its hash never runs");
+            assert.equal(out.grown, 256 * 1024 ** 3);
+            assert.equal(out.unchanged, 256 * 1024 ** 3);
+            assert.deepEqual(out.resized, [`C=${256 * 1024 ** 3}`]);
+            assert.deepEqual(out.docker, [
+                "net localgroup docker-users",
+                "net localgroup docker-users /add",
+                "stop docker",
+                "dockerd.exe --unregister-service",
+                "dockerd.exe --register-service --group docker-users --data-root D:\\docker",
+            ]);
+            assert.deepEqual(out.account, { userRights: ["SeCreateSymbolicLinkPrivilege"], groups: ["docker-users"] });
+            assert.match(out.template, /\[Privilege Rights\]\r\nSeCreateSymbolicLinkPrivilege = \*S-1-5-32-544,\*S-1-5-19\r\n$/);
+            assert.doesNotMatch(out.template, /SeServiceLogonRight/, "only the rights that change are configured");
+            assert.deepEqual(out.secedit, ["/export", "/configure", "/export", "/export"], "a right the worker holds is not configured again");
+            assert.deepEqual(out.members, [out.accountName], "the worker's account by the name Windows gives it");
+            assert.deepEqual(out.membersAgain, [out.accountName], "a member is not added again");
+            assert.match(out.builtIn, /Administrators is a built-in group, which the worker never joins/);
+        } finally {
+            fs.rmSync(home, { recursive: true, force: true });
+        }
+    });
+}
+
 test("the CLI home's placeholders hold what the Copilot CLI reads as no configuration, and the folders are folders", { skip: noPwsh }, () => {
     const home = tempDir("ps-win-cli-home-");
     try {
