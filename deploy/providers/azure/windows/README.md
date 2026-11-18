@@ -25,6 +25,7 @@ The pieces it works with live elsewhere:
 | `disk-attacher.mjs` | The attacher service: LUN 0 online, offline and growth, and the release sync, on `127.0.0.1` |
 | `controller-token.mjs` | The Dev Drive extension's controller token module (`PS_DISK_CONTROLLER_TOKEN_MODULE`) |
 | `Build-WorkerOsImage.ps1` | Builds the generalized image |
+| `build-vm.bicep` | The VM that builds the image: Gen2 Windows Server 2025 with the Standard security type, no public IP address |
 | `Install-WinWorkerService.ps1` | Writes `worker.env` and installs both services (run by the image build) |
 | `Initialize-WinWorkerDisk.ps1` | Formats LUN 0 as the ReFS Dev Drive `Q:`, or mounts an existing one |
 | `Seed-WorkerReposDisk.ps1` | Seeds the golden drive; `-Refresh` and `-Verify` for the weekly snapshot refresh |
@@ -426,8 +427,9 @@ worker alone, the worker only reading) and, for a manifest with
 
 ## Building the image
 
-On a fresh Windows Server 2025 VM (below: Gen2, Standard security, in the
-stamp's region), as an administrator, from a copy of this folder:
+On a fresh Windows Server 2025 VM (Gen2, with the Standard security type, in
+the stamp's region: `build-vm.bicep`, below), as an administrator, from a copy
+of this folder:
 
 ```powershell
 .\Build-WorkerOsImage.ps1 -ToolchainManifest .\examples\toolchain-manifest.json `
@@ -471,21 +473,41 @@ prefix, lowercase, without `-` and `_`), and its image definition
 and without a security type, so its versions come from VMs with Standard
 security, as the scale set's are.
 `WIN_WORKER_GALLERY_IMAGE_ID`, a base-infra output, is the definition's ID.
-`az vm create` makes a Gen2 VM a Trusted launch VM unless told otherwise, and
-the gallery refuses a Trusted launch VM's image for this definition, so create
-the build VM with `--security-type Standard`, from a Gen2 image, in a resource
-group of its own:
+The gallery refuses a Trusted Launch VM's image for this definition, so create
+the build VM from `build-vm.bicep`, in a resource group of its own: a Gen2
+Windows Server 2025 VM with the Standard security type, a 256 GiB OS disk like
+the scale set's VMs, no public IP address and no inbound rule, which reaches
+the internet through a NAT gateway:
 
 ```powershell
 az group create --name <build-rg> --location <region>
-az vm create --resource-group <build-rg> --name <build-vm> --location <region> `
-  --image MicrosoftWindowsServer:WindowsServer:2025-datacenter-g2:latest `
-  --security-type Standard --size Standard_D4ds_v5 --admin-username <admin> --nsg-rule NONE
+az deployment group create --resource-group <build-rg> --template-file build-vm.bicep `
+  --parameters vmName=<build-vm> adminUsername=<admin>
 ```
 
-`--nsg-rule NONE` opens no inbound port; reach the VM through Azure Bastion or
-Run Command. `az vm create` asks for the administrator's password. Once
-`Build-WorkerOsImage.ps1 -Generalize` has shut the VM down (never start it
+The Azure CLI asks for the administrator's password. Reach the VM through Run
+Command or Azure Bastion. How a VM gets the Standard type depends on the
+Compute API version:
+
+- below 2025-11-01, which the template uses, as the scale set does, a VM that
+  names no security type gets Standard, in a subscription not registered for
+  Trusted Launch as default (which
+  `az feature show --namespace Microsoft.Compute --name TrustedLaunchByDefaultPreview`
+  reports), while an explicit `securityType: Standard` needs the subscription
+  feature `Microsoft.Compute/UseStandardSecurityType`;
+- from 2025-11-01, Trusted Launch is the default for the images and sizes that
+  support it, and only an explicit `securityType: Standard` opts out.
+
+`az vm create` makes a Gen2 VM a Trusted Launch VM unless it gets
+`--security-type Standard`, which it sends as an explicit
+`securityType: Standard` at a Compute API version below 2025-11-01 (2024-11-01
+at the time of writing), so it works only in a subscription registered for
+`UseStandardSecurityType`: run
+`az feature register --namespace Microsoft.Compute --name UseStandardSecurityType`
+and, once `az feature show` reports `Registered`,
+`az provider register --namespace Microsoft.Compute`.
+
+Once `Build-WorkerOsImage.ps1 -Generalize` has shut the VM down (never start it
 again), capture it:
 
 ```powershell
@@ -807,6 +829,11 @@ clean-up.
 The tests cannot reach Azure, a scale set or a data disk. These need a worker
 VM:
 
+- the security type: the build VM from `build-vm.bicep`, a VM that the
+  controller's capacity change creates and one that the standby pool creates
+  (with its own Azure calls) all report the Standard type in Azure Resource
+  Manager (`az vm show --query securityProfile`: none, or `securityType`
+  `Standard`), and nested virtualization works on them;
 - the image build end to end: the Node.js and WinSW installs, the toolchain,
   every access list (write attempts from an agent shell as the worker account on
   `C:\`, `Q:\`, `C:\pilotswarm\work`, the `copilot\` placeholders and settings

@@ -288,7 +288,8 @@ deploy again: base-infra then creates the scale set.
   and passes it as a secure parameter, never in the rendered parameters file;
 - after it: Bicep sets the scale set's capacity only when it creates it.
   Later deploys change an existing scale set's size, image and `userData` with
-  a PATCH that never names its capacity, which the controller owns. The step
+  a PATCH, at the Compute API version that the scale set's Bicep pins, that
+  never names its capacity, which the controller owns. The step
   also deletes a PostgreSQL `AllowAllAzureServices` rule and the portal
   identity's old account-wide Blob grant, which an incremental deployment
   leaves in place;

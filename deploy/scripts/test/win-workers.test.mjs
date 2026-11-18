@@ -56,6 +56,7 @@ import { createFakeAppGateway, createFakeAz, createFakeOpenssl, createTestPki } 
 
 const BICEP = join(REPO_ROOT, "deploy/providers/azure/services/base-infra/bicep");
 const readBicep = (file) => readFileSync(join(BICEP, file), "utf8");
+const WINDOWS = join(REPO_ROOT, "deploy/providers/azure/windows");
 const pki = createTestPki();
 
 const SUBSCRIPTION = "00000000-0000-0000-0000-000000000003";
@@ -959,6 +960,15 @@ test("every write to the scale set's model or capacity goes at the Bicep's pinne
   assert.equal(controllerAzure.SCALE_SET_API_VERSION, version, "the disk controller's capacity PATCH");
 });
 
+test("the image build VM: Gen2 Windows Server 2025 with the Standard security type the way its Compute API version needs, no public IP, and a password the Azure CLI asks for", () => {
+  const template = readFileSync(join(WINDOWS, "build-vm.bicep"), "utf8");
+  const vm = blockOf(template, "vm");
+  assertStandardSecurity(vm, apiVersionOf(template, "vm", "Microsoft.Compute/virtualMachines"), "the build VM");
+  assert.match(vm, /imageReference: \{\s*publisher: 'MicrosoftWindowsServer'\s*offer: 'WindowsServer'\s*sku: '2025-datacenter-g2'/);
+  assert.doesNotMatch(blockOf(template, "nic"), /publicIPAddress/i);
+  assert.match(template, /^@secure\(\)\r?\n(?:@description\('(?:[^'\\]|\\.)*'\)\r?\n)?param adminPassword string\s*$/m, "a secure password without a default");
+});
+
 test("the Azure Monitor Agent signs in as the workers' identity, and their data collection rule feeds the main workspace", () => {
   const extension = blockOf(winWorkers, "monitorAgentExtension");
   assert.match(extension, /publisher: 'Microsoft\.Azure\.Monitor'\s*type: 'AzureMonitorWindowsAgent'/);
@@ -1306,9 +1316,9 @@ function azAsync(args) {
   });
 }
 
-async function buildBicep(dir, file) {
+async function buildBicep(dir, file, folder = BICEP) {
   const outfile = join(dir, `${file}.json`);
-  const result = await azAsync(["bicep", "build", "--file", join(BICEP, file), "--outfile", outfile]);
+  const result = await azAsync(["bicep", "build", "--file", join(folder, file), "--outfile", outfile]);
   assert.equal(result.status, 0, `${file}: ${result.stderr}`);
   assert.doesNotMatch(result.stderr, /\bError\b/, file);
   return JSON.parse(readFileSync(outfile, "utf8"));
@@ -1340,6 +1350,12 @@ test("every template the pool adds or changes compiles, and the compiled scale s
   assert.equal(inner.find((r) => r.type === "Microsoft.StandbyPool/standbyVirtualMachinePools").condition, "[variables('deployScaleSet')]");
   const gated = template.resources.filter((r) => r.type === "Microsoft.Resources/deployments" && r.condition === "[parameters('winWorkersEnabled')]");
   assert.equal(gated.length, 9, "the pool's nine modules");
+
+  // The image build VM's template, and the security type of both, compiled.
+  const vm = (await buildBicep(dir, "build-vm.bicep", WINDOWS)).resources.find((r) => r.type === "Microsoft.Compute/virtualMachines");
+  for (const resource of [scaleSet, vm]) {
+    if (resource.apiVersion < "2025-11-01") assert.doesNotMatch(JSON.stringify(resource.properties), /securityProfile/, resource.type);
+  }
 });
 
 // ─── The Windows worker deploy step ───

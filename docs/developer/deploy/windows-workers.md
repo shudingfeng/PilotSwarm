@@ -530,9 +530,11 @@ demand:
    session's retries renew it.
 2. **Bind or scale out.** Demand gets the ready unbound VM. Without one, the
    controller raises the scale set's capacity with a PATCH of `sku.capacity`
-   alone, and the new VM starts bound to the owner. Azure takes it from the
-   standby pool when one is ready. A deploy never writes the capacity after
-   creating the scale set, and nothing scales out while the pool is frozen.
+   alone, at the Compute API version that the scale set's Bicep pins (see
+   [Requirements](#requirements)), and the new VM starts bound to the owner.
+   Azure takes it from the standby pool when one is ready. A deploy never
+   writes the capacity after creating the scale set, and nothing scales out
+   while the pool is frozen.
 3. **Target.** The pool keeps `min(X, max(Y, bound + ready))` VMs active, where
    `ready` is 1 while a demand signal arrived within
    `WIN_WORKER_IDLE_RECYCLE_MINUTES`. While owners are active, one unbound VM
@@ -1039,11 +1041,25 @@ See [Session Message Scope](../reference/configuration.md#session-message-scope)
   the Portal only audits who may open a session, and anyone could prompt an
   owner's session, which runs on that owner's VM with the owner's token.
 - **Azure capacity:** quota for `WIN_WORKER_VM_SIZE` (a size with nested
-  virtualization, which Hyper-V containers need), Premium SSD v2 in the region,
-  and a subscription whose Azure Policy allows `securityType: Standard` VMs.
+  virtualization, which Hyper-V containers need) and Premium SSD v2 in the
+  region.
+- **The Standard security type** for the workers and the image's build VM,
+  which they get by naming no security type at a Compute API version below
+  2025-11-01: the subscription must not be registered for Trusted Launch as
+  default (the preview feature
+  `Microsoft.Compute/TrustedLaunchByDefaultPreview`), and no Azure Policy may
+  deny VMs without Trusted Launch. No subscription feature is needed: only an
+  explicit `securityType: Standard` below 2025-11-01, which
+  `az vm create --security-type Standard` sends, needs
+  `Microsoft.Compute/UseStandardSecurityType`. From 2025-11-01, Trusted Launch
+  is the default, and only an explicit Standard opts out, so the scale set's
+  Bicep, the deploy step's PATCH and the controller's capacity PATCH share one
+  pinned API version.
 - **Tools:** the Azure CLI, `kubectl` and openssl 1.1.1 or later where the
-  deploy runs; a Gen2 Windows Server 2025 build VM with Standard security for
-  the image; a Windows x64 machine with Node.js 24.22.1 to pack releases.
+  deploy runs; a Gen2 Windows Server 2025 build VM with the Standard security
+  type for the image, from
+  [`build-vm.bicep`](../../../deploy/providers/azure/windows/build-vm.bicep); a
+  Windows x64 machine with Node.js 24.22.1 to pack releases.
 - **A dispatcher** (`DISPATCHER_SP_OBJECT_ID`), the only caller that claims
   drives.
 - **No personal keys in the database.** Before you turn on
@@ -1124,12 +1140,17 @@ the `stamp` profile, and the security logs go to the perimeter's workspace. See
    runs the database role Job again from
    `deploy/.tmp/portal-<env>/db-role-job.yaml`; since the first deploy already
    ran it, `-SkipMigration` works too.
-7. **The image.** Create the build VM with `--security-type Standard`, from a
-   Gen2 Windows Server 2025 image, in a resource group of its own: the gallery
-   takes no Trusted launch VM's image for this definition, and `az vm create`
-   makes a Gen2 VM Trusted launch by default. Run `Build-WorkerOsImage.ps1`
-   there with your toolchain manifest, worker settings file and seed manifest,
-   and `-Generalize`, which runs Sysprep and shuts the VM down. A toolchain
+7. **The image.** Create the build VM from
+   [`build-vm.bicep`](../../../deploy/providers/azure/windows/build-vm.bicep)
+   with `az deployment group create`, in a resource group of its own: a Gen2
+   Windows Server 2025 VM that names no security type at a Compute API version
+   below 2025-11-01, so it gets the Standard type. The gallery takes no Trusted
+   Launch VM's image for this definition, and `az vm create` makes a Gen2 VM
+   Trusted Launch unless it gets `--security-type Standard`, which needs the
+   subscription feature `Microsoft.Compute/UseStandardSecurityType`. Run
+   `Build-WorkerOsImage.ps1` there with your toolchain manifest, worker
+   settings file and seed manifest, and `-Generalize`, which runs Sysprep and
+   shuts the VM down. A toolchain
    that needs restarts (Windows features, Visual Studio) makes it exit with
    code 3010 at each: restart the VM and run the same command again until it
    finishes. Deallocate and
@@ -1156,9 +1177,10 @@ the `stamp` profile, and the security logs go to the perimeter's workspace. See
     Confirm that every log stream arrives in its workspace.
 
 After the scale set exists, a deploy changes only its VM size, image and
-`userData`, with a PATCH that never names the capacity, which the controller
-owns. It also deletes the Portal identity's old account-wide Blob grant once its
-container grant exists, and an `AllowAllAzureServices` firewall rule.
+`userData`, with a PATCH at the scale set's pinned Compute API version that
+never names the capacity, which the controller owns. It also deletes the Portal
+identity's old account-wide Blob grant once its container grant exists, and an
+`AllowAllAzureServices` firewall rule.
 
 ### What the deploy creates
 
