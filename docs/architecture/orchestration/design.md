@@ -11,7 +11,9 @@ It does **not** own tool implementations or Copilot SDK session state. Those
 live in worker activities and the session manager.
 
 Primary source: [`packages/sdk/src/orchestration/`](../../../packages/sdk/src/orchestration).
-The current latest version is `1.0.86`: 1.0.85 plus owner routing (see
+The current latest version is `1.0.87`: conditional question answers (see
+[Conditional question answers](#conditional-question-answers-1087)).
+Version `1.0.86` is 1.0.85 plus owner routing (see
 [Owner routing and capacity requests](#owner-routing-and-capacity-requests-1086)).
 1.0.85 is 1.0.84 plus durable session titles, and 1.0.84 is 1.0.83 plus
 pinned spawn grants and subtree tool ceilings (tool composition, design
@@ -22,7 +24,7 @@ workflow request turns). The intake ships switched off: no worker sets the
 `workflowIntake` capability, so no send creates a durable exchange, and a
 Workflow's messages reach a session through the session queue as before. Frozen prior versions live as siblings (single files
 `packages/sdk/src/orchestration_1_0_47.ts` … `_1_0_51.ts`, then directories
-`orchestration_1_0_52/` … `orchestration_1_0_85/`) and run unchanged for any
+`orchestration_1_0_52/` … `orchestration_1_0_86/`) and run unchanged for any
 in-flight execution that started against them. The sections below describe
 1.0.82's queue and turn behaviour, which 1.0.83 to 1.0.86 keep; the intake's
 additions are in the intake design, and tool composition's and the titles' in
@@ -46,6 +48,62 @@ which the client sets only when it is configured to (see
 [§10](#owner-routing-and-capacity-requests-1086)). Without them, 1.0.86
 schedules exactly what 1.0.85 schedules. Version 1.0.85 and older ignore both
 inputs.
+
+### Conditional question answers (1.0.87)
+
+Legacy answers retain their text-and-iteration binding and stale-as-ordinary-input
+behavior. Conditional answers are a separate operation: the
+[API contract](../../api/reference.md#conditional-question-answers) describes
+its payload, bounds, statuses and caller verification.
+
+Each new `input_required` result yields `ctx.newGuid()` once. Its immutable
+`occurrenceId` is stored with `pendingInputQuestion` and the response, projected
+into custom status, and carried unchanged through every continue-as-new.
+An inherited tokenless question stays tokenless; the worker does not invent an
+identity for an old occurrence.
+
+`answer_question` commands enter `handleCommand`, then `enqueueQuestionAnswer`.
+They append answer items to the **same FIFO as legacy answers**, after earlier
+stashed work. Queue admission and a `pending` receipt are written together.
+A full FIFO instead retains `refused`, without clearing the question.
+`processAnswer` compares the authoritative pending token and exact question
+text only when that item reaches consumption. A mismatch retains `stale` and
+returns without a prompt. A match synchronously queues one actual answer prompt
+at the FIFO front, clears the question and records `accepted`, without an
+intervening yield. Refusal to fit the formatted prompt leaves the question open
+and retains `refused`. The queued prompt survives even a continue-as-new before
+its next dispatch through the existing durable turn/owned-retry path.
+Acceptance is ownership of that prompt, not successful completion of the model.
+
+Receipts live in instance KV at `question-answer.<requestId>`, survive
+continue-as-new, and are not evicted. Exact retries reuse them; a changed payload
+never replaces the first fingerprint or result. The SDK maps a mismatched POST
+result hash to `conflict`; GET deliberately returns the original for callers to
+verify. The receipt contains no answer text.
+New IDs stop at a conservative total-KV soft limit of 100 keys, checked by both
+the host and the serial worker; no old receipt is evicted and no unadmitted
+answer consumes a question. A concurrent enqueue that loses the capacity race
+can remain unknown, which is uncertainty, not acceptance.
+
+Receipt decisions use **yielded `ctx.getValueFromInstance` self-reads**, not a
+live KV-cache shortcut. Duroxide records the system activity's answer in history.
+On replay, the original read still sees the original pending/unknown result,
+even if the materialized receipt now says accepted; the original prompt's
+schedule is therefore reconstructed rather than skipped. Synchronous FIFO and
+receipt mutations rely on Duroxide's normal atomic history/KV checkpoint
+contract. The pinned PostgreSQL provider's
+[instance-scoped retention](https://github.com/microsoft/duroxide-pg/blob/v0.1.38/migrations/0019_add_kv_last_updated.sql)
+and [KV delta](https://github.com/microsoft/duroxide-pg/blob/v0.1.38/migrations/0020_add_kv_delta.sql)
+contracts supersede the older proposal's execution-owned pruning.
+The local generator tests exercise production command/FIFO/turn code and
+recorded-read replay. They do not substitute for native-runtime crash recovery
+or real-provider checkpoint verification.
+
+`orchestration_1_0_86/` is the complete pre-change replay-sensitive source tree,
+including its own proxy contract. Only its runtime's own version becomes a
+literal; its continue-as-new target remains the shared latest constant. Hash
+tests pin all 13 files; no prior frozen tree is edited. This preparation needs
+the normal orchestration-version release approval before landing.
 
 ---
 
@@ -1052,8 +1110,9 @@ src/orchestration_1_0_55/     │
 src/orchestration_1_0_82/     │
 src/orchestration_1_0_83/     │
 src/orchestration_1_0_84/     │
-src/orchestration_1_0_85/     ┘
-src/orchestration/            ← current latest (1.0.86: 1.0.85 plus owner routing; 1.0.85 is 1.0.84 plus durable titles, 1.0.84 is 1.0.83 plus tool composition, 1.0.83 is 1.0.82 plus the durable workflow intake)
+src/orchestration_1_0_85/     │
+src/orchestration_1_0_86/     ┘
+src/orchestration/            ← current latest (1.0.87: 1.0.86 plus conditional question answers; 1.0.86 adds owner routing)
 ```
 
 All registered versions are listed in

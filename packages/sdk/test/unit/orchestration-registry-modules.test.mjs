@@ -15,7 +15,7 @@ import { DURABLE_SESSION_LATEST_VERSION, DURABLE_SESSION_ORCHESTRATION_REGISTRY 
 
 const DIST = new URL("../../dist/", import.meta.url);
 const SRC = new URL("../../src/", import.meta.url);
-const FROZEN = ["1.0.82", "1.0.83", "1.0.84", "1.0.85"];
+const FROZEN = ["1.0.82", "1.0.83", "1.0.84", "1.0.85", "1.0.86"];
 
 /** The module a version's code lives in: the live tree for the latest; else its own file (to 1.0.51) or directory. */
 function moduleOf(version) {
@@ -24,8 +24,8 @@ function moduleOf(version) {
     return existsSync(new URL(`${name}/index.js`, DIST)) ? `${name}/index.js` : `${name}.js`;
 }
 
-test("each registered version is its own module's handler, exactly; the latest (1.0.86) is the live tree; 1.0.82 to 1.0.85 frozen copies", async () => {
-    assert.equal(DURABLE_SESSION_LATEST_VERSION, "1.0.86");
+test("each registered version is its own module's handler, exactly; the latest (1.0.87) is the live tree; 1.0.82 to 1.0.86 frozen copies", async () => {
+    assert.equal(DURABLE_SESSION_LATEST_VERSION, "1.0.87");
     const versions = DURABLE_SESSION_ORCHESTRATION_REGISTRY.map(entry => entry.version);
     assert.equal(new Set(versions).size, versions.length, "no version is registered twice");
     assert.equal(versions.at(-1), DURABLE_SESSION_LATEST_VERSION);
@@ -43,10 +43,10 @@ test("each registered version is its own module's handler, exactly; the latest (
             frozen[`durableSessionOrchestration_${name}`], version);
         assert.equal(`durableSessionOrchestration_${name}` in live, false, `the live tree is not ${version}`);
     }
-    assert.equal(DURABLE_SESSION_ORCHESTRATION_REGISTRY.at(-1).handler, live.durableSessionOrchestration_1_0_86);
+    assert.equal(DURABLE_SESSION_ORCHESTRATION_REGISTRY.at(-1).handler, live.durableSessionOrchestration_1_0_87);
 });
 
-test("audit R2: frozen 1.0.82 to 1.0.85 name themselves with their literal and stamp it as a continue-as-new's source version", () => {
+test("audit R2: frozen 1.0.82 to 1.0.86 name themselves with their literal and stamp it as a continue-as-new's source version", () => {
     for (const version of FROZEN) {
         const dir = `orchestration_${version.replaceAll(".", "_")}`;
         const runtime = readFileSync(new URL(`${dir}/runtime.ts`, SRC), "utf8").replace(/\r\n/g, "\n");

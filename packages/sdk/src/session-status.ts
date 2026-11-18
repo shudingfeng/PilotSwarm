@@ -138,16 +138,18 @@ export function resolveStaleRunningRowRecovery(input: {
 
 /** A previous response stays in KV during the next turn; it is not live input. */
 export function resolvePendingQuestion(status: string, customStatus: any, latestResponse: any): {
-    question: string; choices?: string[]; allowFreeform?: boolean; iteration?: number;
+    question: string; choices?: string[]; allowFreeform?: boolean; iteration?: number; readonly occurrenceId?: string;
 } | undefined {
     if (status !== "input_required") return undefined;
     if (customStatus?.pendingQuestion) return {
         question: customStatus.pendingQuestion,
         iteration: customStatus.questionIteration ?? customStatus.iteration,
+        ...(typeof customStatus.questionOccurrenceId === "string" ? { occurrenceId: customStatus.questionOccurrenceId } : {}),
         choices: customStatus.choices,
         allowFreeform: customStatus.allowFreeform,
     };
     return latestResponse?.type === "input_required" && latestResponse.question
-        ? { question: latestResponse.question, iteration: latestResponse.iteration, choices: latestResponse.choices, allowFreeform: latestResponse.allowFreeform }
+        ? { question: latestResponse.question, iteration: latestResponse.iteration, choices: latestResponse.choices, allowFreeform: latestResponse.allowFreeform,
+            ...(typeof latestResponse.occurrenceId === "string" ? { occurrenceId: latestResponse.occurrenceId } : {}) }
         : undefined;
 }

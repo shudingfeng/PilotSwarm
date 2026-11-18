@@ -37,7 +37,7 @@ test("every worker declares the workflow-request tag and serves the full engine,
     assert.doesNotMatch(WORKER, /workflowRequests/);
 });
 
-test("it registers 1.0.83's intake activities, its failed-turn report and no orchestration; the registry's latest version is 1.0.86, and 1.0.83 is registered", () => {
+test("it registers 1.0.83's intake activities, its failed-turn report and no orchestration; the registry's latest version is 1.0.87, and 1.0.83 is registered", () => {
     const orchestrations = [];
     const activities = [];
     registerWorkflowMilestoneSessions({
@@ -46,14 +46,14 @@ test("it registers 1.0.83's intake activities, its failed-turn report and no orc
     }, { store: null });
     assert.deepEqual(orchestrations, []);
     assert.deepEqual(activities, [WORKFLOW_INTAKE_ACTIVITIES.claim, WORKFLOW_INTAKE_ACTIVITIES.settle, WORKFLOW_AGENT_TURN_FAILURE_ACTIVITY]);
-    assert.equal(DURABLE_SESSION_LATEST_VERSION, "1.0.86");
+    assert.equal(DURABLE_SESSION_LATEST_VERSION, "1.0.87");
     assert.equal(DURABLE_SESSION_ORCHESTRATION_REGISTRY.at(-1).version, DURABLE_SESSION_LATEST_VERSION);
     assert.ok(DURABLE_SESSION_ORCHESTRATION_REGISTRY.some(entry => entry.version === "1.0.83"));
 });
 
 test("a client starts sessions at the latest version unless a test names another registered one, and refuses any other", () => {
     const client = new PilotSwarmClient({ store: "postgres://unused.invalid/pilotswarm" });
-    for (const version of ["1.0.87", "1.0.46", ""]) {
+    for (const version of ["1.0.88", "1.0.46", ""]) {
         assert.throws(() => client._startSessionsAt(version), /New sessions start at a registered version/, version);
     }
     client._startSessionsAt("1.0.82");

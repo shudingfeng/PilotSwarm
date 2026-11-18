@@ -1643,16 +1643,19 @@ export function* handleTurnResult(
 
         case "input_required": {
             ctx.traceInfo(`[orch] waiting for user input: ${result.question}`);
+            const occurrenceId: string = yield ctx.newGuid();
             yield* writeLatestResponse(runtime, {
                 iteration: state.iteration,
                 type: "input_required",
                 question: result.question,
+                occurrenceId,
                 choices: result.choices,
                 allowFreeform: result.allowFreeform,
                 model: (result as any).model,
             });
 
             state.pendingInputQuestion = {
+                occurrenceId,
                 iteration: state.iteration,
                 question: result.question,
                 choices: result.choices,

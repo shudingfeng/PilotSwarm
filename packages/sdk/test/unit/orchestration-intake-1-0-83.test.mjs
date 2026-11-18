@@ -481,6 +481,7 @@ const DROPPED_FROM_85 = {
         '    runtime.session = createSessionProxy(ctx, runtime.input.sessionId, state.affinityKey, state.config, "tool-composition-v1");',
     ],
     "runtime.ts": [
+        'import { DURABLE_SESSION_LATEST_VERSION } from "../orchestration-version.js";',
         'export const CURRENT_ORCHESTRATION_VERSION = "1.0.85";',
         '        runtime.session = createSessionProxy(runtime.ctx, input.sessionId, state.affinityKey, state.config, "tool-composition-v1");',
         '    const manager = createSessionManagerProxy(ctx, "tool-composition-v1", { childResultProvenance: true });',
@@ -508,17 +509,18 @@ const DROPPED_FROM_85 = {
     ],
 };
 
-test("1.0.86 keeps 1.0.83's intake whole: 1.0.85's files plus the contract module, the intake's and queue.ts unchanged, no turn-control-v1", () => {
+test("frozen 1.0.86 keeps 1.0.83's intake whole: 1.0.85's files plus the contract module, the intake's and queue.ts unchanged", () => {
     const V85 = "orchestration_1_0_85";
-    assert.deepEqual(tsFilesLive("orchestration"), [...tsFilesLive(V85), "proxy-contract.ts"].sort());
-    assert.equal(readLive("orchestration/proxy-contract.ts"), 'export const LIVE_SESSION_PROXY_CONTRACT = "tool-composition-v1";\n');
+    const V86 = "orchestration_1_0_86";
+    assert.deepEqual(tsFilesLive(V86), [...tsFilesLive(V85), "proxy-contract.ts"].sort());
+    assert.equal(readLive(`${V86}/proxy-contract.ts`), 'export const LIVE_SESSION_PROXY_CONTRACT = "tool-composition-v1";\n');
     for (const name of ["intake-machine.ts", "intake-state.ts", "intake-wiring.ts", "workflow-turn-failure.ts", "queue.ts", "utils.ts"]) {
-        assert.equal(readLive(`orchestration/${name}`), readLive(`${V83}/${name}`), name);
+        assert.equal(readLive(`${V86}/${name}`), readLive(`${V83}/${name}`), name);
         assert.equal(readLive(`${V85}/${name}`), readLive(`${V83}/${name}`), name);
     }
     for (const name of tsFilesLive(V85)) {
-        assert.ok(!readLive(`orchestration/${name}`).includes('"turn-control-v1"'), `${name} names the turn-control contract`);
-        const dropped = linesOnly(readLive(`${V85}/${name}`), readLive(`orchestration/${name}`));
+        assert.ok(!readLive(`${V86}/${name}`).includes('"turn-control-v1"'), `${name} names the turn-control contract`);
+        const dropped = linesOnly(readLive(`${V85}/${name}`), readLive(`${V86}/${name}`));
         if (name === "index.ts") {
             // Its comment and the handler's name only.
             assert.ok(dropped.every(line => /^ \* |^export function\* durableSessionOrchestration_1_0_85\($/.test(line)), dropped.join("\n"));
@@ -527,7 +529,7 @@ test("1.0.86 keeps 1.0.83's intake whole: 1.0.85's files plus the contract modul
         assert.deepEqual(dropped, DROPPED_FROM_85[name] ?? [], name);
     }
     // The intake's continue-as-new guard, its due-write race and the failed-turn report stay in the live loop.
-    const runtime = readLive("orchestration/runtime.ts");
+    const runtime = readLive(`${V86}/runtime.ts`);
     assert.ok(runtime.includes(HISTORY_CHECK_83));
     assert.ok(runtime.includes("        if (intakeDueAtMs(state.intake) !== null) continue; // 1.0.83: drain will race the intake's due write\n"));
     assert.ok(runtime.includes("    yield* settleWorkflowTurnFailure(runtime);\n"));

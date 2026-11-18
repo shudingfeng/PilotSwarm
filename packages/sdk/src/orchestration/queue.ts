@@ -50,6 +50,10 @@ import { handleTurnResult, processPrompt, processTimer } from "./turn.js";
 import { validClientMessageIds , noteMessageSender, applySenderAttribution, maybeQueueSharedPreamble } from "./utils.js";
 import { intakeDueAtMs } from "./intake-machine.js";
 import { intakeArrival, intakeOwnTurn, intakeOwnTurnPrompt, intakeWantsTurn, latchIntakeTombstones, runIntakeWake } from "./intake-wiring.js";
+import {
+    QUESTION_ANSWER_KV_SOFT_LIMIT, parseQuestionAnswerReceipt, questionAnswerReceipt, questionAnswerReceiptKey, questionAnswerRequestHash,
+    validateQuestionAnswerRequest, type QuestionAnswerReceipt, type QuestionAnswerRequest,
+} from "../question-answer.js";
 
 // ─── KV FIFO bucket primitives ──────────────────────────────
 
@@ -1518,7 +1522,104 @@ function* sweepMessagesBeforePromptDispatch(runtime: DurableSessionRuntime): Gen
 
 // ─── decide: pop and process one item from FIFO ─────────────
 
+/**
+ * A yielded self-read records the value at this point in history. A live KV
+ * cache lookup here could see a later acceptance during replay and skip the
+ * answer's not-yet-replayed prompt. Never replace this with ctx.getValue.
+ */
+function* readQuestionAnswer(runtime: DurableSessionRuntime, requestId: string): Generator<any, QuestionAnswerReceipt | null, any> {
+    const raw: string | null = yield runtime.ctx.getValueFromInstance(
+        `session-${runtime.input.sessionId}`, questionAnswerReceiptKey(requestId),
+    );
+    return parseQuestionAnswerReceipt(raw);
+}
+
+function storeQuestionAnswer(runtime: DurableSessionRuntime, request: QuestionAnswerRequest, status: "pending" | "accepted" | "stale" | "refused"): void {
+    runtime.ctx.setValue(questionAnswerReceiptKey(request.requestId),
+        JSON.stringify(questionAnswerReceipt(request, status, runtime.input.sessionId)));
+}
+
+/** Put the accepted prompt ahead of its competitors, without losing any queued item on refusal. */
+function prependAnswerPrompt(runtime: DurableSessionRuntime, prompt: any): boolean {
+    if (isFifoItemTooLarge(prompt)) return false;
+    const before = Array.from({ length: FIFO_BUCKET_COUNT }, (_, index) => readFifoBucket(runtime.ctx, index));
+    const packed: any[][] = [];
+    let bucket: any[] = [];
+    for (const item of [prompt, ...before.flat()]) {
+        bucket.push(item);
+        if (bucket.length > 1 && !fitsInBucket(bucket)) {
+            bucket.pop();
+            packed.push(bucket);
+            bucket = [item];
+        }
+    }
+    if (bucket.length) packed.push(bucket);
+    if (packed.length > FIFO_BUCKET_COUNT) return false;
+    for (let index = 0; index < FIFO_BUCKET_COUNT; index++) {
+        const next = packed[index] ?? [];
+        if (JSON.stringify(next) !== JSON.stringify(before[index])) writeFifoBucket(runtime.ctx, index, next);
+    }
+    return true;
+}
+
+/** Conditional commands join legacy answers in the same FIFO, never pre-empt them during drain. */
+export function* enqueueQuestionAnswer(runtime: DurableSessionRuntime, command: CommandMessage): Generator<any, void, any> {
+    let request: QuestionAnswerRequest;
+    try {
+        request = validateQuestionAnswerRequest(command.args?.request);
+        if (command.id !== request.requestId) return;
+    } catch {
+        runtime.ctx.traceInfo("[question-answer] refused malformed conditional command");
+        return;
+    }
+    const original = yield* readQuestionAnswer(runtime, request.requestId);
+    // Both an exact retry and a conflicting copy leave the canonical result
+    // untouched. Receipt readers bind it to their payload by requestHash.
+    if (original) return;
+    // The host preflight is advisory: concurrent enqueues can all pass it.
+    // This serial guard never evicts an original result to make space.
+    const keyCount = runtime.ctx.getKvLength();
+    if (!Number.isInteger(keyCount) || keyCount < 0 || keyCount >= QUESTION_ANSWER_KV_SOFT_LIMIT) {
+        runtime.ctx.traceInfo("[question-answer] receipt capacity unavailable; conditional request not admitted");
+        return;
+    }
+    const item = {
+        kind: "answer", conditionalRequest: request,
+        ...(command.sender ? { sender: command.sender } : {}),
+    };
+    const refused = appendToFifo(runtime, [item]);
+    storeQuestionAnswer(runtime, request, refused.length ? "refused" : "pending");
+}
+
 function* processAnswer(runtime: DurableSessionRuntime, answerItem: any): Generator<any, void, any> {
+    if (answerItem.conditionalRequest !== undefined) {
+        const request = validateQuestionAnswerRequest(answerItem.conditionalRequest);
+        const original = yield* readQuestionAnswer(runtime, request.requestId);
+        if (!original || original.status !== "pending" || original.requestHash !== questionAnswerRequestHash(request)) return;
+        const question = runtime.state.pendingInputQuestion;
+        if (!question?.occurrenceId || question.occurrenceId !== request.expectedQuestion.occurrenceId
+            || question.question !== request.expectedQuestion.question) {
+            storeQuestionAnswer(runtime, request, "stale");
+            return;
+        }
+        const sender = noteMessageSender(runtime, answerItem.sender);
+        const answeredBy = runtime.state.multiWriter && sender?.display ? ` (answered by ${sender.display})` : "";
+        const prompt = `The user was asked: "${question.question}"\nThe user responded${answeredBy}: "${request.answer}"`;
+        if (!prependAnswerPrompt(runtime, {
+            kind: "prompt", prompt, bootstrap: false,
+            ...(sender ? { sender } : {}),
+        })) {
+            storeQuestionAnswer(runtime, request, "refused");
+            return;
+        }
+        // The actual prompt, claim and receipt commit before another yield.
+        // The prompt remains in KV even if CAN happens before its dispatch.
+        runtime.state.pendingInputQuestion = null;
+        storeQuestionAnswer(runtime, request, "accepted");
+        maybeQueueSharedPreamble(runtime);
+        publishStatus(runtime, "idle");
+        return;
+    }
     const pending = runtime.state.pendingInputQuestion?.question;
     // New callers bind to the question they observed at enqueue. Queue-drain
     // snapshots cover older callers; old persisted FIFO entries remain valid.

@@ -1156,7 +1156,7 @@ export interface PilotSwarmSessionInfo {
     title?: string;
     createdAt: Date;
     updatedAt: Date;
-    pendingQuestion?: { question: string; choices?: string[]; allowFreeform?: boolean; iteration?: number };
+    pendingQuestion?: { question: string; choices?: string[]; allowFreeform?: boolean; iteration?: number; readonly occurrenceId?: string };
     waitingUntil?: Date;
     waitReason?: string;
     cronActive?: boolean;
@@ -1390,7 +1390,7 @@ export interface OrchestrationInput {
     /** Agent IDs being waited on (for wait_for_agents across CAN). v1.0.32+. */
     waitingForAgentIds?: string[];
     /** Pending input_required question context (for answer routing after CAN). v1.0.32+. */
-    pendingInputQuestion?: { question: string; choices?: string[]; allowFreeform?: boolean; iteration?: number };
+    pendingInputQuestion?: { question: string; choices?: string[]; allowFreeform?: boolean; iteration?: number; readonly occurrenceId?: string };
     /**
      * Prompts the budget gate refused before their turn could run, carried
      * across continue-as-new so a queued message survives a paused session's
@@ -2379,6 +2379,7 @@ export interface SessionResponsePayload {
     type: "completed" | "wait" | "input_required" | "error";
     content?: string;
     question?: string;
+    occurrenceId?: string;
     choices?: string[];
     allowFreeform?: boolean;
     waitReason?: string;
@@ -2398,6 +2399,8 @@ export interface SessionStatusSignal {
     status: PilotSwarmSessionStatus;
     iteration: number;
     pendingQuestion?: string;
+    questionOccurrenceId?: string;
+    questionAnswerProtocol?: "question-answer-v1";
     questionIteration?: number;
     choices?: string[];
     allowFreeform?: boolean;

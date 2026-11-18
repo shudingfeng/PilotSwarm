@@ -36,7 +36,7 @@ import {
 import { durableSessionOrchestration_1_0_82 } from "../../dist/orchestration_1_0_82/index.js";
 import { durableSessionOrchestration_1_0_83 } from "../../dist/orchestration_1_0_83/index.js";
 import { durableSessionOrchestration_1_0_85 } from "../../dist/orchestration_1_0_85/index.js";
-import { durableSessionOrchestration_1_0_86 } from "../../dist/orchestration/index.js";
+import { durableSessionOrchestration_1_0_86 } from "../../dist/orchestration_1_0_86/index.js";
 import { WORKSPACE_CHECK_CAP_MS, WORKSPACE_RELEASE_CAP_MS, workspaceRetryDelayMs, WORKSPACE_BUSY_RETRY_SCHEDULE_SECONDS } from "../../dist/orchestration/state.js";
 import { PilotSwarmClient, PilotSwarmWorker } from "../../dist/index.js";
 

@@ -15,8 +15,10 @@ import { createRuntime } from "../../src/orchestration/runtime.ts";
 import { processPrompt } from "../../src/orchestration/turn.ts";
 import { processPrompt as legacyProcessPrompt } from "../../src/orchestration_1_0_80/turn.ts";
 import { appendToFifo, decide, drain } from "../../src/orchestration/queue.ts";
-import { buildContinueInput } from "../../src/orchestration/lifecycle.ts";
+import { buildContinueInput, handleCommand, versionedContinueAsNew } from "../../src/orchestration/lifecycle.ts";
 import { completeSession, cancelSession, failPendingShutdown } from "../../src/orchestration/agents.ts";
+import { QUESTION_ANSWER_PROTOCOL, QUESTION_ANSWER_KV_SOFT_LIMIT, questionAnswerReceiptKey, questionAnswerRequestHash } from "../../src/question-answer.ts";
+import { MAX_BUCKET_BYTES } from "../../src/orchestration/state.ts";
 
 vi.mock("../../src/session-proxy.js", () => ({
     createSessionProxy: (ctx, sessionId, affinity, config, contract) => ctx.proxy("session", contract),
@@ -25,21 +27,25 @@ vi.mock("../../src/session-proxy.js", () => ({
 
 const steer = (seq, text = `guidance ${seq}`) => ({ seq, text });
 
-function harness(overrides = {}) {
+function harness(overrides = {}, replay = {}) {
     const calls = [];
     const routes = [];
     const turns = [];
     const results = [];
     const messages = [];
-    const kv = new Map();
+    const kv = new Map(replay.initialValues ?? []);
+    const receiptReads = [];
+    const statuses = [];
     let now = 1_750_000_000_000;
     let guid = 0;
     const ctx = {
         traceInfo() {},
-        setCustomStatus() {},
-        getValue: key => kv.get(key) ?? null,
+        setCustomStatus: status => statuses.push(JSON.parse(status)),
+        getValue: key => replay.liveReceipts?.get(key) ?? kv.get(key) ?? null,
         setValue: (key, value) => kv.set(key, value),
         clearValue: key => kv.delete(key),
+        getKvLength: () => kv.size,
+        getValueFromInstance: (instanceId, key) => ({ effect: "receipt-read", instanceId, key }),
         utcNow: () => ({ effect: "now" }),
         newGuid: () => ({ effect: "guid" }),
         scheduleTimer: ms => ({ effect: "timer", ms }),
@@ -59,6 +65,11 @@ function harness(overrides = {}) {
         switch (effect.effect) {
             case "now": return now;
             case "guid": return `recorded-guid-${++guid}`;
+            case "receipt-read": {
+                const raw = replay.recordedReads ? replay.recordedReads[receiptReads.length] : kv.get(effect.key) ?? null;
+                receiptReads.push(raw);
+                return raw;
+            }
             case "timer": now += effect.ms; return undefined;
             case "dequeue":
                 if (!messages.length) throw new Error("unexpected blocking dequeue");
@@ -121,8 +132,286 @@ function harness(overrides = {}) {
         results.push(result);
         return drive(decide(runtime));
     };
-    return { runtime, calls, routes, turns, results, messages, drive, run, retry };
+    return { runtime, calls, routes, turns, results, messages, drive, run, retry, kv, receiptReads, statuses };
 }
+
+const answerRequest = (question, requestId = "answer-1", answer = "choose blue") => ({
+    requestId, expectedQuestion: { question: question.question, occurrenceId: question.occurrenceId }, answer,
+});
+const answerCommand = request => ({ type: "cmd", cmd: "answer_question", id: request.requestId, args: { request } });
+const receipt = (h, requestId = "answer-1") => JSON.parse(h.kv.get(questionAnswerReceiptKey(requestId)));
+const fifo = h => [...h.kv].filter(([key]) => key.startsWith("fifo.")).flatMap(([, value]) => JSON.parse(value));
+
+describe("conditional question answers on the production command/FIFO path", () => {
+    it("mints one occurrence per question, exposes the capability, and carries the token and iteration across CAN", () => {
+        const h = harness();
+        h.run({ type: "input_required", question: "which color?", choices: ["blue", "red"] });
+        const first = { ...h.runtime.state.pendingInputQuestion };
+        expect(first.occurrenceId).toBeTruthy();
+        expect(h.statuses.at(-1)).toMatchObject({
+            questionAnswerProtocol: QUESTION_ANSWER_PROTOCOL, questionOccurrenceId: first.occurrenceId,
+            questionIteration: first.iteration,
+        });
+        const guids = h.calls.filter(c => c.effect === "guid").length;
+        const carried = buildContinueInput(h.runtime);
+        const resumed = harness(carried, { initialValues: h.kv });
+        expect(resumed.runtime.state.pendingInputQuestion).toEqual(first);
+        expect(resumed.calls.filter(c => c.effect === "guid")).toHaveLength(0);
+        h.run({ type: "input_required", question: "which color?", choices: ["blue", "red"] });
+        expect(h.runtime.state.pendingInputQuestion.occurrenceId).not.toBe(first.occurrenceId);
+        expect(h.calls.filter(c => c.effect === "guid").length).toBeGreaterThan(guids);
+    });
+
+    it("accepts only the first competitor even when its answer opens an identical later question", () => {
+        const h = harness();
+        h.run({ type: "input_required", question: "continue?" });
+        const first = answerRequest(h.runtime.state.pendingInputQuestion);
+        const competitor = { ...first, requestId: "answer-2" };
+        h.messages.push(answerCommand(first), answerCommand(competitor));
+        h.drive(drain(h.runtime));
+        expect(receipt(h).status).toBe("pending");
+        expect(fifo(h)).toHaveLength(2);
+        h.results.push({ type: "input_required", question: "continue?" });
+        h.drive(decide(h.runtime));
+        expect(fifo(h)[0]).toMatchObject({ kind: "prompt", prompt: expect.stringContaining(first.answer) });
+        h.drive(decide(h.runtime));
+        const nextQuestion = { ...h.runtime.state.pendingInputQuestion };
+        h.drive(decide(h.runtime));
+        expect(receipt(h)).toMatchObject({
+            protocol: QUESTION_ANSWER_PROTOCOL, requestId: first.requestId, occurrenceId: first.expectedQuestion.occurrenceId,
+            requestHash: questionAnswerRequestHash(first), status: "accepted", receiptId: expect.any(String),
+        });
+        expect(receipt(h).receiptId.length).toBeGreaterThan(0);
+        expect(receipt(h, "answer-2").status).toBe("stale");
+        expect(h.turns).toHaveLength(2);
+        expect(h.runtime.state.pendingInputQuestion).toEqual(nextQuestion);
+        expect(nextQuestion.occurrenceId).not.toBe(first.expectedQuestion.occurrenceId);
+        expect(JSON.stringify(receipt(h))).not.toContain(first.answer);
+    });
+
+    it("lets a legacy writer ahead in the FIFO win; a stale conditional is never ordinary input", () => {
+        const h = harness();
+        h.run({ type: "input_required", question: "continue?" });
+        const question = h.runtime.state.pendingInputQuestion;
+        const request = answerRequest(question);
+        h.messages.push(
+            { answer: "external answer", expectedQuestion: { question: question.question, iteration: question.iteration } },
+            answerCommand(request),
+        );
+        h.drive(drain(h.runtime));
+        h.results.push({ type: "input_required", question: "continue?" });
+        h.drive(decide(h.runtime));
+        const later = { ...h.runtime.state.pendingInputQuestion };
+        h.drive(decide(h.runtime));
+        expect(receipt(h).status).toBe("stale");
+        expect(h.turns).toHaveLength(2);
+        expect(h.turns[1][0]).toContain("external answer");
+        expect(h.runtime.state.pendingInputQuestion).toEqual(later);
+    });
+
+    it("lets a conditional writer ahead win and preserves the legacy stale-answer fallback", () => {
+        const h = harness();
+        h.run({ type: "input_required", question: "continue?" });
+        const question = h.runtime.state.pendingInputQuestion;
+        const request = answerRequest(question);
+        h.messages.push(answerCommand(request),
+            { answer: "legacy late text", expectedQuestion: { question: question.question, iteration: question.iteration } });
+        h.drive(drain(h.runtime));
+        h.results.push({ type: "input_required", question: "continue?" }, { type: "completed", content: "ordinary input" });
+        h.drive(decide(h.runtime));
+        h.drive(decide(h.runtime));
+        const later = { ...h.runtime.state.pendingInputQuestion };
+        h.drive(decide(h.runtime));
+        expect(receipt(h).status).toBe("accepted");
+        expect(h.turns[2][0]).toBe("legacy late text");
+        expect(h.runtime.state.pendingInputQuestion).toEqual(later);
+    });
+
+    it("deduplicates queued and settled exact retries, and never overwrites the original on same-ID conflicts", () => {
+        const h = harness();
+        h.run({ type: "input_required", question: "continue?" });
+        const request = answerRequest(h.runtime.state.pendingInputQuestion);
+        const changed = { ...request, answer: "different payload" };
+        h.messages.push(answerCommand(request), answerCommand(request), answerCommand(changed));
+        h.drive(drain(h.runtime));
+        expect(fifo(h)).toHaveLength(1);
+        expect(receipt(h).requestHash).toBe(questionAnswerRequestHash(request));
+        h.results.push({ type: "completed", content: "done" });
+        h.drive(decide(h.runtime));
+        h.drive(decide(h.runtime));
+        const accepted = receipt(h);
+        h.drive(handleCommand(h.runtime, answerCommand(request)));
+        h.drive(handleCommand(h.runtime, answerCommand(changed)));
+        expect(receipt(h)).toEqual(accepted);
+        expect(fifo(h)).toHaveLength(0);
+        expect(h.turns).toHaveLength(2);
+    });
+
+    for (const mismatch of ["token", "text", "legacy-tokenless"]) {
+        it(`refuses a ${mismatch} mismatch without consuming the question or producing a prompt`, () => {
+            const h = harness();
+            h.run({ type: "input_required", question: "continue?" });
+            const request = answerRequest(h.runtime.state.pendingInputQuestion);
+            if (mismatch === "token") request.expectedQuestion.occurrenceId = "earlier-occurrence";
+            if (mismatch === "text") request.expectedQuestion.question = "different question";
+            if (mismatch === "legacy-tokenless") delete h.runtime.state.pendingInputQuestion.occurrenceId;
+            const question = { ...h.runtime.state.pendingInputQuestion };
+            h.drive(handleCommand(h.runtime, answerCommand(request)));
+            h.drive(decide(h.runtime));
+            expect(receipt(h).status).toBe("stale");
+            expect(h.runtime.state.pendingInputQuestion).toEqual(question);
+            expect(h.turns).toHaveLength(1);
+            expect(fifo(h)).toHaveLength(0);
+        });
+    }
+
+    it("full FIFO refusal is stable and leaves the pending question open", () => {
+        const h = harness();
+        h.run({ type: "input_required", question: "continue?" });
+        const question = { ...h.runtime.state.pendingInputQuestion };
+        const request = answerRequest(question);
+        expect(appendToFifo(h.runtime, Array.from({ length: 20 }, () => ({
+            kind: "prompt", prompt: "x".repeat(15_000), bootstrap: false,
+        })))).toEqual([]);
+        h.drive(handleCommand(h.runtime, answerCommand(request)));
+        const refused = receipt(h);
+        expect(refused.status).toBe("refused");
+        expect(h.runtime.state.pendingInputQuestion).toEqual(question);
+        expect(fifo(h)).toHaveLength(20);
+        h.drive(handleCommand(h.runtime, answerCommand(request)));
+        expect(receipt(h)).toEqual(refused);
+    });
+
+    it("refuses formatted-prompt expansion atomically without consuming the question or losing other FIFO work", () => {
+        const h = harness({ multiWriter: true });
+        h.run({ type: "input_required", question: "continue?" });
+        const question = { ...h.runtime.state.pendingInputQuestion };
+        const request = answerRequest(question, "a", "small answer");
+        const sender = { kind: "user", provider: "test", subject: "writer", display: "w".repeat(200), relation: "collaborator" };
+        h.drive(handleCommand(h.runtime, { ...answerCommand(request), sender }));
+        const queued = fifo(h)[0];
+        const first = { kind: "prompt", prompt: "", bootstrap: false };
+        first.prompt = "x".repeat(MAX_BUCKET_BYTES - JSON.stringify([queued, first]).length);
+        const blockers = [first, ...Array.from({ length: 19 }, () => ({
+            kind: "prompt", prompt: "x".repeat(15_000), bootstrap: false,
+        }))];
+        expect(appendToFifo(h.runtime, blockers)).toEqual([]);
+        h.drive(decide(h.runtime));
+        expect(receipt(h, request.requestId).status).toBe("refused");
+        expect(h.runtime.state.pendingInputQuestion).toEqual(question);
+        expect(fifo(h)).toEqual(blockers);
+        expect(h.turns).toHaveLength(1);
+    });
+
+    it("rechecks receipt capacity serially without evicting results or consuming an unadmitted request", () => {
+        const h = harness();
+        h.run({ type: "input_required", question: "continue?" });
+        const request = answerRequest(h.runtime.state.pendingInputQuestion);
+        h.drive(handleCommand(h.runtime, answerCommand(request)));
+        h.results.push({ type: "input_required", question: "continue?" });
+        h.drive(decide(h.runtime));
+        h.drive(decide(h.runtime));
+        const accepted = receipt(h);
+        for (let n = 0; h.kv.size < QUESTION_ANSWER_KV_SOFT_LIMIT; n++) h.kv.set(`fixture.${n}`, "occupied");
+        const later = { ...h.runtime.state.pendingInputQuestion };
+        const next = answerRequest(later, "over-capacity");
+        h.drive(handleCommand(h.runtime, answerCommand(next)));
+        h.drive(handleCommand(h.runtime, answerCommand(request)));
+        expect(h.kv.has(questionAnswerReceiptKey(next.requestId))).toBe(false);
+        expect(receipt(h)).toEqual(accepted);
+        expect(fifo(h)).toHaveLength(0);
+        expect(h.runtime.state.pendingInputQuestion).toEqual(later);
+        expect(h.turns).toHaveLength(2);
+    });
+
+    it("continues a queued request across CAN and retains its receipt across another CAN", () => {
+        const h = harness();
+        h.run({ type: "input_required", question: "continue?" });
+        const request = answerRequest(h.runtime.state.pendingInputQuestion);
+        h.drive(handleCommand(h.runtime, answerCommand(request)));
+        h.drive(versionedContinueAsNew(h.runtime, buildContinueInput(h.runtime)));
+        const continued = h.calls.find(c => c.effect === "can");
+        const resumed = harness(continued.input, { initialValues: h.kv });
+        resumed.drive(decide(resumed.runtime));
+        const accepted = receipt(resumed);
+        expect(accepted.status).toBe("accepted");
+        expect(resumed.turns).toHaveLength(0);
+        expect(fifo(resumed)).toHaveLength(1);
+        expect(fifo(resumed)[0]).toMatchObject({ kind: "prompt", prompt: expect.stringContaining(request.answer) });
+        const again = harness(buildContinueInput(resumed.runtime), { initialValues: resumed.kv });
+        again.drive(handleCommand(again.runtime, answerCommand(request)));
+        expect(receipt(again)).toEqual(accepted);
+        expect(again.turns).toHaveLength(0);
+        again.results.push({ type: "completed", content: "answered" });
+        again.drive(decide(again.runtime));
+        expect(again.turns).toHaveLength(1);
+        expect(fifo(again)).toHaveLength(0);
+    });
+
+    it("carries an accepted answer's failed turn across CAN rather than losing its future prompt", () => {
+        const h = harness();
+        h.run({ type: "input_required", question: "continue?" });
+        const request = answerRequest(h.runtime.state.pendingInputQuestion);
+        h.drive(handleCommand(h.runtime, answerCommand(request)));
+        h.results.push({ type: "error", message: "retryable turn failure" });
+        h.drive(decide(h.runtime));
+        h.drive(decide(h.runtime));
+        const accepted = receipt(h);
+        const carried = h.calls.find(c => c.effect === "can").input;
+        expect(accepted.status).toBe("accepted");
+        expect(carried.ownedRetry.prompt).toContain(request.answer);
+        const resumed = harness(carried, { initialValues: h.kv });
+        resumed.drive(handleCommand(resumed.runtime, answerCommand(request)));
+        resumed.results.push({ type: "completed", content: "retried" });
+        resumed.drive(decide(resumed.runtime));
+        expect(receipt(resumed)).toEqual(accepted);
+        expect(resumed.turns).toHaveLength(1);
+        expect(resumed.turns[0][0]).toContain(request.answer);
+        expect(fifo(resumed)).toHaveLength(0);
+    });
+
+    it("serializes conditional commands collected by the pre-dispatch sweep behind earlier prompts", () => {
+        const h = harness();
+        h.run({ type: "input_required", question: "continue?" });
+        const request = answerRequest(h.runtime.state.pendingInputQuestion);
+        appendToFifo(h.runtime, [{ kind: "prompt", prompt: "earlier input", clientMessageIds: ["earlier-1"] }]);
+        h.messages.push(answerCommand(request));
+        h.results.push({ type: "input_required", question: "continue?" });
+        h.drive(decide(h.runtime));
+        const later = { ...h.runtime.state.pendingInputQuestion };
+        h.drive(decide(h.runtime));
+        expect(receipt(h).status).toBe("stale");
+        expect(h.turns).toHaveLength(2);
+        expect(h.runtime.state.pendingInputQuestion).toEqual(later);
+    });
+
+    it("replays the exact yielded schedule despite a durable receipt already reflecting later acceptance", () => {
+        const execute = h => {
+            h.run({ type: "input_required", question: "continue?" });
+            const request = answerRequest(h.runtime.state.pendingInputQuestion);
+            h.messages.push(answerCommand(request));
+            h.drive(drain(h.runtime));
+            h.results.push({ type: "completed", content: "done" });
+            h.drive(decide(h.runtime));
+            h.drive(decide(h.runtime));
+            return request;
+        };
+        const first = harness();
+        const request = execute(first);
+        const accepted = receipt(first);
+        // The recorded self-read answers, not the current durable cache, decide
+        // the branch while replay reconstructs the original prompt's schedule.
+        const replay = harness({}, {
+            liveReceipts: new Map([[questionAnswerReceiptKey(request.requestId), JSON.stringify(accepted)]]),
+            recordedReads: first.receiptReads,
+        });
+        execute(replay);
+        expect(replay.calls).toEqual(first.calls);
+        expect(replay.turns).toEqual(first.turns);
+        expect(replay.receiptReads).toEqual(first.receiptReads);
+        expect(receipt(replay)).toEqual(accepted);
+    });
+});
 
 // A 1.0.83 owed retry, whole (state.ts restoreOwnedRetry checks every field).
 const owedRetry = (fields) => ({

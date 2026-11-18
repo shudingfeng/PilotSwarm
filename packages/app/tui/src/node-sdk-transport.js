@@ -1669,6 +1669,14 @@ export class NodeSdkTransport {
         await this.mgmt.sendAnswer(sessionId, answer, options);
     }
 
+    async answerQuestion(sessionId, request, options = {}) {
+        return this.mgmt.answerQuestion(sessionId, request, options);
+    }
+
+    async getQuestionAnswer(sessionId, requestId) {
+        return this.mgmt.getQuestionAnswer(sessionId, requestId);
+    }
+
     async sendSessionEvent(sessionId, eventName, data, options = {}) {
         const sessionHandle = await this.getSessionHandle(sessionId);
         // F-FU9-2: the event's own sender is dropped; only the server-stamped one (options.sender) is kept.

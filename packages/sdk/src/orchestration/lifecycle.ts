@@ -52,6 +52,8 @@ import {
 import { assertIntakeContinueAsNewTarget, carryIntakeState, type IntakeCarryingInput } from "./intake-state.js";
 import { IntakeInvariantError } from "./intake-machine.js";
 import { LIVE_SESSION_PROXY_CONTRACT } from "./proxy-contract.js";
+import { QUESTION_ANSWER_PROTOCOL } from "../question-answer.js";
+import { enqueueQuestionAnswer } from "./queue.js";
 
 // ─── Custom status / KV helpers ─────────────────────────────
 
@@ -63,6 +65,7 @@ export function publishStatus(
     const { state } = runtime;
     const signal: SessionStatusSignal = {
         status,
+        questionAnswerProtocol: QUESTION_ANSWER_PROTOCOL,
         iteration: state.iteration,
         ...(state.lastResponseVersion > 0 ? { responseVersion: state.lastResponseVersion } : {}),
         ...(state.lastCommandVersion > 0 ? { commandVersion: state.lastCommandVersion } : {}),
@@ -92,6 +95,7 @@ export function publishStatus(
         ...(status === "input_required" && state.pendingInputQuestion ? {
             pendingQuestion: state.pendingInputQuestion.question,
             questionIteration: state.pendingInputQuestion.iteration ?? state.iteration,
+            ...(state.pendingInputQuestion.occurrenceId ? { questionOccurrenceId: state.pendingInputQuestion.occurrenceId } : {}),
             choices: state.pendingInputQuestion.choices,
             allowFreeform: state.pendingInputQuestion.allowFreeform,
         } : {}),
@@ -834,6 +838,10 @@ export function* handleCommand(
     runtime: DurableSessionRuntime,
     cmdMsg: CommandMessage,
 ): Generator<any, void, any> {
+    if (cmdMsg.cmd === "answer_question") {
+        yield* enqueueQuestionAnswer(runtime, cmdMsg);
+        return;
+    }
     runtime.ctx.traceInfo(`[orch-cmd] ${cmdMsg.cmd} id=${cmdMsg.id}`);
     yield runtime.manager.recordSessionEvent(runtime.input.sessionId, [{
         eventType: "session.command_received",

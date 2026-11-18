@@ -157,6 +157,7 @@ const EXTERNAL_PERSONAL_SECRETS = "keeps personal GitHub tokens only in its secr
 // message previews, and the definition's revisions), so every one of its
 // selectors is gated whatever the switch says (adversarial review SF-1).
 const ENFORCED_NEW_METHODS = new Set(["updateWorkflow", "readWorkflow", "listSessionWorkflowDefinitions", "readSessionWorkflowDefinition",
+    "answerQuestion", "getQuestionAnswer",
     "saveSessionWorkflowDefinition", "startSessionWorkflowDefinition", "deleteSessionWorkflowDefinition",
     // Stage 2.3: a person's Make a copy and newer package version.
     "copySessionWorkflowDefinition", "updateSessionWorkflowPackage"]);
@@ -1834,6 +1835,12 @@ export class PortalRuntime {
                     ...(safeParams.options?.expectedQuestion !== undefined ? { expectedQuestion: safeParams.options.expectedQuestion } : {}),
                     sender: this._buildSender(authContext, gate.snapshot, { isAdmin }),
                 });
+            case "answerQuestion":
+                return this.transport.answerQuestion(safeParams.sessionId, safeParams.request, {
+                    sender: this._buildSender(authContext, gate.snapshot, { isAdmin }),
+                });
+            case "getQuestionAnswer":
+                return this.transport.getQuestionAnswer(safeParams.sessionId, safeParams.requestId);
             case "sendSessionEvent":
                 // F-FU9-2: server-stamped as for sendMessage; a sender inside the event's data is dropped (client.ts sendEvent).
                 return this.transport.sendSessionEvent(safeParams.sessionId, safeParams.eventName, safeParams.data, {

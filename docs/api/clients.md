@@ -27,6 +27,12 @@ your app's shape:
 - **The operations table is the contract.** All of these clients are thin over
   `packages/sdk/api/src/protocol.js`; the reference doc is generated from
   it, and the portal server's routes are too.
+- **Answering a particular question requires its receipt.** Use management
+  `answerQuestion(sessionId, request)` and `getQuestionAnswer(sessionId, requestId)`
+  only when `getSession` advertises `question-answer-v1` and the question has an
+  `occurrenceId`. Persist the exact request before sending, verify `requestHash`
+  on the canonical receipt, and never treat `pending` as acceptance or fall back
+  to legacy `sendAnswer`. See [the conditional contract](reference.md#conditional-question-answers).
 
 ## Workers are the exception
 

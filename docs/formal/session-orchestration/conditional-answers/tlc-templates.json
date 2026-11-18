@@ -1,0 +1,14 @@
+{
+  "QuestionAnswers": {
+    "indent": 4,
+    "constants": [
+      "MaxEnvelopes",
+      "FifoCap",
+      "ReceiptCap",
+      "OldQuestion",
+      "Fault"
+    ],
+    "lists": "block",
+    "deadlockFirst": false
+  }
+}

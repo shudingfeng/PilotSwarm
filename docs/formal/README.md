@@ -40,6 +40,14 @@ There are three core areas:
 | Session resurrection (FB-046, CMS 0094) | `workflow/resurrection/` | `SessionResurrection` | migration 0094 (`cms_create_session` overloads, `cms_create_workflow_session`) | `dbfb61a7` | 2026-11-13: rs3 28 of 28 as expected; FB-052 adoption kept as a finding |
 | Session hydration and dehydration | `session-orchestration/` | the existing modules (1.0.82); `RehydrationNotice`, `SnapshotWarmDrop` | `session-proxy.ts`, `session-manager.ts`, `orchestration/lifecycle.ts`, `orchestration/queue.ts` | 1.0.82 as above; `e76a6133` for the two new modules | 2026-11-08, so2: 16 of 16 as expected, one code finding (a queued prompt cancelled at dispatch loses the rehydration notice); the 1.0.83 fix is bound to `bb162ed8` and passes (so5b, `CarriedGiveBack`, which also covers the carried child digest) and the worker shutdown's release sweep (`WorkerShutdown`). The hydration mechanism is unchanged since 1.0.81. In 1.0.82, already on main, a compact timer item keeps `shouldRehydrate` and an unqueued prompt gives back the rehydration notice. This line adds two edits, both modelled: in 1.0.83 a given-up hydration records an intake attempt, and in every session the warm session is dropped before the snapshot commit after an unsettled aborted run. |
 
+### Conditional question answers (1.0.87)
+
+The [conditional-answer packet](session-orchestration/conditional-answers/README.md)
+models occurrence identity, serial conditional/legacy competitors, retry-stable
+receipts, FIFO refusal, replayed prompt ownership, receipt capacity and old
+tokenless questions across continue-as-new. Its bounded cases and negative
+controls are separate from the historical session-orchestration corpus.
+
 ### Workflow controller hand-off at continue-as-new (FB-064, 2026-11-13)
 
 [`workflow/handoff/`](workflow/handoff/README.md) models the move of a running

@@ -359,6 +359,14 @@ export class HttpApiTransport {
         return this.api.call("sendAnswer", { sessionId, answer, options });
     }
 
+    async answerQuestion(sessionId, request) {
+        return this.api.call("answerQuestion", { sessionId, request });
+    }
+
+    async getQuestionAnswer(sessionId, requestId) {
+        return this.api.call("getQuestionAnswer", { sessionId, requestId });
+    }
+
     async cancelPendingMessage(sessionId, clientMessageIds) {
         return this.api.call("cancelPendingMessage", { sessionId, clientMessageIds });
     }

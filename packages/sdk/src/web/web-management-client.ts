@@ -9,6 +9,11 @@ import type { FeatureViewer, FeatureMutation, FeatureView, FeatureMutationResult
 import type { MotdCreateInput, MotdViewer } from "../motd-store.js";
 import type { StopTurnOptions, StopTurnResult, SteerTurnOptions, SteerTurnResult, WorkflowReadOptions } from "../types.js";
 import type { WorkflowInputCapabilities } from "../workflow/input-policy.js";
+import {
+    parseQuestionAnswerReceipt, questionAnswerResult, validateQuestionAnswerId, validateQuestionAnswerRequest,
+    type QuestionAnswerRequest, type QuestionAnswerReceipt,
+} from "../question-answer.js";
+import type { MessageSender } from "../message-sender.js";
 
 const WAIT_SLICE_MS = 25_000;
 
@@ -311,6 +316,22 @@ export class WebPilotSwarmManagementClient {
 
     async sendAnswer(sessionId: string, answer: string, options?: { expectedQuestion?: { question: string; iteration?: number } | null }): Promise<void> {
         await this._api.call("sendAnswer", { sessionId, answer, options });
+    }
+
+    async answerQuestion(sessionId: string, request: QuestionAnswerRequest, _options?: { sender?: MessageSender }): Promise<QuestionAnswerReceipt> {
+        const checked = validateQuestionAnswerRequest(request);
+        const result = await this._api.call("answerQuestion", { sessionId, request: checked });
+        const receipt = parseQuestionAnswerReceipt(JSON.stringify(result));
+        if (!receipt) throw new Error("Missing question-answer receipt");
+        return questionAnswerResult(checked, receipt);
+    }
+
+    async getQuestionAnswer(sessionId: string, requestId: string): Promise<QuestionAnswerReceipt | null> {
+        validateQuestionAnswerId(requestId);
+        const result = await this._api.call("getQuestionAnswer", { sessionId, requestId });
+        const receipt = parseQuestionAnswerReceipt(result === null ? null : JSON.stringify(result));
+        if (receipt && receipt.requestId !== requestId) throw new Error("Durable question-answer request identity mismatch");
+        return receipt;
     }
 
     async cancelPendingMessage(sessionId: string, clientMessageIds: string[]): Promise<void> {

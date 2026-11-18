@@ -1,0 +1,10 @@
+qa.serial-cap1	qa.serial-cap1.cfg	QuestionAnswers
+qa.serial-cap2	qa.serial-cap2.cfg	QuestionAnswers
+qa.legacy-handoff	qa.legacy-handoff.cfg	QuestionAnswers
+qa.fault-token	qa.fault-token.cfg	QuestionAnswers
+qa.fault-overwrite	qa.fault-overwrite.cfg	QuestionAnswers
+qa.fault-replay	qa.fault-replay.cfg	QuestionAnswers
+qa.fault-fifo	qa.fault-fifo.cfg	QuestionAnswers
+qa.fault-can	qa.fault-can.cfg	QuestionAnswers
+qa.receipt-cap	qa.receipt-cap.cfg	QuestionAnswers
+qa.fault-cap	qa.fault-cap.cfg	QuestionAnswers

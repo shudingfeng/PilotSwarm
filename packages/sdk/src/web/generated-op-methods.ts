@@ -8,6 +8,7 @@
 /** Every operation name in the protocol table, sorted. */
 export const GENERATED_OP_NAMES: readonly string[] = [
     "adoptLegacySystemGitHubCopilotKey",
+    "answerQuestion",
     "assignSessionsToGroup",
     "cancelPendingMessage",
     "cancelSession",
@@ -78,6 +79,7 @@ export const GENERATED_OP_NAMES: readonly string[] = [
     "getProviderUsageAgents",
     "getProviderUsageGrid",
     "getProviderUsageSummary",
+    "getQuestionAnswer",
     "getSession",
     "getSessionAccess",
     "getSessionCreationPolicy",
@@ -222,6 +224,15 @@ export interface ManagementOps {
      */
     adoptLegacySystemGitHubCopilotKey(params: {
         name?: any;
+    }): Promise<any>;
+
+    /**
+     * Conditionally answer one immutable question occurrence. request { requestId, expectedQuestion: { question, occurrenceId }, answer }. Returns a question-answer-v1 receipt promptly; pending is not acceptance. Requires the session's worker-advertised questionAnswerProtocol. Exact retries are idempotent; same-ID payload changes conflict. Never falls back to an ordinary prompt.
+     * @remarks `POST /sessions/:sessionId/question-answers` — access: `session:write`
+     */
+    answerQuestion(params: {
+        sessionId: string;
+        request?: any;
     }): Promise<any>;
 
     /**
@@ -853,6 +864,15 @@ export interface ManagementOps {
     getProviderUsageSummary(params: {
         days?: number;
         providers?: string;
+    }): Promise<any>;
+
+    /**
+     * Read the canonical original conditional-answer receipt, or null while unknown. Verify protocol, requestId, occurrenceId and requestHash; accepted also requires receiptId. requestHash is lowercase SHA-256 of UTF-8 JSON.stringify([occurrenceId, question, answer]). No answer text is returned.
+     * @remarks `GET /sessions/:sessionId/question-answers/:requestId` — access: `session:read`
+     */
+    getQuestionAnswer(params: {
+        sessionId: string;
+        requestId: string;
     }): Promise<any>;
 
     /**
@@ -2023,6 +2043,7 @@ export function createManagementOps(
 ): ManagementOps {
     return {
         adoptLegacySystemGitHubCopilotKey: (params: Record<string, unknown> = {}) => callOp("adoptLegacySystemGitHubCopilotKey", params),
+        answerQuestion: (params: Record<string, unknown> = {}) => callOp("answerQuestion", params),
         assignSessionsToGroup: (params: Record<string, unknown> = {}) => callOp("assignSessionsToGroup", params),
         cancelPendingMessage: (params: Record<string, unknown> = {}) => callOp("cancelPendingMessage", params),
         cancelSession: (params: Record<string, unknown> = {}) => callOp("cancelSession", params),
@@ -2093,6 +2114,7 @@ export function createManagementOps(
         getProviderUsageAgents: (params: Record<string, unknown> = {}) => callOp("getProviderUsageAgents", params),
         getProviderUsageGrid: (params: Record<string, unknown> = {}) => callOp("getProviderUsageGrid", params),
         getProviderUsageSummary: (params: Record<string, unknown> = {}) => callOp("getProviderUsageSummary", params),
+        getQuestionAnswer: (params: Record<string, unknown> = {}) => callOp("getQuestionAnswer", params),
         getSession: (params: Record<string, unknown> = {}) => callOp("getSession", params),
         getSessionAccess: (params: Record<string, unknown> = {}) => callOp("getSessionAccess", params),
         getSessionCreationPolicy: (params: Record<string, unknown> = {}) => callOp("getSessionCreationPolicy", params),

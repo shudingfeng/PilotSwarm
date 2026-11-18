@@ -122,6 +122,8 @@ not-found to avoid an existence oracle.
 | deleteSession | `DELETE /api/v1/sessions/:sessionId` | sessionId (path), reason (query), force (query, boolean), settleTimeoutMs (query, number) | Cancel and soft-delete a session. With `force`, a delete that has not settled within `settleTimeoutMs` (0 to 65000, default 65000; 0 sends no command) deletes the session's subtree directly, from the leaves up with the session last, and fails naming what failed, so a retry can finish. `reason` is recorded with `force` only; a plain delete keeps its default reason. A session that no worker has started yet never runs afterwards. Only the owner, an admin or the delegated dispatcher may pass `force` (`403` otherwise, whatever `AUTHZ_ENFORCE_OWNERSHIP` says). A forced delete of a session that is already deleted finishes what is left of its subtree. With `AUTHZ_ENFORCE_OWNERSHIP=true` only the tree's owner and admins may do that, and the delegated dispatcher while a live session is left in the tree; everyone else gets `404`, as for any deleted session. Without enforcement the call passes, like any call on a session the portal can't find. |
 | sendMessage | `POST /api/v1/sessions/:sessionId/messages` | sessionId (path), prompt (body), options (body) | Send a prompt (options: { enqueueOnly?, clientMessageIds? }). |
 | sendAnswer | `POST /api/v1/sessions/:sessionId/answers` | sessionId (path), answer (body), options (body) | Answer a pending question. `options.expectedQuestion: { question, iteration? }` binds to the observed `pendingQuestion`; omitted options bind to the current question when enqueued. A stale binding preserves the text as an ordinary message. |
+| answerQuestion | `POST /api/v1/sessions/:sessionId/question-answers` | sessionId (path), request (body) | Opt-in conditional answer to an immutable occurrence; `session:write`. Returns promptly, without polling. A `pending` enqueue is **not acceptance**. See [Conditional question answers](#conditional-question-answers). |
+| getQuestionAnswer | `GET /api/v1/sessions/:sessionId/question-answers/:requestId` | sessionId, requestId (path) | Canonical original conditional-answer receipt, or `null` while unknown; `session:read`. Always verify its payload hash, including after a lost reply. |
 | sendSessionEvent | `POST /api/v1/sessions/:sessionId/events` | sessionId (path), eventName (body), data (body) | Send a custom event into the session. |
 | cancelPendingMessage | `POST /api/v1/sessions/:sessionId/cancel-pending` | sessionId (path), clientMessageIds (body) | Cancel queued messages by client message ids. |
 
@@ -131,6 +133,67 @@ session's tree root (`null`/absent on child rows and when the caller has not
 placed the tree). The former `groupId` field is **gone** from session DTOs:
 group membership is per-viewer state, not a property of the session. See
 [Management: session groups](#management-session-groups).
+
+### Conditional question answers
+
+This is separate from legacy `sendAnswer`, whose stale-answer-as-message behavior
+is unchanged. `getSession` exposes top-level
+`questionAnswerProtocol: "question-answer-v1"` only when the running worker
+advertises it. A new pending question has an immutable `occurrenceId` as well as
+its original `iteration`. Identical question text asked later gets a different
+token. Continue-as-new preserves both fields. A question inherited from an older
+worker may have no token: do not infer one from text, iteration or host version.
+
+POST body:
+
+```json
+{
+  "request": {
+    "requestId": "answer-1",
+    "expectedQuestion": { "question": "Choose a color?", "occurrenceId": "question-occurrence" },
+    "answer": "blue"
+  }
+}
+```
+
+Both IDs are 1–128 ASCII characters, starting with a letter or digit and then
+letters, digits, `.`, `_`, `:` or `-`. Question and answer must each be nonblank,
+without NUL, and at most 16 KiB in UTF-8. The complete request's JSON encoding is
+limited to 32 KiB. Invalid requests return `400 INVALID_REQUEST`. Sender
+attribution comes only from the authenticated caller; body identity fields are
+ignored. Existing Workflow conversational and human-input restrictions apply.
+The session-write/read gates apply even during ownership dark-launch.
+
+Receipts contain `protocol`, `requestId`, `occurrenceId`, `requestHash` and
+`status`; only `accepted` includes a nonempty stable `receiptId`. No answer text
+is returned. `requestHash` is lowercase SHA-256 of UTF-8
+`JSON.stringify([occurrenceId, question, answer])`, with the exact submitted text,
+without trimming or normalization.
+
+| Status | Meaning |
+|---|---|
+| `pending` | Enqueued or held in the worker FIFO, not accepted. Retain the exact request and read its receipt later. |
+| `accepted` | The serial worker consumed that exact pending occurrence as an answer. One answer prompt is owned by the normal durable turn/retry path. This is not a promise the model has completed its turn. |
+| `stale` | Durable terminal refusal: token or question text no longer matches, or the pending question has no token. No ordinary prompt is produced. |
+| `refused` | Durable terminal FIFO-admission refusal. No answer is queued and the question stays open. An exact retry retains refusal; a deliberate new attempt needs a new request ID. |
+| `conflict` | The request ID already belongs to a different payload. The original receipt is not changed. |
+| `unavailable` | Worker protocol, liveness or receipt capacity could not be established. This non-durable response does not resolve an earlier uncertain enqueue. Never fall back to `sendAnswer`. |
+
+Keep the same request ID and payload across ambiguous replies. Exact retries
+return the original durable result without another prompt. GET always returns
+the **canonical original**, not a conflicting copy's result: compare all
+identity fields and `requestHash` with the retained request before interpreting
+`accepted`. A concurrent POST can return `pending` before either request has
+reached the worker; a later GET with a different hash establishes conflict, not
+acceptance. Direct and Web management clients check POST result hashes;
+raw API/transport consumers must do the same. No server-side polling loop runs.
+Missing routes on old hosts and missing capability on old workers fail closed.
+New requests are also held once total instance KV usage reaches a conservative
+100-key soft limit, reserving room under the runtime's key cap for FIFO and
+legacy controls. Existing receipts are never evicted to admit another request.
+The worker rechecks serially: a request that raced the host's capacity preflight
+can remain unknown (`null` on GET), never accepted. An exact POST retry then
+reports unavailable while capacity is exhausted.
 
 ### Session sharing
 

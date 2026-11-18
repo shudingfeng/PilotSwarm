@@ -109,6 +109,11 @@ import { MotdError, type MotdCreateInput, type MotdViewer } from "./motd-store.j
 import { MOTD_OPERATION_SPECS, runMotdStoreOperation, type MotdArgs, type MotdOperationSpec } from "./motd-tools.js";
 import type { MessageSender } from "./message-sender.js";
 import { normalizeMessageSender } from "./message-sender.js";
+import {
+    QUESTION_ANSWER_PROTOCOL, QUESTION_ANSWER_KV_SOFT_LIMIT, parseQuestionAnswerReceipt, questionAnswerReceipt, questionAnswerReceiptKey,
+    questionAnswerResult, validateQuestionAnswerRequest,
+    type QuestionAnswerReceipt, type QuestionAnswerRequest,
+} from "./question-answer.js";
 import type {
     SessionMetricSummary,
     TokensByModelRow,
@@ -559,7 +564,9 @@ export interface PilotSwarmSessionView {
     cronTimezone?: string;
     cronMaxFires?: number;
     cronFiresCompleted?: number;
-    pendingQuestion?: { question: string; choices?: string[]; allowFreeform?: boolean; iteration?: number };
+    pendingQuestion?: { question: string; choices?: string[]; allowFreeform?: boolean; iteration?: number; readonly occurrenceId?: string };
+    /** Worker-advertised support, never inferred from the host or orchestration version. */
+    questionAnswerProtocol?: typeof QUESTION_ANSWER_PROTOCOL;
     result?: string;
     contextUsage?: SessionContextUsage;
     /** customStatusVersion for change tracking. */
@@ -1706,6 +1713,8 @@ export class PilotSwarmManagementClient {
                 ? normalizedCustomStatus.cronReason
                 : undefined,
             pendingQuestion: resolvePendingQuestion(liveStatus, normalizedCustomStatus, latestResponse),
+            ...(!terminalOrchestration && customStatus.questionAnswerProtocol === QUESTION_ANSWER_PROTOCOL
+                ? { questionAnswerProtocol: QUESTION_ANSWER_PROTOCOL } : {}),
             result: normalizedCustomStatus.turnResult?.type === "completed"
                 ? normalizedCustomStatus.turnResult.content
                 : latestResponse?.type === "completed"
@@ -5064,6 +5073,42 @@ export class PilotSwarmManagementClient {
             "messages",
             JSON.stringify(payload),
         );
+    }
+
+    /** Enqueue an opt-in conditional answer. Pending is not worker acceptance; read its durable receipt to settle. */
+    async answerQuestion(sessionId: string, input: QuestionAnswerRequest, options?: { sender?: MessageSender }): Promise<QuestionAnswerReceipt> {
+        this._ensureStarted();
+        const request = validateQuestionAnswerRequest(input);
+        const session = await this.getSession(sessionId);
+        if (session?.sessionKind === "workflow") throw workflowNotConversationalError(sessionId);
+        await assertWorkflowHumanInputAllowed(this._workflowStoreOrNull(), sessionId, "answer", options?.sender);
+        const original = await this.getQuestionAnswer(sessionId, request.requestId);
+        if (original) {
+            return questionAnswerResult(request, original);
+        }
+        if (session?.questionAnswerProtocol !== QUESTION_ANSWER_PROTOCOL || session.orchestrationStatus !== "Running") {
+            return questionAnswerReceipt(request, "unavailable");
+        }
+        const stats = await this._duroxideClient.getOrchestrationStats(`session-${sessionId}`).catch(() => null);
+        const keyCount = stats?.kvUserKeyCount;
+        if (!Number.isInteger(keyCount) || keyCount < 0 || keyCount >= QUESTION_ANSWER_KV_SOFT_LIMIT) {
+            return questionAnswerReceipt(request, "unavailable");
+        }
+        const sender = normalizeMessageSender(options?.sender);
+        await this._duroxideClient.enqueueEvent(`session-${sessionId}`, "messages", JSON.stringify({
+            type: "cmd", cmd: "answer_question", id: request.requestId, args: { request },
+            ...(sender ? { sender } : {}),
+        }));
+        return questionAnswerReceipt(request, "pending");
+    }
+
+    /** The canonical original receipt, including its payload hash; null only while this request is unknown. */
+    async getQuestionAnswer(sessionId: string, requestId: string): Promise<QuestionAnswerReceipt | null> {
+        this._ensureStarted();
+        const key = questionAnswerReceiptKey(requestId);
+        const result = parseQuestionAnswerReceipt(await this._duroxideClient.getValue(`session-${sessionId}`, key));
+        if (result && result.requestId !== requestId) throw new Error("Durable question-answer request identity mismatch");
+        return result;
     }
 
     /**

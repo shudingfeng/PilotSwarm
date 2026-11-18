@@ -1,0 +1,322 @@
+[
+  {
+    "id": "qa.serial-cap1",
+    "module": "QuestionAnswers",
+    "config": "qa.serial-cap1.cfg",
+    "expected": "PASS",
+    "note": "Serialized competing writers, retries and full FIFO.",
+    "invariants": [
+      "TypeOK",
+      "InvNoStale",
+      "InvCanonical",
+      "InvOwned",
+      "InvRefused",
+      "InvToken",
+      "InvCapacity"
+    ],
+    "tlc": {
+      "comment": "qa.serial-cap1; expected PASS: Serialized competing writers, retries and full FIFO.",
+      "spec": "Spec",
+      "constants": {
+        "MaxEnvelopes": "3",
+        "FifoCap": "1",
+        "ReceiptCap": "2",
+        "OldQuestion": "FALSE",
+        "Fault": "\"none\""
+      },
+      "invariants": [
+        "TypeOK",
+        "InvNoStale",
+        "InvCanonical",
+        "InvOwned",
+        "InvRefused",
+        "InvToken",
+        "InvCapacity"
+      ],
+      "properties": [],
+      "deadlock": true
+    }
+  },
+  {
+    "id": "qa.serial-cap2",
+    "module": "QuestionAnswers",
+    "config": "qa.serial-cap2.cfg",
+    "expected": "PASS",
+    "note": "Two queued answers, identical later questions, replay and continuation.",
+    "invariants": [
+      "TypeOK",
+      "InvNoStale",
+      "InvCanonical",
+      "InvOwned",
+      "InvRefused",
+      "InvToken",
+      "InvCapacity"
+    ],
+    "tlc": {
+      "comment": "qa.serial-cap2; expected PASS: Two queued answers, identical later questions, replay and continuation.",
+      "spec": "Spec",
+      "constants": {
+        "MaxEnvelopes": "3",
+        "FifoCap": "2",
+        "ReceiptCap": "2",
+        "OldQuestion": "FALSE",
+        "Fault": "\"none\""
+      },
+      "invariants": [
+        "TypeOK",
+        "InvNoStale",
+        "InvCanonical",
+        "InvOwned",
+        "InvRefused",
+        "InvToken",
+        "InvCapacity"
+      ],
+      "properties": [],
+      "deadlock": true
+    }
+  },
+  {
+    "id": "qa.legacy-handoff",
+    "module": "QuestionAnswers",
+    "config": "qa.legacy-handoff.cfg",
+    "expected": "PASS",
+    "note": "An old tokenless question survives continuation and refuses conditional input.",
+    "invariants": [
+      "TypeOK",
+      "InvNoStale",
+      "InvCanonical",
+      "InvOwned",
+      "InvRefused",
+      "InvToken",
+      "InvCapacity"
+    ],
+    "tlc": {
+      "comment": "qa.legacy-handoff; expected PASS: An old tokenless question survives continuation and refuses conditional input.",
+      "spec": "Spec",
+      "constants": {
+        "MaxEnvelopes": "3",
+        "FifoCap": "2",
+        "ReceiptCap": "2",
+        "OldQuestion": "TRUE",
+        "Fault": "\"none\""
+      },
+      "invariants": [
+        "TypeOK",
+        "InvNoStale",
+        "InvCanonical",
+        "InvOwned",
+        "InvRefused",
+        "InvToken",
+        "InvCapacity"
+      ],
+      "properties": [],
+      "deadlock": true
+    }
+  },
+  {
+    "id": "qa.fault-token",
+    "module": "QuestionAnswers",
+    "config": "qa.fault-token.cfg",
+    "expected": "InvNoStale",
+    "note": "Deliberate fault: matching only question text accepts another occurrence.",
+    "invariants": [
+      "TypeOK",
+      "InvNoStale"
+    ],
+    "tlc": {
+      "comment": "qa.fault-token; expected InvNoStale: Deliberate fault: matching only question text accepts another occurrence.",
+      "spec": "Spec",
+      "constants": {
+        "MaxEnvelopes": "3",
+        "FifoCap": "2",
+        "ReceiptCap": "2",
+        "OldQuestion": "FALSE",
+        "Fault": "\"text-only\""
+      },
+      "invariants": [
+        "TypeOK",
+        "InvNoStale"
+      ],
+      "properties": [],
+      "deadlock": false
+    }
+  },
+  {
+    "id": "qa.fault-overwrite",
+    "module": "QuestionAnswers",
+    "config": "qa.fault-overwrite.cfg",
+    "expected": "InvCanonical",
+    "note": "Deliberate fault: a conflicting payload replaces its request's first result.",
+    "invariants": [
+      "TypeOK",
+      "InvCanonical"
+    ],
+    "tlc": {
+      "comment": "qa.fault-overwrite; expected InvCanonical: Deliberate fault: a conflicting payload replaces its request's first result.",
+      "spec": "Spec",
+      "constants": {
+        "MaxEnvelopes": "3",
+        "FifoCap": "2",
+        "ReceiptCap": "2",
+        "OldQuestion": "FALSE",
+        "Fault": "\"overwrite\""
+      },
+      "invariants": [
+        "TypeOK",
+        "InvCanonical"
+      ],
+      "properties": [],
+      "deadlock": false
+    }
+  },
+  {
+    "id": "qa.fault-replay",
+    "module": "QuestionAnswers",
+    "config": "qa.fault-replay.cfg",
+    "expected": "InvOwned",
+    "note": "Deliberate fault: a live receipt cache skips an owed future prompt on replay.",
+    "invariants": [
+      "TypeOK",
+      "InvOwned"
+    ],
+    "tlc": {
+      "comment": "qa.fault-replay; expected InvOwned: Deliberate fault: a live receipt cache skips an owed future prompt on replay.",
+      "spec": "Spec",
+      "constants": {
+        "MaxEnvelopes": "3",
+        "FifoCap": "2",
+        "ReceiptCap": "2",
+        "OldQuestion": "FALSE",
+        "Fault": "\"replay-cache\""
+      },
+      "invariants": [
+        "TypeOK",
+        "InvOwned"
+      ],
+      "properties": [],
+      "deadlock": false
+    }
+  },
+  {
+    "id": "qa.fault-fifo",
+    "module": "QuestionAnswers",
+    "config": "qa.fault-fifo.cfg",
+    "expected": "InvRefused",
+    "note": "Deliberate fault: FIFO refusal clears the pending question.",
+    "invariants": [
+      "TypeOK",
+      "InvRefused"
+    ],
+    "tlc": {
+      "comment": "qa.fault-fifo; expected InvRefused: Deliberate fault: FIFO refusal clears the pending question.",
+      "spec": "Spec",
+      "constants": {
+        "MaxEnvelopes": "3",
+        "FifoCap": "1",
+        "ReceiptCap": "2",
+        "OldQuestion": "FALSE",
+        "Fault": "\"fifo-clears\""
+      },
+      "invariants": [
+        "TypeOK",
+        "InvRefused"
+      ],
+      "properties": [],
+      "deadlock": false
+    }
+  },
+  {
+    "id": "qa.fault-can",
+    "module": "QuestionAnswers",
+    "config": "qa.fault-can.cfg",
+    "expected": "InvToken",
+    "note": "Deliberate fault: continuation remints the current question token.",
+    "invariants": [
+      "TypeOK",
+      "InvToken"
+    ],
+    "tlc": {
+      "comment": "qa.fault-can; expected InvToken: Deliberate fault: continuation remints the current question token.",
+      "spec": "Spec",
+      "constants": {
+        "MaxEnvelopes": "3",
+        "FifoCap": "2",
+        "ReceiptCap": "2",
+        "OldQuestion": "FALSE",
+        "Fault": "\"can-token\""
+      },
+      "invariants": [
+        "TypeOK",
+        "InvToken"
+      ],
+      "properties": [],
+      "deadlock": false
+    }
+  },
+  {
+    "id": "qa.receipt-cap",
+    "module": "QuestionAnswers",
+    "config": "qa.receipt-cap.cfg",
+    "expected": "PASS",
+    "note": "Exhausted receipt capacity leaves unknown requests unadmitted and preserves original results.",
+    "invariants": [
+      "TypeOK",
+      "InvNoStale",
+      "InvCanonical",
+      "InvOwned",
+      "InvRefused",
+      "InvToken",
+      "InvCapacity"
+    ],
+    "tlc": {
+      "comment": "qa.receipt-cap; expected PASS: Exhausted receipt capacity leaves unknown requests unadmitted and preserves original results.",
+      "spec": "Spec",
+      "constants": {
+        "MaxEnvelopes": "3",
+        "FifoCap": "2",
+        "ReceiptCap": "1",
+        "OldQuestion": "FALSE",
+        "Fault": "\"none\""
+      },
+      "invariants": [
+        "TypeOK",
+        "InvNoStale",
+        "InvCanonical",
+        "InvOwned",
+        "InvRefused",
+        "InvToken",
+        "InvCapacity"
+      ],
+      "properties": [],
+      "deadlock": true
+    }
+  },
+  {
+    "id": "qa.fault-cap",
+    "module": "QuestionAnswers",
+    "config": "qa.fault-cap.cfg",
+    "expected": "InvCapacity",
+    "note": "Deliberate fault: an unchecked concurrent request exhausts receipt storage.",
+    "invariants": [
+      "TypeOK",
+      "InvCapacity"
+    ],
+    "tlc": {
+      "comment": "qa.fault-cap; expected InvCapacity: Deliberate fault: an unchecked concurrent request exhausts receipt storage.",
+      "spec": "Spec",
+      "constants": {
+        "MaxEnvelopes": "3",
+        "FifoCap": "2",
+        "ReceiptCap": "1",
+        "OldQuestion": "FALSE",
+        "Fault": "\"ignore-cap\""
+      },
+      "invariants": [
+        "TypeOK",
+        "InvCapacity"
+      ],
+      "properties": [],
+      "deadlock": false
+    }
+  }
+]
