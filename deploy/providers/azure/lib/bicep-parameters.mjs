@@ -88,15 +88,19 @@ const LAUNCHER_ENV_NAMES = Object.freeze(["PILOTSWARM_WORKER_OWNER_TAG", "PS_LAU
 // and as whom, change a platform or tool setting, or carry credentials. The
 // launcher refuses them again on the VM, and also any name that the image's
 // worker.env or the deployment's worker settings file sets, which the deploy
-// can't see; SESSION_STATE_DIR and MSBUILDDISABLENODEREUSE are the image's
-// own names outside these prefixes.
+// can't see; SESSION_STATE_DIR, MSBUILDDISABLENODEREUSE and SSH_ASKPASS are the
+// image's own names outside these prefixes, and the credential variables
+// outside them follow (the launcher's CREDENTIAL_ENV_NAMES).
 export const WIN_WORKER_RESERVED_EXTRA_ENV_PREFIXES = Object.freeze([
   "NODE_", "COPILOT_", "PILOTSWARM_", "PS_", "WIN_WORKER_", "AZURE_", "GIT_", "NUGET_", "GCM_", "ARTIFACTS_CREDENTIALPROVIDER_",
+  "NUGETPACKAGESOURCECREDENTIALS_",
 ]);
 export const WIN_WORKER_RESERVED_EXTRA_ENV_NAMES = Object.freeze([
   "PATH", "PATHEXT", "COMSPEC", "SYSTEMROOT", "WINDIR", "SYSTEMDRIVE", "TEMP", "TMP", "USERPROFILE", "APPDATA",
   "LOCALAPPDATA", "PROGRAMDATA", "PROGRAMFILES", "HOMEDRIVE", "HOMEPATH", "GITHUB_TOKEN", "GH_TOKEN", "DATABASE_URL",
-  ...WIN_WORKER_USER_DATA_ENV_KEYS, ...LAUNCHER_ENV_NAMES, "SESSION_STATE_DIR", "MSBUILDDISABLENODEREUSE",
+  ...WIN_WORKER_USER_DATA_ENV_KEYS, ...LAUNCHER_ENV_NAMES, "SESSION_STATE_DIR", "MSBUILDDISABLENODEREUSE", "SSH_ASKPASS",
+  "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "VSS_NUGET_ACCESSTOKEN", "VSS_NUGET_EXTERNAL_FEED_ENDPOINTS", "NPM_TOKEN",
+  "SYSTEM_ACCESSTOKEN",
 ]);
 const EXTRA_ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
 const EXTRA_ENV_VALUE_MAX = 4096;

@@ -399,7 +399,8 @@ test("WIN_WORKER_EXTRA_ENV: NAME=VALUE pairs separated by semicolons; an empty s
 test("WIN_WORKER_EXTRA_ENV refuses every reserved prefix and name, without case, and names the userData or the launcher sets", () => {
   const refuse = (name, pattern) => assert.throws(() => winWorkerExtraEnv({ WIN_WORKER_EXTRA_ENV: `OK_NAME=1;${name}=x` }), pattern, name);
   assert.deepEqual([...WIN_WORKER_RESERVED_EXTRA_ENV_PREFIXES].sort(), [
-    "ARTIFACTS_CREDENTIALPROVIDER_", "AZURE_", "COPILOT_", "GCM_", "GIT_", "NODE_", "NUGET_", "PILOTSWARM_", "PS_", "WIN_WORKER_",
+    "ARTIFACTS_CREDENTIALPROVIDER_", "AZURE_", "COPILOT_", "GCM_", "GIT_", "NODE_", "NUGETPACKAGESOURCECREDENTIALS_", "NUGET_", "PILOTSWARM_", "PS_",
+    "WIN_WORKER_",
   ]);
   for (const prefix of WIN_WORKER_RESERVED_EXTRA_ENV_PREFIXES) {
     for (const name of [`${prefix}EXAMPLE`, `${prefix.toLowerCase()}example`]) {
@@ -407,7 +408,8 @@ test("WIN_WORKER_EXTRA_ENV refuses every reserved prefix and name, without case,
     }
   }
   for (const name of ["PATH", "PATHEXT", "COMSPEC", "SYSTEMROOT", "WINDIR", "SYSTEMDRIVE", "TEMP", "TMP", "USERPROFILE", "APPDATA",
-    "LOCALAPPDATA", "PROGRAMDATA", "PROGRAMFILES", "HOMEDRIVE", "HOMEPATH", "GITHUB_TOKEN", "GH_TOKEN", "Path", "temp", "gh_token"]) {
+    "LOCALAPPDATA", "PROGRAMDATA", "PROGRAMFILES", "HOMEDRIVE", "HOMEPATH", "GITHUB_TOKEN", "GH_TOKEN", "Path", "temp", "gh_token",
+    "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "VSS_NUGET_ACCESSTOKEN", "vss_nuget_external_feed_endpoints", "NPM_TOKEN", "SYSTEM_ACCESSTOKEN"]) {
     refuse(name, new RegExp(`may not set ${name}: it is reserved`));
   }
   // Every name the userData's env holds, whatever its prefix.
@@ -418,7 +420,7 @@ test("WIN_WORKER_EXTRA_ENV refuses every reserved prefix and name, without case,
     refuse(name, new RegExp(`may not set ${name}: the workers' launcher sets it`));
   }
   // The image's own worker.env names outside the reserved prefixes.
-  for (const name of ["SESSION_STATE_DIR", "MSBUILDDISABLENODEREUSE"]) refuse(name, /it is reserved/);
+  for (const name of ["SESSION_STATE_DIR", "MSBUILDDISABLENODEREUSE", "SSH_ASKPASS"]) refuse(name, /it is reserved/);
   // Names close to a reserved one are the deployment's own.
   assert.deepEqual(winWorkerExtraEnv({ WIN_WORKER_EXTRA_ENV: "PATHS=1;NODEX=2;GITHUB_URL=3;MY_PATH=4;EXPECTED=5" }).map(([name]) => name),
     ["PATHS", "NODEX", "GITHUB_URL", "MY_PATH", "EXPECTED"]);
@@ -1985,6 +1987,7 @@ test("the rendered userData is what the Windows image's launcher and attacher re
     ...launcher.PROTECTED_EXTRA_PREFIXES.map((prefix) => `${prefix}EXAMPLE`),
     ...launcher.USER_DATA_SETTINGS,
     ...launcher.LAUNCHER_SETTINGS,
+    ...launcher.CREDENTIAL_ENV_NAMES, "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "NuGetPackageSourceCredentials_feed",
   ];
   for (const name of protectedNames) {
     assert.ok(launcher.isProtectedExtraName(name), name);

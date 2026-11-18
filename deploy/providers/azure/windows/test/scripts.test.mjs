@@ -7,7 +7,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { buildWorkerEnv, decodeUserData, parseEnvFile, USER_DATA_SETTINGS } from "../launcher.mjs";
+import { buildWorkerEnv, CREDENTIAL_ENV_NAMES, decodeUserData, parseEnvFile, USER_DATA_SETTINGS } from "../launcher.mjs";
 import { validateReleaseManifest } from "../disk-attacher.mjs";
 import { createGitRunner, listRepositories, writeCleanRecord } from "../../../../../packages/sdk/examples/devdrive-workspaces/git-repos.mjs";
 import { gitTestEnv, psQuote, pwsh, REPO_ROOT, runDriver, serviceEnv, tempDir, userData, windowsPowerShell, WINDOWS_DIR } from "./fixtures.mjs";
@@ -1018,8 +1018,11 @@ test("worker.env and the two WinSW services, from the example worker settings", 
         const refusals = {
             userData: "DATABASE_URL=postgresql://x@db/y",
             fixed: "COPILOT_HOME=C:\\elsewhere",
+            prompt: "GIT_TERMINAL_PROMPT=1",
             launcher: "PS_LAUNCH_ID=x",
             token: "GITHUB_TOKEN=x",
+            ...Object.fromEntries([...CREDENTIAL_ENV_NAMES, "git_config_key_0", "GIT_CONFIG_VALUE_12", "NuGetPackageSourceCredentials_feed"]
+                .map((name) => [`credential-${name}`, `${name}=x`])),
             timeout: "PILOTSWARM_WORKER_SHUTDOWN_TIMEOUT_MS=7200000",
             extension: "PILOTSWARM_EXTENSION_MODULES=C:\\other\\index.mjs",
         };
@@ -1048,6 +1051,11 @@ test("worker.env and the two WinSW services, from the example worker settings", 
         assert.equal(values.AZURE_EXTENSION_USE_DYNAMIC_INSTALL, "no");
         assert.equal(values.AZURE_EXTENSION_DIR, "C:\\pilotswarm\\az-extensions");
         assert.equal(values.TEMP, "C:\\pilotswarm\\temp");
+        // Git never waits on a prompt, in a build or anywhere else: the Dev Drive extension's own settings for its Git calls.
+        assert.equal(values.GIT_TERMINAL_PROMPT, "0");
+        assert.equal(values.GCM_INTERACTIVE, "never");
+        assert.equal(values.GIT_ASKPASS, "");
+        assert.equal(values.SSH_ASKPASS, "");
         assert.equal(values.GIT_AUTHOR_NAME, "PilotSwarm Agent");
         assert.equal(values.PILOTSWARM_WORKER_CONCURRENCY, "4");
         assert.equal(values.PILOTSWARM_WORKER_SHUTDOWN_TIMEOUT_MS, "6000000");
@@ -1057,8 +1065,13 @@ test("worker.env and the two WinSW services, from the example worker settings", 
 
         assert.match(driver.json.refused.userData, /only the scale set's userData sets/);
         assert.match(driver.json.refused.fixed, /the image fixes/);
+        assert.match(driver.json.refused.prompt, /the image fixes/);
         assert.match(driver.json.refused.launcher, /no worker image may carry|only/);
         assert.match(driver.json.refused.token, /no worker image may carry/);
+        for (const [name, refusal] of Object.entries(driver.json.refused).filter(([name]) => name.startsWith("credential-"))) {
+            assert.match(refusal, /which no worker image may carry/, name);
+        }
+        assert.match(driver.json.refused["credential-VSS_NUGET_EXTERNAL_FEED_ENDPOINTS"], /a credential variable/);
         assert.match(driver.json.refused.timeout, /105-minute stop timeout/);
         assert.match(driver.json.refused.extension, /Dev Drive extension/);
 
@@ -1099,8 +1112,9 @@ test("worker.env's CLI allowlist always passes the image's Git and Azure CLI pin
             unset: null,
             empty: "",
             partial: "npm_config_*, AZURE_CONFIG_DIR",
-            prefixes: "GIT_*,AZURE_*,MSBUILD*",
-            exact: "git_config_global,AZURE_CONFIG_DIR,AZURE_EXTENSION_USE_DYNAMIC_INSTALL,AZURE_EXTENSION_DIR,AZURE_EXTENSION_DEV_SOURCES,AZURE_EXTENSION_SYS_DIR",
+            prefixes: "GIT_*,GCM_*,SSH_ASKPASS,AZURE_*,MSBUILD*",
+            exact: "git_config_global,GIT_TERMINAL_PROMPT,GIT_ASKPASS,GCM_INTERACTIVE,SSH_ASKPASS,AZURE_CONFIG_DIR,AZURE_EXTENSION_USE_DYNAMIC_INSTALL,"
+                + "AZURE_EXTENSION_DIR,AZURE_EXTENSION_DEV_SOURCES,AZURE_EXTENSION_SYS_DIR",
             invalid: "GIT_*,NOT-A-NAME",
         };
         for (const [name, value] of Object.entries(cases)) {
@@ -1120,14 +1134,16 @@ test("worker.env's CLI allowlist always passes the image's Git and Azure CLI pin
             assert.equal(lists.length, 1, name);
             written[name] = lists[0].value;
             for (const entry of written[name].split(",")) assert.match(entry, sdkEntry, `${name}: ${entry}`);
-            // Every value the image pins for agents' git and az reaches their CLI.
-            const pinned = entries.filter((e) => e.name === "GIT_CONFIG_GLOBAL" || e.name === "AZURE_CONFIG_DIR" || e.name.startsWith("AZURE_EXTENSION_"));
-            assert.equal(pinned.length, 6, name);
+            // Every value the image pins for agents' git and az reaches their CLI, the non-interactive Git settings included.
+            const pinned = entries.filter((e) => ["GIT_CONFIG_GLOBAL", "GIT_TERMINAL_PROMPT", "GIT_ASKPASS", "GCM_INTERACTIVE", "SSH_ASKPASS", "AZURE_CONFIG_DIR"]
+                .includes(e.name) || e.name.startsWith("AZURE_EXTENSION_"));
+            assert.equal(pinned.length, 10, name);
             for (const { name: pin } of pinned) assert.ok(passes(pin, written[name]), `${name}: ${pin}`);
         }
-        assert.equal(written.unset, "GIT_CONFIG_GLOBAL,AZURE_CONFIG_DIR,AZURE_EXTENSION_*");
-        assert.equal(written.empty, "GIT_CONFIG_GLOBAL,AZURE_CONFIG_DIR,AZURE_EXTENSION_*");
-        assert.equal(written.partial, "npm_config_*,AZURE_CONFIG_DIR,GIT_CONFIG_GLOBAL,AZURE_EXTENSION_*");
+        const pins = "GIT_CONFIG_GLOBAL,GIT_TERMINAL_PROMPT,GIT_ASKPASS,GCM_INTERACTIVE,SSH_ASKPASS,AZURE_CONFIG_DIR,AZURE_EXTENSION_*";
+        assert.equal(written.unset, pins);
+        assert.equal(written.empty, pins);
+        assert.equal(written.partial, "npm_config_*,AZURE_CONFIG_DIR,GIT_CONFIG_GLOBAL,GIT_TERMINAL_PROMPT,GIT_ASKPASS,GCM_INTERACTIVE,SSH_ASKPASS,AZURE_EXTENSION_*");
         assert.equal(written.prefixes, cases.prefixes, "prefixes that cover every pin add nothing");
         assert.equal(written.exact, cases.exact, "names that cover every pin add nothing");
         assert.match(driver.json.invalid, /refused: .*"NOT-A-NAME" is neither a variable name nor a name prefix followed by \*/);
