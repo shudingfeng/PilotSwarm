@@ -529,7 +529,7 @@ export interface UserRoleInfo {
     seenAt: Date | null;
 }
 
-/** A user's opt-in to the deployment's dispatcher (migration 0095). */
+/** A user's opt-in to the deployment's dispatcher (migration 0096). */
 export interface DispatcherDelegationStatus {
     /** The user lets the deployment's dispatcher create sessions for them and end the ones it created. */
     enabled: boolean;
@@ -1541,7 +1541,7 @@ export interface SessionCatalog {
 
     /**
      * Whether the user lets the deployment's dispatcher create and end
-     * sessions for them (migration 0095). `false` for an unknown user.
+     * sessions for them (migration 0096). `false` for an unknown user.
      */
     getUserDispatcherDelegation(principal: UserPrincipal): Promise<boolean>;
 

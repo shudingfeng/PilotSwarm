@@ -459,7 +459,7 @@ Two tables in the `copilot_sessions` schema:
 
 ### `users.allow_dispatcher_delegation`
 
-Migration `0095` adds this `boolean NOT NULL DEFAULT false` column to the
+Migration `0096` adds this `boolean NOT NULL DEFAULT false` column to the
 `users` table: whether the user lets the deployment's dispatcher create
 sessions for them and end the ones it holds a write share on. It is a column of
 its own because the portal replaces `users.profile_settings` wholesale on every

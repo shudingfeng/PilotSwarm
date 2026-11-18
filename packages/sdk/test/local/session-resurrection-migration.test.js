@@ -23,7 +23,6 @@ describe("migration 0094: guarded resurrection", () => {
                 UPDATE "${upgraded}".sessions SET deleted_at = now() WHERE session_id = 'connector';`);
             const rowsBefore = (await query(`SELECT * FROM "${upgraded}".sessions ORDER BY session_id`)).rows;
             const before = await schemaSnapshot(query, upgraded);
-            // Through 0094 only: later migrations (0095, the dispatcher delegation opt-in) are not part of this change.
             await runMigrations(pool, upgraded, CMS_MIGRATIONS(upgraded).filter(item => item.version <= "0094"), 0x63_6d_73);
             const after = await schemaSnapshot(query, upgraded);
             expect((await query(`SELECT * FROM "${upgraded}".sessions ORDER BY session_id`)).rows).toEqual(rowsBefore);

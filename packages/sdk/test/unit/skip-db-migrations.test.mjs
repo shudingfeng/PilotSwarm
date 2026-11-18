@@ -2,7 +2,8 @@
  * PILOTSWARM_SKIP_DB_MIGRATIONS=1: a worker whose database role can't change
  * the schema skips the CMS and facts migrations, which a deployment's
  * migration job runs. It only checks that the schema has every migration this
- * code knows, and fails at once, naming the first missing one, when it doesn't.
+ * code knows, under the same names, and fails at once, naming the first
+ * missing one, when it doesn't.
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -18,15 +19,18 @@ const MIGRATIONS = [
     { version: "0003", name: "third", sql: "SELECT 1" },
 ];
 
-/** A pool whose migrations table holds `versions`; `connect` is what a migration run calls first. */
-function fakePool(versions, { tableError } = {}) {
+/** The rows a migrations table holds once `migrations` ran. */
+const recordsOf = (migrations) => migrations.map(({ version, name }) => ({ version, name }));
+
+/** A pool whose migrations table holds `records`; `connect` is what a migration run calls first. */
+function fakePool(records, { tableError } = {}) {
     const pool = {
         queries: [],
         connected: 0,
         query: async (sql) => {
             pool.queries.push(sql);
             if (tableError) throw Object.assign(new Error("missing"), { code: tableError });
-            return { rows: versions.map((version) => ({ version })) };
+            return { rows: records.map((record) => ({ ...record })) };
         },
         connect: async () => {
             pool.connected++;
@@ -53,12 +57,12 @@ test("only 1 turns the skip on", () => {
 });
 
 test("the check passes when every known migration is applied, newer ones included", async () => {
-    await assertMigrationsApplied(fakePool(["0001", "0002", "0003", "0004"]), "s", MIGRATIONS, "CMS");
+    await assertMigrationsApplied(fakePool([...recordsOf(MIGRATIONS), { version: "0004", name: "fourth" }]), "s", MIGRATIONS, "CMS");
 });
 
 test("the check names the first missing migration, and a schema with no migrations table at all", async () => {
     await assert.rejects(
-        assertMigrationsApplied(fakePool(["0001"]), "s", MIGRATIONS, "CMS"),
+        assertMigrationsApplied(fakePool(recordsOf(MIGRATIONS.slice(0, 1))), "s", MIGRATIONS, "CMS"),
         /^Error: CMS schema "s" lacks migration 0002 \(second\) and 1 more\. PILOTSWARM_SKIP_DB_MIGRATIONS=1/,
     );
     for (const code of ["42P01", "3F000"]) {
@@ -81,7 +85,7 @@ test("with the skip on, the catalog and the fact store check the schema and neve
         [PgFactStore, FACTS_MIGRATIONS, "pilotswarm_facts"],
     ]) {
         const current = Object.assign(Object.create(Store.prototype), {
-            pool: fakePool(migrations(schema).map((migration) => migration.version)),
+            pool: fakePool(recordsOf(migrations(schema))),
             sql: { schema },
             initialized: false,
         });
@@ -90,7 +94,7 @@ test("with the skip on, the catalog and the fact store check the schema and neve
         assert.match(current.pool.queries[0], new RegExp(`FROM "${schema}"\\.schema_migrations`));
 
         const behind = Object.assign(Object.create(Store.prototype), {
-            pool: fakePool(migrations(schema).slice(0, -1).map((migration) => migration.version)),
+            pool: fakePool(recordsOf(migrations(schema).slice(0, -1))),
             sql: { schema },
             initialized: false,
         });

@@ -215,7 +215,7 @@ it ignores `onBehalfOfOwner`, as it did before the parameter existed.
   the **Dispatcher Delegation** switch in Admin Console → Model Providers →
   My Providers (`g` on the same page of the TUI), or
   `PUT /api/v1/me/dispatcher-delegation`. It is stored in
-  `users.allow_dispatcher_delegation` (CMS migration `0095`) and is off until
+  `users.allow_dispatcher_delegation` (CMS migration `0096`) and is off until
   the user turns it on. The switch shows only on deployments that name a
   dispatcher.
 - **Creating for a user.** `createSession` and `createSessionForAgent` accept
@@ -441,7 +441,8 @@ No manual migration needed.
 A worker whose database role can't change the schema sets
 `PILOTSWARM_SKIP_DB_MIGRATIONS=1` (default `0`): it then never migrates the
 CMS and facts schemas, and only checks that every migration it knows is
-applied. If one is missing, it fails at startup and names it, so run the
+applied, under the same name. If one is missing, or a version is recorded
+under another migration's name, it fails at startup and names it, so run the
 migrations first, for example in a deployment's migration job that starts the
 same code without the setting, as the Windows worker pool's
 [database role Job](../deploy/windows-workers.md#the-database-role-job) does.
