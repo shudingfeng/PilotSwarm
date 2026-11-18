@@ -167,6 +167,23 @@ test("a worker's filter: five capability tags, plus the owner tag or the capacit
     assert.throws(() => workerTagFilter({ workflowTags: WORKFLOW_MILESTONE_WORKER_TAGS, ownerTag: OWNER, ownerCapacity: true }), /takes no capacity requests/);
 });
 
+// The duroxide release on which a worker filter past duroxide's MAX_WORKER_TAGS was verified: it starts such a runtime
+// and claims every tag (the owner-only runtime test below).
+const OWNER_ROUTING_TAGS_VERIFIED_ON = "0.2.4";
+
+test("a filter past duroxide's tag limit is allowed only on the duroxide release it was verified on", {
+    skip: MAX_OWNER_ROUTING_WORKER_TAGS <= MAX_WORKER_TAGS && "owner and capacity filters are within duroxide's limit",
+}, () => {
+    const installed = createRequire(import.meta.url)("duroxide/package.json").version;
+    assert.equal(
+        installed,
+        OWNER_ROUTING_TAGS_VERIFIED_ON,
+        `owner and capacity workers give duroxide ${MAX_OWNER_ROUTING_WORKER_TAGS} tags, past its MAX_WORKER_TAGS of ${MAX_WORKER_TAGS}, `
+            + `which duroxide ${OWNER_ROUTING_TAGS_VERIFIED_ON} does not enforce. Before moving to duroxide ${installed}, check that it still `
+            + `starts such a worker, then update OWNER_ROUTING_TAGS_VERIFIED_ON; otherwise keep those filters within ${MAX_WORKER_TAGS} tags.`,
+    );
+});
+
 test("every filter a worker can build holds at most six tags, and the default filter duroxide's five; any other is refused", () => {
     const built = [];
     for (const ownerTag of [undefined, OWNER]) {
