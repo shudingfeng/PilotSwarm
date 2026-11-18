@@ -750,7 +750,8 @@ test("the toolchain manifest's steps and workerAccount are checked", { skip: noP
         // The example in steps is valid, and the .vsconfig it names ships next to it.
         assert.deepEqual(driver.json.example, ["installer", "command", "windowsFeatures", "restart", "visualStudio", "package", "extendPartition"]);
         for (const vsconfig of driver.json.exampleVsconfig) {
-            const file = vsconfig.replace("{manifestDir}", path.join(WINDOWS_DIR, "examples"));
+            // The example names a Windows path, whose backslash Linux would read as part of the file's name.
+            const file = vsconfig.replace("{manifestDir}", path.join(WINDOWS_DIR, "examples")).replace(/[\\/]/g, path.sep);
             assert.ok(Array.isArray(JSON.parse(fs.readFileSync(file, "utf8")).components), file);
         }
         const expected = {
@@ -834,7 +835,10 @@ for (const [label, shell, skip] of [["PowerShell 7", pwsh(), noPwsh], ["Windows 
                 "function Test-PendingRestart { $false }",
                 `function Install-WindowsFeature { param([string[]]$Name, [switch]$IncludeManagementTools) [System.IO.File]::AppendAllText(${psQuote(log)}, ('features ' + ($Name -join ',') + ' ' + [bool]$IncludeManagementTools + [char]10)); [pscustomobject]@{ Success = $true; RestartNeeded = 'Yes' } }`,
                 // npm installs the MCP server only in the log; every other program runs.
-                `function Invoke-NativeCommand { [CmdletBinding()] param([string]$FilePath, [string[]]$ArgumentList = @(), [string]$WorkingDirectory, [hashtable]$Environment, [int]$TimeoutSeconds = 7200, [int[]]$SuccessExitCode = @(0), [switch]$NoThrow) if ($FilePath -match 'npm\\.cmd$') { [System.IO.File]::AppendAllText(${psQuote(log)}, ('npm ' + $ArgumentList[-1] + [char]10)); return [pscustomobject]@{ ExitCode = 0; StdOut = ''; StdErr = '' } }; PilotSwarm.WinWorker\\Invoke-NativeCommand @PSBoundParameters }`,
+                `function Invoke-NativeCommand { [CmdletBinding()] param([string]$FilePath, [string[]]$ArgumentList = @(), [string]$WorkingDirectory, [hashtable]$Environment, [int]$TimeoutSeconds = 7200, [int[]]$SuccessExitCode = @(0), [switch]$NoThrow) if ($FilePath -match 'npm\\.cmd$') { [System.IO.File]::AppendAllText(${psQuote(log)}, ('npm ' + $ArgumentList[-1] + [char]10)); return [pscustomobject]@{ ExitCode = 0; StdOut = ''; StdErr = '' } }`,
+                // Outside Windows an exit status keeps only its low 8 bits, so a step's 3010 arrives as 194: report it as Windows does.
+                "    if (-not (Test-WindowsHost) -and $ArgumentList.Count -gt 0 -and $ArgumentList[-1] -eq '3010') { $PSBoundParameters['SuccessExitCode'] = @($SuccessExitCode) + 194; $result = PilotSwarm.WinWorker\\Invoke-NativeCommand @PSBoundParameters; if ($result.ExitCode -eq 194) { $result.ExitCode = 3010 }; return $result }",
+                "    PilotSwarm.WinWorker\\Invoke-NativeCommand @PSBoundParameters }",
                 "$results = @()",
                 `foreach ($run in @(${runs.map(([boot, file]) => `@('${boot}', '${file}')`).join(", ")})) {`,
                 "    $script:boot = $run[0]",
