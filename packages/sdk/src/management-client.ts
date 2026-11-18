@@ -1479,7 +1479,7 @@ export class PilotSwarmManagementClient {
         return this._catalog!.getUserRole(principal);
     }
 
-    // ─── Dispatcher delegation (migration 0095) ───────────────
+    // ─── Dispatcher delegation (migration 0096) ───────────────
 
     /**
      * Whether the user lets the deployment's dispatcher create sessions for

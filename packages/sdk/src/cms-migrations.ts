@@ -25,7 +25,7 @@ import { workflowApprovalsMigration } from "./migrations/workflow-approvals-0091
 import { sessionSummaryTitleMigration } from "./migrations/session-summary-title-0093.js";
 import { sessionResurrectionMigration } from "./migrations/session-resurrection-0094.js";
 import { canvasTenSlotsMigration } from "./migrations/canvas-ten-slots-0095.js";
-import { dispatcherDelegationMigration } from "./migrations/dispatcher-delegation-0095.js";
+import { dispatcherDelegationMigration } from "./migrations/dispatcher-delegation-0096.js";
 
 /**
  * Return the ordered list of CMS migrations for a given schema.
