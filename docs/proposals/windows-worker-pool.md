@@ -375,7 +375,7 @@ worker's environment and starts the SDK's bundled runtime (`copilot-client.ts:25
 
 ### Delegation to a dispatcher
 
-- **Opt-in:** a deployment may run a dispatcher service that creates sessions for users. Migration `0095` adds
+- **Opt-in:** a deployment may run a dispatcher service that creates sessions for users. Migration `0096` adds
   `users.allow_dispatcher_delegation` (default `false`) with two stored procedures. Users set it through
   `setMyDispatcherDelegation`, from a Portal switch or a TUI command, bound to the signed-in caller.
 - **Creating sessions:** `createSession` and `createSessionForAgent` accept `onBehalfOfOwner`, only from
@@ -534,7 +534,7 @@ rules, and tests cover them.
 |---|---|
 | C1. Off by default | Each new behavior needs a setting, a registered hook, an optional parameter or a deploy flag, and its default reproduces today's behavior |
 | C2. Additive APIs | New optional parameters, methods, routes and settings only. Nothing is renamed or removed, and the regenerated protocol client keeps every existing call working |
-| C3. Additive schema | One CMS migration, `0095`, adds a column with a default and two new stored procedures. It replaces no procedure and rewrites no data |
+| C3. Additive schema | One CMS migration, `0096`, adds a column with a default and two new stored procedures. It replaces no procedure and rewrites no data |
 | C4. Versioned orchestration | `1.0.86` is a new version. `1.0.85` is frozen as `orchestration_1_0_85/`, beside the frozen `1.0.83` and `1.0.84`, and every version down to the floor, `1.0.47`, stays registered. `1.0.86` changes nothing for a session unless its input carries an owner tag or the fast busy flag. Orchestration code never reads `process.env`. A release that contains it changes the default orchestration version, so every deployment that takes that release upgrades by stopping every worker, deploying, then starting, as the 0.8.11 and 0.8.12 release notes ask (`CHANGELOG.md`) |
 | C5. Platform guards | Windows code paths run only under `process.platform === "win32"`, and Linux behavior is unchanged. The required Windows unit-test job covers them |
 | C6. Cloud-neutral core | No new cloud SDK or cloud logic in core, as `.github/copilot-instructions.md` requires. New Azure code lives under `deploy/providers/azure`, including new deploy steps in `deploy/providers/azure/deploy-steps/`. Modules with npm dependencies have their own `package.json` and lockfile. `deploy.mjs` only calls the new steps, behind `WIN_WORKERS_ENABLED` or `AZURE_POLICY_RESTRICTED`. The Azure-specific scripts already under `deploy/scripts/`, such as `render-params.mjs`, `deploy-bicep.mjs` and `compose-env.mjs`, and `Setup-PortalAuth.ps1`, get only the wiring that calls code under `deploy/providers/azure`, so no new logic joins the existing exceptions (`.github/copilot-instructions.md:38-41`; open question 4). Core's existing Azure Blob code isn't extended |
@@ -626,7 +626,7 @@ Slices without a dependency can land in any order.
 | U14 | System session tool limit, with no Workflow tools | — |
 | U15 | Fine-grained token gate | — |
 | U16 | External personal secrets: the store contract, catalog references, per-turn resolution and redaction | U12, U15 |
-| U17 | Dispatcher delegation: migration `0095`, `onBehalfOfOwner`, read-only sharing of the sessions it creates and the delegated end of work | U29 |
+| U17 | Dispatcher delegation: migration `0096`, `onBehalfOfOwner`, read-only sharing of the sessions it creates and the delegated end of work | U29 |
 | U18 | Orchestration `1.0.86`: owner tags for the sessions created on behalf of a user, capacity requests, the fast busy policy, the capped owner-tagged destroy and set-workspace check, and Workflows and new root sessions refused in owner-routed trees | U17 |
 | U19 | Dev Drive workspace extension | U5, U16, U18, U28 |
 | U20 | Windows image and worker-service scripts | U19 |
@@ -653,14 +653,15 @@ U28.
 **Numbers stay provisional until U17 and U18 merge.** A migration's version and an orchestration's version end up in durable
 state. The migrator skips any version it has already recorded (`pg-migrator.ts:122-128`), and a deployed orchestration
 version can't change (`docs/architecture/system.md:928`). Holding a number for us would block or reorder your own changes.
-So we use the next free numbers, `0095` and `1.0.86` today, only on a test deployment whose data we can throw away. If
-`main` takes a number first, as v0.8.11's Workflows did with `0088`, `0089` and `1.0.83` while we drafted this, and
-v0.8.12 did with `0090` to `0094`, `1.0.84` and `1.0.85` after our first numbers, `0090` and `1.0.84`, the slice takes
-the next free one and we recreate that data. We run them nowhere else until both are merged.
+So we use the next free numbers, `0096` and `1.0.86` today, only on a test deployment whose data we can throw away. If
+`main` takes a number first, as v0.8.11's Workflows did with `0088`, `0089` and `1.0.83` while we drafted this,
+v0.8.12 did with `0090` to `0094`, `1.0.84` and `1.0.85` after our first numbers, `0090` and `1.0.84`, and the ten
+canvas slots (#318) did with `0095` after our second, the slice takes the next free one and we recreate that data. We
+run them nowhere else until both are merged.
 
 **Early review: U5, U17, U18 and U29.** They need no Azure work, so they can go up as soon as their local tests pass. U18
 carries the orchestration version and the core routing design, where your input matters most, and its TLA+ updates. U17
-carries migration `0095` and changes who may create, share and end sessions. U29 is small and comes first, because U17
+carries migration `0096` and changes who may create, share and end sessions. U29 is small and comes first, because U17
 needs it: the delegated end of work may pass `force`. U18 then needs U17, whose delegated creation it tags. U5 is small
 too, and the Dev Drive extension and the admission hook need it.
 
@@ -710,7 +711,7 @@ With the message scope on, no session message crosses owners. The manual will st
 ## Open questions
 
 1. Is this design acceptable in shape, and are there settings or hooks you'd rather see differently?
-2. Will you review U5, U17, U18 and U29 early, so that `0095` and `1.0.86` become final on `main`?
+2. Will you review U5, U17, U18 and U29 early, so that `0096` and `1.0.86` become final on `main`?
 3. Will you create `feature/windows-workers` and grant write access, or do you prefer a fork?
 4. Should the new Azure deploy steps plug into the deployment-provider contract that the provider-boundary audit calls for
    (finding 7, #64), or stay as steps that `deploy.mjs` calls behind its settings until that contract exists?

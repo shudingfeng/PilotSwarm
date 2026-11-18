@@ -1245,7 +1245,8 @@ comes only with `WIN_WORKERS_ENABLED=true`:
 The workers sign in to PostgreSQL as their own identity
 (`<prefix>-win-worker-mid`, `PILOTSWARM_DB_AAD_USER` in their `userData`) and
 set `PILOTSWARM_SKIP_DB_MIGRATIONS=1`: they check that every migration they
-know is applied, never apply one, and stop at start-up when one is missing.
+know is applied, never apply one, and stop at start-up when one is missing or
+recorded under another migration's name.
 The database role Job
 (`deploy/providers/azure/deploy-steps/Setup-WinWorkerDbRole.mjs`) does the
 database work instead. It signs in as the Portal's identity

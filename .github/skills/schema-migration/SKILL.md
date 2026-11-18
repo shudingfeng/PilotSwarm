@@ -145,7 +145,7 @@ Migrations are applied automatically when `initialize()` is called. Existing dep
 
 ## Modifying an Existing Stored Procedure
 
-Never edit a previous migration. Instead:
+Never edit a previous migration, and never rename one that has shipped: the migrator refuses a database whose recorded name for a version differs from the code's. Instead:
 
 1. Add a new migration with `CREATE OR REPLACE FUNCTION` for the modified procedure.
 2. Generate a diff file showing the delta from the baseline version.
@@ -156,6 +156,7 @@ Never edit a previous migration. Instead:
 - **Advisory locks**: Each system uses a unique lock seed hashed with the schema name to prevent concurrent workers from double-applying migrations.
 - **Tracking table**: `{schema}.schema_migrations` with columns `(version TEXT PK, name TEXT, applied_at TIMESTAMPTZ)`.
 - **Ordering**: Migrations are applied in array order. The version string is compared against the tracking table.
+- **Identity**: Before running anything, each recorded version the code lists is compared with the code's migration at that version. A different `name` means the database ran another migration under that number, so the run stops with an error naming the version and both names (`assertRecordedMigrationNames`). Recorded versions the code doesn't list are not compared.
 - **Error handling**: Failed migrations trigger `ROLLBACK` and re-throw. The migration is not recorded as applied.
 
 ## Key files
