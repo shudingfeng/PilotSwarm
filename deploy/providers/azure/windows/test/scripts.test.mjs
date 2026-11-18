@@ -830,6 +830,8 @@ for (const [label, shell, skip] of [["PowerShell 7", pwsh(), noPwsh], ["Windows 
             const runs = [["A", "manifest"], ["A", "manifest"], ["B", "manifest"], ["B", "manifest"], ["C", "manifest"], ["C", "changed"], ["D", "changed"]];
             const driver = runDriver(home, "restart.ps1", [
                 `. ${psQuote(scriptPath("Build-WorkerOsImage.ps1"))} -Root ${psQuote(path.join(home, "root"))}`,
+                // The image's node.exe is on C:, a drive Linux doesn't have: npm's path, which the stand-in below catches, comes from this node.
+                `$script:NodeExe = ${psQuote(process.execPath)}`,
                 "$script:boot = ''",
                 "function Get-LastBootTime { $script:boot }",
                 "function Test-PendingRestart { $false }",
