@@ -51,6 +51,7 @@ import {
   startCaRotation,
 } from "../../providers/azure/disk-controller/tls.mjs";
 import { loadConfig } from "../../providers/azure/disk-controller/lib/config.mjs";
+import * as controllerAzure from "../../providers/azure/disk-controller/lib/azure.mjs";
 import { createFakeAppGateway, createFakeAz, createFakeOpenssl, createTestPki } from "../../providers/azure/disk-controller/test/x509.mjs";
 
 const BICEP = join(REPO_ROOT, "deploy/providers/azure/services/base-infra/bicep");
@@ -950,6 +951,12 @@ test("the scale set gets the Standard security type the way its pinned Compute A
   assert.throws(() => assertStandardSecurity(named, "2024-11-01", "named"), /named at 2024-11-01 names no security type/);
   assertStandardSecurity(named, "2025-11-01", "named");
   assert.throws(() => assertStandardSecurity(unnamed, "2025-11-01", "unnamed"), /unnamed at 2025-11-01 names the Standard type/);
+});
+
+test("every write to the scale set's model or capacity goes at the Bicep's pinned Compute API version: the deploy step's PATCH and the disk controller's", () => {
+  const version = apiVersionOf(winWorkers, "scaleSet", "Microsoft.Compute/virtualMachineScaleSets");
+  assert.equal(step.SCALE_SET_API_VERSION, version, "the deploy step's model PATCH");
+  assert.equal(controllerAzure.SCALE_SET_API_VERSION, version, "the disk controller's capacity PATCH");
 });
 
 test("the Azure Monitor Agent signs in as the workers' identity, and their data collection rule feeds the main workspace", () => {

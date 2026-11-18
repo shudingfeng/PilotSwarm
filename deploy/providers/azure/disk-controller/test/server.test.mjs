@@ -26,6 +26,7 @@ const VAULT = "https://myvault.vault.azure.net";
 function fakeModules({ container = new FakeContainerClient(), secrets = new FakeSecretClient() } = {}) {
   const made = [];
   const imported = [];
+  const policies = [];
   const tracked = (name, instance) => class {
     constructor(...args) {
       made.push({ name, args });
@@ -36,7 +37,7 @@ function fakeModules({ container = new FakeContainerClient(), secrets = new Fake
     "@azure/identity": { DefaultAzureCredential: tracked("DefaultAzureCredential") },
     "@azure/storage-blob": { ContainerClient: tracked("ContainerClient", container) },
     "@azure/keyvault-secrets": { SecretClient: tracked("SecretClient", secrets) },
-    "@azure/arm-compute": { ComputeManagementClient: tracked("ComputeManagementClient") },
+    "@azure/arm-compute": { ComputeManagementClient: tracked("ComputeManagementClient", { pipeline: { addPolicy: (policy) => policies.push(policy) } }) },
     "@azure/arm-network": { NetworkManagementClient: tracked("NetworkManagementClient") },
     "@azure/arm-monitor": { MonitorClient: tracked("MonitorClient") },
   };
@@ -45,7 +46,7 @@ function fakeModules({ container = new FakeContainerClient(), secrets = new Fake
     if (!modules[specifier]) throw new Error(`unexpected import ${specifier}`);
     return modules[specifier];
   };
-  return { importModule, made, imported, container };
+  return { importModule, made, imported, container, policies };
 }
 
 test("the Azure clients share the pod's credential, and the ARM clients exist only with a scale set", async () => {
@@ -66,6 +67,8 @@ test("the Azure clients share the pod's credential, and the ARM clients exist on
     assert.deepEqual(full.made.find((m) => m.name === name).args, [all.credential, SUBSCRIPTION], name);
   }
   assert.equal(full.made.filter((m) => m.name === "DefaultAzureCredential").length, 1);
+  // Writes to the scale set go at the Compute API version its Bicep pins.
+  assert.deepEqual(full.policies.map((policy) => policy.name), ["scaleSetApiVersion"]);
 });
 
 test("a TLS bundle must hold a certificate and the key that belongs to its first certificate", () => {

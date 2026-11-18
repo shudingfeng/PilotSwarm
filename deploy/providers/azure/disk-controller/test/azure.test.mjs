@@ -3,7 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { createAzure, isNotFound } from "../lib/azure.mjs";
+import { SCALE_SET_API_VERSION, createAzure, isNotFound, scaleSetApiVersionPolicy } from "../lib/azure.mjs";
 import { parseScaleSetId } from "../lib/config.mjs";
 import { COMPUTE, DCR_ID, FakeCloud, GOLDEN_ID, SCALE_SET_ID } from "./fakes.mjs";
 
@@ -20,6 +20,25 @@ test("the scale set: capacity, region and zones; the capacity changes with a PAT
   assert.deepEqual(cloud.callsOf("vmss.update")[0].slice(1), ["stamp-rg", "win-workers", { sku: { capacity: 2 } }]);
   const missing = setup({ scaleSetExists: false });
   assert.equal(await missing.azure.scaleSet(), null, "before the scale set exists");
+});
+
+test("a PUT or PATCH of the scale set itself goes at its pinned Compute API version, and every other call keeps the SDK's", async () => {
+  const policy = scaleSetApiVersionPolicy();
+  // The SDK names the parameter `api%2Dversion`.
+  const sent = async (method, path, query = "api%2Dversion=2026-04-01") => {
+    const response = await policy.sendRequest({ method, url: `https://management.azure.com${path}?${query}` }, async (request) => ({ status: 200, request }));
+    return response.request.url.replace("https://management.azure.com", "");
+  };
+  assert.equal(await sent("PATCH", SCALE_SET_ID), `${SCALE_SET_ID}?api-version=${SCALE_SET_API_VERSION}`);
+  assert.equal(await sent("PUT", SCALE_SET_ID, "api-version=2026-04-01"), `${SCALE_SET_ID}?api-version=${SCALE_SET_API_VERSION}`);
+  for (const [method, path] of [
+    ["GET", SCALE_SET_ID],
+    ["PATCH", `${SCALE_SET_ID}/virtualMachines/win-workers_0a1b2c3d`],
+    ["DELETE", `${COMPUTE}/virtualMachines/vm-1`],
+    ["PATCH", `${COMPUTE}/disks/psdrive-0123456789ab`],
+  ]) {
+    assert.equal(await sent(method, path), `${path}?api%2Dversion=2026-04-01`, `${method} ${path}`);
+  }
 });
 
 test("VMs: listed with the scale set filter and instance views, members only, standby and image version read", async () => {

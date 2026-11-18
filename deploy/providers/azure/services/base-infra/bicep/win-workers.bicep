@@ -266,8 +266,11 @@ var monitorAgentExtension = {
 // `securityType: 'Standard'` needs the subscription feature
 // Microsoft.Compute/UseStandardSecurityType there. From 2025-11-01, Trusted
 // Launch is the default for the images and sizes that support it, and the
-// model must name `securityType: 'Standard'`, the documented opt-out. A test
-// keeps the model in step with this version.
+// model must name `securityType: 'Standard'`, the documented opt-out. Every
+// write to the scale set's model or capacity uses this version: the Windows
+// worker deploy step's PATCH (SCALE_SET_API_VERSION in win-workers.mjs) and the
+// disk controller's capacity PATCH (lib/azure.mjs). Tests keep the model and
+// those versions in step with this one.
 resource scaleSet 'Microsoft.Compute/virtualMachineScaleSets@2024-11-01' = if (deployScaleSet && !scaleSetExists) {
   name: scaleSetName
   location: location
