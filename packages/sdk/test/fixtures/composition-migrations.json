@@ -261,7 +261,7 @@
   },
   {
     "path": "src/migrations/0096_diff.md",
-    "blob": "51554538718b9c6e2dc3163d92b95c85e2fd8f6c"
+    "blob": "17e1749a9c0c94724aad795ff15a5f98b993ebec"
   },
   {
     "path": "src/migrations/base-agent-v2-0079.ts",

@@ -68,11 +68,38 @@ export function validateMigrationEntries(migrations: MigrationEntry[]): void {
 }
 
 /**
+ * Refuses a schema whose migrations table records a version under another name
+ * than this code's migration at that version. Applied migrations are matched by
+ * version, so a database that ran a different migration under a number this code
+ * reuses would otherwise skip this code's migration without a word. Recorded
+ * versions this code doesn't list (from newer code) are not compared.
+ */
+export function assertRecordedMigrationNames(
+    schema: string,
+    recorded: ReadonlyArray<{ version: string; name: string }>,
+    migrations: ReadonlyArray<{ version: string; name: string }>,
+    label?: string,
+): void {
+    const expected = new Map(migrations.map((migration) => [migration.version, migration.name]));
+    const mismatches = recorded.filter((row) => expected.has(row.version) && expected.get(row.version) !== row.name);
+    if (mismatches.length === 0) return;
+    const list = mismatches
+        .map((row) => `migration ${row.version} is recorded as "${row.name}", but this code's migration ${row.version} is "${expected.get(row.version)}"`)
+        .join("; ");
+    throw new Error(
+        `${label ? `${label} schema` : "Schema"} "${schema}" records a different migration under a version this code uses: ${list}. `
+        + "No migration was run. Recreate the database, or run the code that recorded it.",
+    );
+}
+
+/**
  * Run all pending migrations against the given schema.
  *
  * Uses a PostgreSQL advisory lock keyed on `lockSeed` + schema name to
  * serialize concurrent workers. Each migration runs in its own transaction
- * (or as autocommit steps — see MigrationEntry.steps).
+ * (or as autocommit steps — see MigrationEntry.steps). A schema that recorded
+ * another migration under one of these versions is refused before any runs
+ * (assertRecordedMigrationNames).
  *
  * @param pool      - node-postgres pool
  * @param schema    - target schema name (e.g. "copilot_sessions", "pilotswarm_facts")
@@ -120,8 +147,9 @@ export async function runMigrations(
         `);
 
         const { rows: applied } = await client.query(
-            `SELECT version FROM ${migrationsTable} ORDER BY version`,
+            `SELECT version, name FROM ${migrationsTable} ORDER BY version`,
         );
+        assertRecordedMigrationNames(schema, applied, migrations);
         const appliedSet = new Set(applied.map((r: any) => r.version));
 
         for (const migration of migrations) {
@@ -185,6 +213,8 @@ export function dbMigrationsSkipped(env: NodeJS.ProcessEnv = process.env): boole
  * recorded, and throws, naming the first missing one, when the schema is
  * behind this code, so a worker started before the migrations fails at once
  * rather than on its first query. Later migrations from newer code are fine.
+ * A version recorded under another migration's name is refused as
+ * runMigrations refuses it.
  */
 export async function assertMigrationsApplied(
     pool: any,
@@ -192,14 +222,15 @@ export async function assertMigrationsApplied(
     migrations: MigrationEntry[],
     label: string,
 ): Promise<void> {
-    let applied = new Set<string>();
+    let recorded: Array<{ version: string; name: string }> = [];
     try {
-        const { rows } = await pool.query(`SELECT version FROM "${schema}".schema_migrations`);
-        applied = new Set(rows.map((row: any) => row.version));
+        ({ rows: recorded } = await pool.query(`SELECT version, name FROM "${schema}".schema_migrations`));
     } catch (err: any) {
         // 42P01 undefined_table, 3F000 invalid_schema_name: nothing is migrated.
         if (err?.code !== "42P01" && err?.code !== "3F000") throw err;
     }
+    assertRecordedMigrationNames(schema, recorded, migrations, label);
+    const applied = new Set(recorded.map((row) => row.version));
     const missing = migrations.filter((migration) => !applied.has(migration.version));
     if (missing.length > 0) {
         const more = missing.length > 1 ? ` and ${missing.length - 1} more` : "";

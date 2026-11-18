@@ -22,6 +22,15 @@ CREATE TABLE schema_migrations (
 );
 ```
 
+A run skips every version the table records and runs the others in list
+order. It first compares each recorded version that the code lists with the
+code's migration at that version: a different `name` means the database ran
+another migration under that number, so the run stops before any migration,
+naming the version, the recorded name and the code's name
+(`assertRecordedMigrationNames` in `pg-migrator.ts`). Recorded versions the
+code doesn't list, from newer code, are not compared. A migration's name is
+therefore part of its identity: never rename one that has shipped.
+
 The chain starts at `0001_baseline` (the schema as of v1.0.41) and currently
 runs through the migrations listed at the top of `cms-migrations.ts`
 (metric summaries, stored procedures, session owners, user profiles,
