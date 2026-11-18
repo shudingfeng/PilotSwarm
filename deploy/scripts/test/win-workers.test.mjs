@@ -902,7 +902,6 @@ test("the scale set model: Flexible, one zone and fault domain, managed OS disk,
     /platformFaultDomainCount: 1\b/,
     /upgradePolicy: \{\s*mode: 'Manual'\s*\}/,
     /automaticRepairsPolicy: \{\s*enabled: false\s*\}/,
-    /securityType: 'Standard'/,
     /userData: userData/,
     /imageReference: \{\s*id: '\$\{imageDefinition\.id\}\/versions\/\$\{imageVersion\}'\s*\}/,
     /osDisk: \{\s*createOption: 'FromImage'\s*caching: 'ReadWrite'\s*diskSizeGB: 256\s*deleteOption: 'Delete'\s*managedDisk:/,
@@ -918,6 +917,39 @@ test("the scale set model: Flexible, one zone and fault domain, managed OS disk,
   assert.equal(conditionOf(winWorkers, "gallery"), undefined);
   assert.match(blockOf(winWorkers, "imageDefinition"), /osType: 'Windows'\s*osState: 'Generalized'\s*hyperVGeneration: 'V2'/);
   assert.match(winWorkers, /^var imageDefinitionName = 'pilotswarm-win-worker'\s*$/m);
+});
+
+// The Compute API version that a resource pins: `resource <symbol> '<type>@<version>'`.
+function apiVersionOf(source, symbol, type) {
+  const match = new RegExp(`^resource ${symbol} '${type.replace(/[./]/g, "\\$&")}@(\\d{4}-\\d{2}-\\d{2})'`, "m").exec(source);
+  assert.ok(match, `${symbol} pins a ${type} API version`);
+  return match[1];
+}
+
+// How a VM or scale set model gets the Standard security type at a Compute API
+// version: below 2025-11-01 by naming no security type (an explicit Standard
+// needs a subscription feature there), from 2025-11-01 only by naming Standard,
+// since Trusted Launch is the default. Comment lines don't count.
+function assertStandardSecurity(block, apiVersion, what) {
+  const code = block.replace(/^\s*\/\/.*$/gm, "");
+  if (apiVersion < "2025-11-01") {
+    assert.doesNotMatch(code, /securityProfile|securityType/, `${what} at ${apiVersion} names no security type`);
+  } else {
+    assert.match(code, /securityProfile: \{\s*securityType: 'Standard'\s*\}/, `${what} at ${apiVersion} names the Standard type`);
+  }
+}
+
+test("the scale set gets the Standard security type the way its pinned Compute API version needs: no securityProfile below 2025-11-01, an explicit Standard from then on", () => {
+  const version = apiVersionOf(winWorkers, "scaleSet", "Microsoft.Compute/virtualMachineScaleSets");
+  assertStandardSecurity(blockOf(winWorkers, "scaleSet"), version, "the scale set's model");
+
+  // The rule both ways, whichever version the Bicep pins today.
+  const named = "virtualMachineProfile: {\n  securityProfile: {\n    securityType: 'Standard'\n  }\n}";
+  const unnamed = "virtualMachineProfile: {\n  // no securityProfile here\n  userData: userData\n}";
+  assertStandardSecurity(unnamed, "2024-11-01", "unnamed");
+  assert.throws(() => assertStandardSecurity(named, "2024-11-01", "named"), /named at 2024-11-01 names no security type/);
+  assertStandardSecurity(named, "2025-11-01", "named");
+  assert.throws(() => assertStandardSecurity(unnamed, "2025-11-01", "unnamed"), /unnamed at 2025-11-01 names the Standard type/);
 });
 
 test("the Azure Monitor Agent signs in as the workers' identity, and their data collection rule feeds the main workspace", () => {
