@@ -659,12 +659,17 @@ Every new drive is a copy of the golden snapshot, so its content reaches every
 session tree:
 
 - **The first snapshot.** On a VM built from the worker image, attach an empty
-  disk at LUN 0, run `Initialize-WinWorkerDisk.ps1`, then
+  disk at LUN 0, run `Initialize-WinWorkerDisk.ps1`, which leaves `Q:\`
+  readable by SYSTEM, Administrators and the worker alone, then
   `Seed-WorkerReposDisk.ps1` with the snapshot parameters. It clones the seed
-  manifest's repositories with full history, fills the package caches, grants
-  the worker Modify only on the manifest's folders, writes each repository's
-  first clean-detach record, and makes the worker's service account the owner
-  of each repository, because Git refuses a repository another account owns.
+  manifest's repositories with full history, with all their submodules, none,
+  or only the listed ones, each at the commit its repository pins or at the tip
+  of its own branch, fills the package caches, creates the manifest's folders
+  and grants the worker Modify only on its Modify folders, writes each
+  repository's first clean-detach record, and makes the worker's service
+  account the owner of each repository, because Git refuses a repository
+  another account owns. Last, it empties the folders the manifest names for
+  that, such as a package manager's HTTP cache, so no drive inherits them.
   It must run on a VM built from the image: `icacls` resolves the worker
   service's SID only where that service is installed. It waits until Azure
   reports the snapshot `Succeeded` with its background copy complete, and
@@ -675,7 +680,8 @@ session tree:
   attaches a copy of the current snapshot, and runs
   `Seed-WorkerReposDisk.ps1 -Refresh` and then `-Verify` there as Managed Run
   Commands. Only when every check passes (refs, `git fsck --connectivity-only`,
-  no Git hooks, current clean-detach records, owners and folder permissions)
+  no Git hooks, current clean-detach records, owners, folder permissions and,
+  when the manifest empties folders before the snapshot, those folders empty)
   does it take an incremental snapshot and record it as the golden snapshot.
   It keeps the snapshot it replaced, which `GET /v1/admin/status` shows as
   `previousSnapshot`, until the next refresh, which deletes it if the
@@ -1123,7 +1129,10 @@ the `stamp` profile, and the security logs go to the perimeter's workspace. See
    takes no Trusted launch VM's image for this definition, and `az vm create`
    makes a Gen2 VM Trusted launch by default. Run `Build-WorkerOsImage.ps1`
    there with your toolchain manifest, worker settings file and seed manifest,
-   and `-Generalize`, which runs Sysprep and shuts the VM down. Deallocate and
+   and `-Generalize`, which runs Sysprep and shuts the VM down. A toolchain
+   that needs restarts (Windows features, Visual Studio) makes it exit with
+   code 3010 at each: restart the VM and run the same command again until it
+   finishes. Deallocate and
    generalize the VM, create the image version (`Major.Minor.Patch`) from it in
    `<alphaprefix>gallery/pilotswarm-win-worker` with
    `az sig image-version create`, and delete the build resource group. See
@@ -1695,14 +1704,26 @@ lets a process read the memory and environment of other processes of the same
 account. That is why a VM serves one owner. Within that, the image keeps
 sessions from planting what later sessions would load:
 
-- **Locked-down folders.** `C:\`, `Q:\` and `Q:\Repos` grant ordinary users Read
-  and Execute only, and the image audits every top-level folder on `C:\`.
+- **Locked-down folders.** `C:\` grants ordinary users Read and Execute only,
+  and the image audits every top-level folder on `C:\`. On the drive, `Q:\`
+  and `Q:\Repos` give access to SYSTEM, Administrators and the worker alone,
+  the worker only reading, so no other account can read what a build leaves
+  there; the worker can change only the seed manifest's Modify folders.
   `C:\pilotswarm` has inheritance turned off; the worker can change only its
   CLI home, around read-only placeholders, its logs, `temp` and its Azure CLI
   folder. The service's working folder is read-only, so no `.mcp.json`,
   `AGENTS.md` or skill can be planted there. The
   [Windows image README](../../../deploy/providers/azure/windows/README.md#cpilotswarm)
   lists every folder.
+- **No credential in the environment.** Package feeds, the Azure CLI and,
+  through the deployment's Git configuration, Git sign in with the VM's managed
+  identity, so no job needs a token in its environment. The launcher removes
+  every credential variable from the environment the service starts it with,
+  and `worker.env`, the worker settings file and `userData` refuse them, so a
+  build tool that writes its whole environment to a file writes no secret. Git
+  never prompts: `GIT_TERMINAL_PROMPT=0`, `GCM_INTERACTIVE=never` and no askpass
+  program reach every agent shell and build, so a build that calls `git`
+  without a credential fails at once instead of hanging.
 - **The Copilot CLI's home.** Read-only, delete-denied placeholders, which
   only administrators can change, stand where the CLI reads instructions, MCP
   servers, language servers, tool approvals, model providers, MCP credentials,
@@ -1979,10 +2000,11 @@ each.
 `WIN_WORKER_EXTRA_ENV` refuses, at deploy time and again on the VM, a malformed
 or repeated pair, a value over 4,096 characters, a name that `worker.env` or
 `userData` already sets, a process or profile variable such as `PATH` or
-`TEMP`, `GITHUB_TOKEN`, `GH_TOKEN`, and any name starting with `NODE_`,
+`TEMP`, a credential variable such as `GITHUB_TOKEN`, `GH_TOKEN` or a package
+feed's token, and any name starting with `NODE_`,
 `COPILOT_`, `PILOTSWARM_`, `PS_`, `WIN_WORKER_`, `AZURE_`, `GIT_`, `NUGET_`,
-`GCM_` or `ARTIFACTS_CREDENTIALPROVIDER_`, all compared without case. Any process
-on a VM can read these values.
+`GCM_`, `ARTIFACTS_CREDENTIALPROVIDER_` or `NuGetPackageSourceCredentials_`, all
+compared without case. Any process on a VM can read these values.
 
 ### Portal settings
 
@@ -2023,7 +2045,7 @@ settings file adds:
 | `PILOTSWARM_REQUIRE_FINE_GRAINED_GH_PAT` | unset (off) | `1` |
 | `PILOTSWARM_SESSION_MESSAGE_SCOPE` | `fleet` | `owner` |
 | `PILOTSWARM_REDACT_SECRET_PREFIXES` | unset | The prefixes of your own credentials, such as the per-work credential's |
-| `PILOTSWARM_CLI_ENV_ALLOWLIST` | unset: the image's three pins alone (below) | The build tools' variables, for example `NUGET_*,ARTIFACTS_CREDENTIALPROVIDER_*,GCM_*,GIT_*,DOTNET_*,MSBUILD*` |
+| `PILOTSWARM_CLI_ENV_ALLOWLIST` | unset: the image's seven pins alone (below) | The build tools' variables, for example `NUGET_*,ARTIFACTS_CREDENTIALPROVIDER_*,GCM_*,GIT_*,DOTNET_*,MSBUILD*` |
 | `PILOTSWARM_CLI_ABORT_TIMEOUT_MS` | unset (no limit) | For example `30000` |
 | `PILOTSWARM_EVENT_RETENTION_MINUTES` | unset | For example `43200` (30 days) |
 | `PILOTSWARM_WORKER_CONCURRENCY`, `PILOTSWARM_ORCHESTRATION_CONCURRENCY` | `2`, `2` | What one VM sustains, for example `6` and `4` |
@@ -2033,15 +2055,19 @@ settings file adds:
 | `PLUGIN_DIRS`, `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` | auto-detected, unset | The plugins and instructions the release installs under `C:\pilotswarm` |
 
 A settings file may not set the image's own values, the `userData` names,
-`PILOTSWARM_WORKER_OWNER_TAG`, `PS_LAUNCH_ID`, `GITHUB_TOKEN`, `GH_TOKEN` or
-`COPILOT_GITHUB_TOKEN`, and holds no secret. It is part of the image, so a
+`PILOTSWARM_WORKER_OWNER_TAG`, `PS_LAUNCH_ID` or any credential variable (such
+as `GITHUB_TOKEN`, `GH_TOKEN`, `COPILOT_GITHUB_TOKEN` or a package feed's token;
+the [Windows image README](../../../deploy/providers/azure/windows/README.md#workerenv)
+lists them), and holds no secret. It is part of the image, so a
 change needs a new image version.
 
 `worker.env`'s `PILOTSWARM_CLI_ENV_ALLOWLIST` always passes the image's
-`GIT_CONFIG_GLOBAL`, `AZURE_CONFIG_DIR` and `AZURE_EXTENSION_*` to agents'
+`GIT_CONFIG_GLOBAL`, `GIT_TERMINAL_PROMPT`, `GIT_ASKPASS`, `GCM_INTERACTIVE`,
+`SSH_ASKPASS`, `AZURE_CONFIG_DIR` and `AZURE_EXTENSION_*` to agents'
 tools: with `PILOTSWARM_SCRUB_CLI_ENV=1` a CLI gets only its baseline and that
 list, and without them `git` and `az` in an agent's shell would use the
-service profile's own, writable configuration. The build keeps the settings
+service profile's own, writable configuration, and a build that calls `git`
+could wait on a credential prompt. The build keeps the settings
 file's entries as they are and appends each of these that none of them covers,
 by name or by a prefix (`GIT_*` covers `GIT_CONFIG_GLOBAL`). An entry that is
 neither a name nor a name prefix followed by `*`, which the SDK would refuse,
@@ -2162,7 +2188,9 @@ script's exit code doesn't become the command's.
 - **The Windows scripts.** `node --test deploy/providers/azure/windows/test/*.test.mjs`
   parses every script with PowerShell 7 when it is installed; on Windows, it
   also runs the disk script's process search, the drain and the seed's
-  `-Verify` for real, the way the controller's Run Commands call them. The
+  `-Verify` for real, the way the controller's Run Commands call them, the seed
+  of listed submodules and the drive root's access list, and an image build
+  that stops for its restarts, against fakes of the installers. The
   Windows job of PR checks runs it.
 - **The extension.** `packages/sdk/test/unit/devdrive-workspace-provider.test.mjs`
   runs take-backs, checks, shutdown releases and the Git paths against a fake

@@ -1,0 +1,69 @@
+{
+  "schemaVersion": 1,
+  "notes": "Example toolchain in steps: Git for Windows with Git LFS, Windows containers and their restart, Visual Studio Build Tools at a fixed version, the .NET 8 targeting pack, the OS disk grown to its size, and the symbolic link right for the worker.",
+  "steps": [
+    {
+      "step": "installer",
+      "name": "git",
+      "url": "https://github.com/git-for-windows/git/releases/download/v2.56.1.windows.1/Git-2.56.1-64-bit.exe",
+      "sha256": "c330c72e10b408cc39994bfefdb63542b0d93d21699325c3e0bd874af8a5a559",
+      "type": "exe",
+      "arguments": ["/VERYSILENT", "/NORESTART", "/NOCANCEL", "/SP-", "/SUPPRESSMSGBOXES"]
+    },
+    {
+      "step": "command",
+      "name": "git-lfs-filters",
+      "command": ["C:\\Program Files\\Git\\cmd\\git.exe", "lfs", "install", "--system", "--skip-repo"]
+    },
+    {
+      "step": "windowsFeatures",
+      "name": "containers",
+      "features": ["Containers"]
+    },
+    {
+      "step": "restart",
+      "name": "after-features",
+      "reason": "the Containers feature finishes at the next start"
+    },
+    {
+      "step": "visualStudio",
+      "name": "build-tools",
+      "notes": "The fixed-version bootstrapper of 17.14.45 (build 17.14.37906.3), from Visual Studio 2022's release history.",
+      "bootstrapper": {
+        "url": "https://download.visualstudio.microsoft.com/download/pr/95995f57-8355-4ff5-8d90-a7e1669fb3b3/310c13b8238876afb4e823a91112230ee2d2c5a45c431d4062af7aadedff9c4c/vs_BuildTools.exe",
+        "sha256": "310c13b8238876afb4e823a91112230ee2d2c5a45c431d4062af7aadedff9c4c"
+      },
+      "vsconfig": "{manifestDir}\\build-tools.vsconfig",
+      "version": "17.14.45"
+    },
+    {
+      "step": "package",
+      "name": "netcore-app-ref-8",
+      "notes": "The .NET 8 targeting pack, for projects that target net8.0 with a newer SDK and no network at build time.",
+      "url": "https://www.nuget.org/api/v2/package/Microsoft.NETCore.App.Ref/8.0.27",
+      "sha512": "08e20338b23e8910f853a15e435015743ec21314970597dc6be10cd029f8e82716b0b7608dca60329c9f1d4aa8b829045e459b5ffafbc95c3c3cdb848fd2dbf0",
+      "format": "nupkg",
+      "destination": "C:\\Program Files\\dotnet\\packs\\Microsoft.NETCore.App.Ref\\8.0.27"
+    },
+    {
+      "step": "extendPartition",
+      "name": "os-disk",
+      "driveLetter": "C"
+    }
+  ],
+  "mcpServers": [
+    {
+      "name": "filesystem",
+      "package": "@modelcontextprotocol/server-filesystem",
+      "version": "2026.8.31"
+    }
+  ],
+  "workerAccount": {
+    "userRights": ["SeCreateSymbolicLinkPrivilege"],
+    "notes": "Builds that create symbolic links (mklink /d) need it; directory junctions need no right."
+  },
+  "defenderExclusions": {
+    "paths": ["Q:\\Repos", "Q:\\.cache"],
+    "processes": []
+  }
+}

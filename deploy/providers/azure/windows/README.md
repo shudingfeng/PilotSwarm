@@ -33,7 +33,7 @@ The pieces it works with live elsewhere:
 | `Drain-And-StopWorker.ps1` | Drains the worker and stops its service (a controller Run Command) |
 | `Clear-StaleWorkspaces.ps1` | Lists, and with `-Apply` empties, the image's scratch folder |
 | `PilotSwarm.WinWorker.psm1` | Helpers the scripts share |
-| `examples/` | A seed manifest, a toolchain manifest and a worker settings file |
+| `examples/` | A seed manifest, two toolchain manifests (installers and commands; steps, with the `.vsconfig` they name) and a worker settings file |
 | `test/` | Tests (below) |
 
 The two services and `controller-token.mjs` import only Node.js built-in
@@ -68,7 +68,7 @@ from the service name, so it is the same on every machine:
 | `disk-controller-ca.crt` | The controller's trusted CAs, from userData | Read-Only |
 | `mcp\<name>\` | MCP servers installed by the image build | Read-Only |
 | `scripts\` | The scripts the disk controller runs as Run Commands, and their helper module | Read-Only |
-| `services\`, `attacher-logs\`, `empty-hooks\`, `toolchain\` | WinSW and its definitions, the attacher's logs, the extension's empty Git hooks folder, the image build's downloads | Read-Only |
+| `services\`, `attacher-logs\`, `empty-hooks\`, `toolchain\` | WinSW and its definitions, the attacher's logs, the extension's empty Git hooks folder, the image build's downloads (and, while a build that stopped for a restart is unfinished, its state) | Read-Only |
 
 In `copilot\`, the image creates Read-Only, Deny-Delete placeholders for what
 the Copilot CLI reads from its home: the files `copilot-instructions.md`,
@@ -128,8 +128,14 @@ Outside `C:\pilotswarm`, the image build also:
 - turns on long paths, and turns off the Remote Desktop, Windows Remote
   Management and File and Printer Sharing firewall rule groups.
 
-`Initialize-WinWorkerDisk.ps1` gives `Q:\` and `Q:\Repos` the same root
-treatment as `C:\`; the seed grants Modify only on its manifest's folders.
+`Initialize-WinWorkerDisk.ps1` locks `Q:\` down further than `C:\`: its
+inheritance is off, and only SYSTEM and Administrators (Full Control) and the
+worker (Read+Execute) have access, inherited by everything below, so neither
+`Everyone`, `Users`, `Authenticated Users` nor `CREATOR OWNER` can read the
+drive. `Q:\Repos` keeps only what it inherits. The seed grants the worker
+Modify only on its manifest's Modify folders. A drive formatted before gets the
+same list the next time `-MountExisting` mounts it, which the seed's refresh
+does, so the next golden snapshot carries it.
 
 ### The two services
 
@@ -155,8 +161,9 @@ is built, as `NAME=VALUE` lines, values taken literally:
    attacher's URL and token file, the controller token module, the CA path, the
    model catalog path, `PS_EMPTY_HOOKS_DIR`, `COPILOT_HOME`, `SESSION_STATE_DIR`,
    `COPILOT_PKG_CACHE_HOME`, `TEMP`, `TMP`, `GIT_CONFIG_GLOBAL`,
-   `AZURE_CONFIG_DIR`, the four `AZURE_EXTENSION_*` settings,
-   `PILOTSWARM_DISABLE_CHILD_WORKSPACE_INHERITANCE=1`,
+   `GIT_TERMINAL_PROMPT=0`, `GIT_ASKPASS` (empty), `GCM_INTERACTIVE=never`,
+   `SSH_ASKPASS` (empty), `AZURE_CONFIG_DIR`, the four `AZURE_EXTENSION_*`
+   settings, `PILOTSWARM_DISABLE_CHILD_WORKSPACE_INHERITANCE=1`,
    `PILOTSWARM_AGENT_PACKAGES=0`, `PILOTSWARM_CLI_DISABLE_HOOKS=1` and
    `PILOTSWARM_SCRUB_CLI_ENV=1`.
 2. **Defaults** the settings file may change: `PILOTSWARM_EXTENSION_MODULES` (it
@@ -170,13 +177,40 @@ is built, as `NAME=VALUE` lines, values taken literally:
 3. **The deployment's worker settings file** (below).
 
 `PILOTSWARM_CLI_ENV_ALLOWLIST` always passes the image's `GIT_CONFIG_GLOBAL`,
+`GIT_TERMINAL_PROMPT`, `GIT_ASKPASS`, `GCM_INTERACTIVE`, `SSH_ASKPASS`,
 `AZURE_CONFIG_DIR` and `AZURE_EXTENSION_*` to agents' tools: the SDK gives a CLI
 only its baseline and that list, and without them `git` and `az` in an agent's
 shell would use the service profile's own, writable configuration. The build
 keeps the deployment's entries as they are and appends each of these that none
 of them covers, by name or by a prefix (`GIT_*` covers `GIT_CONFIG_GLOBAL`);
-without the setting, the list is just these three. An entry the SDK would refuse
+without the setting, the list is just these seven. An entry the SDK would refuse
 (anything but a name, or a name prefix followed by `*`) fails the build.
+
+The four Git settings are the ones the Dev Drive extension gives its own Git
+calls: no terminal prompt, no interactive Git Credential Manager and no askpass
+program. Every agent shell, and every build it runs, gets them too, so a build
+that calls `git` while it compiles fails at once when Git has no credential
+instead of waiting on a prompt that nobody answers.
+
+No credential reaches the worker or its jobs through the environment. Package
+feeds (the NuGet credential provider, with `userData`'s feed endpoints), the
+Azure CLI and, through `-GitConfigFile`, Git sign in with the VM's managed
+identity, so the launcher removes every credential variable from the
+environment the service starts it with (it logs their names, never a value),
+and `worker.env`, the
+worker settings file and the extra `userData` pairs refuse them: GitHub tokens
+(`GITHUB_TOKEN`, `GH_TOKEN`, `GH_ENTERPRISE_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`,
+`COPILOT_GITHUB_TOKEN`), package feed tokens
+(`ARTIFACTS_CREDENTIALPROVIDER_ACCESSTOKEN`,
+`ARTIFACTS_CREDENTIALPROVIDER_EXTERNAL_FEED_ENDPOINTS`, `VSS_NUGET_ACCESSTOKEN`,
+`VSS_NUGET_EXTERNAL_FEED_ENDPOINTS`, `NUGET_AUTH_TOKEN`,
+`NuGetPackageSourceCredentials_<source>`, `NPM_TOKEN`, `NODE_AUTH_TOKEN`),
+`SYSTEM_ACCESSTOKEN`, `AZURE_DEVOPS_EXT_PAT`, `AZURE_CLIENT_SECRET`,
+`AZURE_CLIENT_CERTIFICATE_PASSWORD`, and Git configuration from the environment
+(`GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_<n>` and
+`GIT_CONFIG_VALUE_<n>`), which can add an `Authorization` header to every
+request; Git's settings belong in `-GitConfigFile`. `launcher.mjs` lists them
+(`CREDENTIAL_ENV_NAMES`).
 
 ### `userData`
 
@@ -214,7 +248,7 @@ object:
 |---|---|
 | `version` | `1` |
 | `env` | Exactly the eleven names above, each a non-empty string. Database URLs are `postgres://` or `postgresql://` without a password; the storage and controller URLs are plain `https://`; the client ID and object ID are GUIDs; the feed endpoints are `{"endpointCredentials":[...]}` (an empty list for none), each with an `endpoint` and no `password` (the deploy names the workers' identity in each entry's `clientId`, the field the credential provider reads); the configuration version is 1 to 128 letters, digits and `. _ : -`; `PILOTSWARM_WORKER_OWNER_ONLY` is exactly `"0"` or `"1"`. The deploy always writes `"1"`, and the launcher refuses `"0"` with external personal secrets (below) |
-| `extraEnv` | Optional extra `NAME: value` pairs for the deployment's own tools. A name may not be one that `worker.env` or `env` sets (compared without case), one the launcher sets (`PILOTSWARM_WORKER_OWNER_TAG`, `PS_LAUNCH_ID`), a process or profile variable (`PATH`, `TEMP`, `APPDATA` and the like), `GITHUB_TOKEN` or `GH_TOKEN`, or start with `NODE_`, `COPILOT_`, `PILOTSWARM_`, `PS_` or `WIN_WORKER_` (the platform's own settings), or with `AZURE_`, `GIT_`, `NUGET_`, `GCM_` or `ARTIFACTS_CREDENTIALPROVIDER_`, which would change every session's Azure CLI, Git, NuGet or credential flow (`GIT_CONFIG_PARAMETERS` injects Git configuration; `AZURE_EXTENSION_*` turns dynamic CLI extensions back on) |
+| `extraEnv` | Optional extra `NAME: value` pairs for the deployment's own tools. A name may not be one that `worker.env` or `env` sets (compared without case), one the launcher sets (`PILOTSWARM_WORKER_OWNER_TAG`, `PS_LAUNCH_ID`), a process or profile variable (`PATH`, `TEMP`, `APPDATA` and the like), a credential variable (above), or start with `NODE_`, `COPILOT_`, `PILOTSWARM_`, `PS_` or `WIN_WORKER_` (the platform's own settings), or with `AZURE_`, `GIT_`, `NUGET_`, `GCM_` or `ARTIFACTS_CREDENTIALPROVIDER_`, which would change every session's Azure CLI, Git, NuGet or credential flow (`GIT_CONFIG_PARAMETERS` injects Git configuration; `AZURE_EXTENSION_*` turns dynamic CLI extensions back on) |
 | `controllerCaCert` | The controller's trusted CA certificates as one PEM bundle: its CA, or during a CA rotation two CAs, the current one first (see "Rotating the CA" in [the disk controller's README](../disk-controller/README.md#rotating-the-ca)). Each certificate must be a CA, and nothing but whitespace may come before, between or after them |
 
 Anything missing, unknown or invalid stops the launcher (exit code 1) instead of
@@ -225,9 +259,11 @@ another one.
 ### What the launcher does at each start
 
 1. Refuses any Node.js but `24.22.1` (the version `deploy/Dockerfile.worker`
-   pins).
+   pins), and removes every credential variable from the service's own
+   environment (above, "`worker.env`"), logging their names.
 2. Reads `worker.env` and userData and builds the worker's environment. It
-   refuses `PILOTSWARM_PERSONAL_SECRETS=external`, from `worker.env` or the
+   refuses a credential variable in either, and
+   `PILOTSWARM_PERSONAL_SECRETS=external`, from `worker.env` or the
    service's own environment, unless userData's
    `PILOTSWARM_WORKER_OWNER_ONLY` is `"1"`: a worker that isn't owner-only
    runs other users' work, so it must not hold an owner's token.
@@ -363,7 +399,7 @@ The disk controller runs these as Managed Run Commands from
 |---|---|
 | `& 'C:\pilotswarm\scripts\Drain-And-StopWorker.ps1'` | Stops `PilotSwarmWorker`, which drains; waits up to 115 minutes. A worker that crashes while draining is restarted by its failure action and stopped again, until the service stays stopped. Exits 0 when stopped or not installed |
 | `Start-Service -Name PilotSwarmWorker` | After an upgrade |
-| `& 'C:\pilotswarm\scripts\Seed-WorkerReposDisk.ps1' -Refresh` | On a refresh VM: mounts the drive, fetches, updates the caches, and writes grants, owners and clean-detach records again |
+| `& 'C:\pilotswarm\scripts\Seed-WorkerReposDisk.ps1' -Refresh` | On a refresh VM: mounts the drive, fetches, updates the caches, writes grants, owners and clean-detach records again, and empties the `beforeSnapshot` folders |
 | `& 'C:\pilotswarm\scripts\Seed-WorkerReposDisk.ps1' -Verify` | Prints, as its last line, `{"verified": true\|false, "manifestSha256": "<64 hex>", "checks": {...}}` and exits 0 only when verified |
 
 Each command is one line of the Run Command's own script, so the scripts never
@@ -376,12 +412,16 @@ PowerShell runs it.
 `C:\pilotswarm\seed-manifest.json` (`-ManifestPath` changes it). `-Verify`'s
 checks are `refs` (each repository on its branch at the fetched commit, and the
 remote refs the seed recorded in `<drive>\.pilotswarm\seed-state.json`
-unchanged), `fsck` (`git fsck --connectivity-only` in each repository and
-submodule), `hooks` (only Git's `*.sample` files), `cleanRecord` (each
-`pilotswarm-clean-tips` current), `owner` (each repository's folder and `.git`,
-and each submodule's folder, `.git` file and Git directory, owned by the worker's
-SID) and `acl` (the Modify folders granted, `Q:\` and the repositories' root not
-writable by Users, Authenticated Users, CREATOR OWNER or Everyone). Each is
+unchanged; each listed submodule checked out, on its own branch the same way,
+or else at the commit its repository pins), `fsck` (`git fsck
+--connectivity-only` in each repository and submodule), `hooks` (only Git's
+`*.sample` files), `cleanRecord` (each `pilotswarm-clean-tips` current), `owner`
+(each repository's folder and `.git`, and each submodule's folder, `.git` file
+and Git directory, owned by the worker's SID), `acl` (the Modify folders
+granted, the Read folders not writable by the worker or anyone else, and `Q:\`
+and the repositories' root giving access to SYSTEM, Administrators and the
+worker alone, the worker only reading) and, for a manifest with
+`beforeSnapshot` steps, `emptied` (each of their folders empty). Each is
 `true`, or a list of up to five things it found wrong.
 
 ## Building the image
@@ -397,10 +437,31 @@ stamp's region), as an administrator, from a copy of this folder:
 
 It installs Node.js 24.22.1 from its MSI after checking the MSI's SHA-256
 against the pinned value and the one Node.js publishes, installs the toolchain,
-WinSW and both services, applies everything in "On a worker VM", writes
+WinSW and both services, gives the worker's account the toolchain manifest's
+`workerAccount` rights and groups, applies everything in "On a worker VM", writes
 `C:\pilotswarm\image-versions.json` and, with `-Generalize`, runs Sysprep, which
 shuts the VM down for capture as the next gallery image version. The image
 holds no secret, stamp value or identity.
+
+The build runs in one administrator session, without an image builder, so a
+toolchain that needs a restart stops it. With a toolchain manifest in `steps`
+(below), it stops at each `restart` step, and once more after the steps when a
+step asked for a restart (exit code 3010 from an `msi`, from Visual Studio, or
+from an installer or command whose `successExitCodes` list it, or a Windows
+feature that needs one) or Windows still has servicing to finish, so the
+services and Sysprep always follow a restart. It
+then exits with code 3010: restart the VM and run the same command again, as
+often as it asks. It keeps what it finished in
+`C:\pilotswarm\toolchain\image-build-state.json` and goes on from there,
+skipping each step whose definition has not changed since; after a failure, the
+same command goes on the same way. A finished build deletes the file.
+
+```powershell
+.\Build-WorkerOsImage.ps1 -ToolchainManifest .\examples\toolchain-manifest.steps.json `
+  -WorkerSettingsFile .\examples\worker-settings.env.example `
+  -SeedManifest .\examples\seed-manifest.json -Generalize
+if ($LASTEXITCODE -eq 3010) { Restart-Computer }  # then run the same command again
+```
 
 ### Capturing it into the gallery
 
@@ -475,6 +536,61 @@ exact version, so no session downloads one with `npx` at run time. Names are
 unique; unknown fields are refused. The worker's own Node.js is not part of the
 toolchain.
 
+#### Steps
+
+A toolchain that needs Windows features, restarts or Visual Studio lists
+`steps` instead of `installers` and `commands` (a manifest has one or the
+other), run in order. Each step has a `step` (its kind), a unique `name` and
+optional `notes`:
+
+```json
+{
+  "schemaVersion": 1,
+  "steps": [
+    { "step": "installer", "name": "git", "url": "https://...exe", "sha256": "<64 lowercase hex>", "type": "exe", "arguments": ["/VERYSILENT"] },
+    { "step": "windowsFeatures", "name": "containers", "features": ["Containers"], "includeManagementTools": false },
+    { "step": "restart", "name": "after-features", "reason": "the features finish at the next start" },
+    { "step": "visualStudio", "name": "build-tools", "bootstrapper": { "url": "https://download.visualstudio.microsoft.com/.../vs_BuildTools.exe", "sha256": "<64 lowercase hex>" },
+      "vsconfig": "{manifestDir}\\build-tools.vsconfig", "version": "17.14.45" },
+    { "step": "package", "name": "netcore-ref-8", "url": "https://...nupkg", "sha512": "<128 lowercase hex>", "format": "nupkg",
+      "destination": "C:\\Program Files\\dotnet\\packs\\Microsoft.NETCore.App.Ref\\8.0.27" },
+    { "step": "extendPartition", "name": "os-disk", "driveLetter": "C" },
+    { "step": "dockerService", "name": "docker", "dockerd": "C:\\Program Files\\Docker\\dockerd.exe", "pipeGroup": "docker-users" },
+    { "step": "command", "name": "git-lfs", "command": ["C:\\Program Files\\Git\\cmd\\git.exe", "lfs", "install", "--system"] }
+  ],
+  "workerAccount": { "userRights": ["SeCreateSymbolicLinkPrivilege"], "groups": ["docker-users"], "notes": "why the worker needs them" }
+}
+```
+
+| Step | Fields | What it does |
+|---|---|---|
+| `installer` | Those of an installer above | Installs it the same way |
+| `command` | `command`, optional `successExitCodes` | Runs it the same way as a command above |
+| `windowsFeatures` | `features` (names), optional `includeManagementTools` | `Install-WindowsFeature`; a feature that needs a restart gets one before the services |
+| `restart` | optional `reason` | Stops the build until the VM has restarted (above, "Building the image") |
+| `visualStudio` | `bootstrapper` (`{ url, sha256 }`) or `layout` (`{ path, bootstrapper, sha256 }`), `vsconfig`, `version`, optional `arguments` and `successExitCodes` (0 and 3010 by default) | Installs Visual Studio at exactly `version`, its display version (`17.14.45`) or its four-part build number, with the components of the `.vsconfig` file: `--quiet --wait --norestart --nocache --config <vsconfig>`, and `--noWeb` from a layout. The bootstrapper must be the fixed-version one of that release (from Visual Studio's release history), checked by its SHA-256; an `aka.ms` link, which installs whatever version is current, is refused. A layout is an offline copy that `--layout` made on a share or a disk, and its bootstrapper is checked the same way. vswhere must then list that version, or the step fails |
+| `extendPartition` | `driveLetter` | Grows the partition to all the space after it on its disk, for an OS disk larger than the image's |
+| `package` | `url`, `sha512` or `sha256`, `format` (`nupkg` or `zip`), `destination` | Downloads the file, checks its hash and extracts it into `destination`. A NuGet package loses its packaging parts (`[Content_Types].xml`, `_rels/`, `package/`) and its entry names are unescaped, as NuGet extracts them, so a targeting pack lands in the layout the .NET SDK reads. An entry that would leave `destination` stops the build |
+| `dockerService` | `dockerd` (the path of `dockerd.exe`, which an earlier step installs), `pipeGroup`, optional `dataRoot` | Registers `dockerd.exe` as the `docker` service, whose named pipe the members of `pipeGroup` may use (the group is created when missing); the engine starts with the VM |
+
+`workerAccount` gives the worker's own account (`NT SERVICE\PilotSwarmWorker`,
+by its SID) user rights and local groups once its service exists, with or
+without steps: `userRights` through `secedit`, added to the accounts that
+already hold each right, and `groups` through `net localgroup`. A right that
+would make the worker as strong as an administrator (such as
+`SeDebugPrivilege`, `SeImpersonatePrivilege`, `SeBackupPrivilege` or
+`SeTakeOwnershipPrivilege`), or a built-in group such as Administrators, is
+refused. The service gets them with its token at its first start on a VM. A
+right such as `SeCreateSymbolicLinkPrivilege` lets the worker plant a symbolic
+link that a more privileged process might follow, so grant one only for a build
+that needs it. `image-versions.json` records each step and the account's
+rights and groups.
+
+`examples/toolchain-manifest.steps.json` is a complete one: Git with Git LFS,
+the Containers feature and its restart, Visual Studio Build Tools 17.14.45
+(`examples/build-tools.vsconfig`), the .NET 8.0.27 targeting pack, the OS disk
+grown to its size, and the symbolic link right.
+
 ### The worker settings file
 
 `NAME=VALUE` lines (see `examples/worker-settings.env.example`), the deployment's choices
@@ -482,8 +598,8 @@ for every VM: Git identity and the WIP branch prefix, capacity, package cache
 locations, `PILOTSWARM_CLI_ENV_ALLOWLIST`, `PLUGIN_DIRS`,
 `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`, `PILOTSWARM_REDACT_SECRET_PREFIXES` and any
 other worker setting. It may not set the image's own values, the userData names,
-`PILOTSWARM_WORKER_OWNER_TAG`, `PS_LAUNCH_ID`, `GITHUB_TOKEN`, `GH_TOKEN` or
-`COPILOT_GITHUB_TOKEN`; the build fails if it does. It holds no secret.
+`PILOTSWARM_WORKER_OWNER_TAG`, `PS_LAUNCH_ID` or any credential variable
+(above, "`worker.env`"); the build fails if it does. It holds no secret.
 
 `-GitConfigFile` installs the workers' global Git configuration
 (`GIT_CONFIG_GLOBAL`, Read-Only), for example a credential helper that signs in
@@ -505,10 +621,21 @@ with the VM's managed identity; without it, a minimal one is written.
 ```json
 {
   "schemaVersion": 1,
+  "notes": "free text",
   "reposRoot": "Q:\\Repos",
-  "repositories": [{ "name": "PilotSwarm", "url": "https://github.com/microsoft/PilotSwarm.git", "branch": "main", "submodules": true, "lfs": false }],
-  "modifyFolders": ["Q:\\Repos\\PilotSwarm", "Q:\\.cache\\npm", "Q:\\temp"],
+  "repositories": [
+    { "name": "PilotSwarm", "url": "https://github.com/microsoft/PilotSwarm.git", "branch": "main", "submodules": true, "lfs": false },
+    { "name": "app", "url": "https://git.example.com/app.git", "branch": "main", "lfs": true,
+      "submodules": [{ "path": "libs/core" }, { "path": "tools/build", "branch": "release/2", "notes": "its tip, not the pinned commit" }] }
+  ],
+  "modifyFolders": ["Q:\\Repos\\PilotSwarm", "Q:\\Repos\\app"],
+  "folders": [
+    { "path": "Q:\\.cache\\npm", "access": "modify" },
+    { "path": "Q:\\.cache\\nuget-http", "access": "modify", "notes": "NUGET_HTTP_CACHE_PATH" },
+    { "path": "Q:\\tools", "access": "read" }
+  ],
   "packageCaches": [{ "name": "npm", "workingDirectory": "Q:\\Repos\\PilotSwarm", "command": ["npm.cmd", "ci", "--ignore-scripts"], "env": { "npm_config_cache": "Q:\\.cache\\npm" } }],
+  "beforeSnapshot": [{ "emptyFolder": "Q:\\.cache\\nuget-http", "reason": "HTTP responses that only the restore needed; every drive refills it" }],
   "env": { "NAME": "value for every command" }
 }
 ```
@@ -516,13 +643,24 @@ with the VM's managed identity; without it, a minimal one is written.
 | Field | Rule |
 |---|---|
 | `reposRoot` | Where repositories are cloned, `<reposRoot>\<name>`; default `Q:\Repos`. It stays Read-Only to the worker |
-| `repositories` | `name` (letters, digits, `_ . -`), `url` (`https://` or `file://`, no credentials), `branch`, `submodules` (default `true`), `lfs` (`false`, `true` for the checked-out files, or `"all"`) |
+| `repositories` | `name` (letters, digits, `_ . -`), `url` (`https://` or `file://`, no credentials), `branch`, `submodules`, `lfs` (`false`, `true` for the checked-out files, or `"all"`) |
+| `submodules` | `true` (the default): every submodule, recursively, at the commit the repository pins. `false` or `[]`: none. A list of `{ path, branch, notes }`: only these, each by its path in the repository; without a `branch` at the pinned commit, with one at the tip of that branch of the submodule's own remote |
 | `modifyFolders` | Absolute folders on the drive that the worker may change; each repository's folder must be one of them or inside one |
-| `packageCaches` | Commands that fill caches: `command` (program and arguments, no shell), `workingDirectory`, optional `env` |
+| `folders` | Folders the seed creates: `path` (absolute, on the drive), `access` (`modify`: the worker may change it, as in `modifyFolders`; `read`: it inherits the drive's read access, and no `read` folder may be inside a `modify` one) and optional `notes`. A folder is listed once, here or in `modifyFolders` |
+| `packageCaches` | Commands that fill caches: `command` (program and arguments, no shell), `workingDirectory`, optional `env` and `notes` |
+| `beforeSnapshot` | What the seed and its refresh do last, so that no copy of the drive carries it: `emptyFolder`, a folder that `folders` or `modifyFolders` lists, which may be neither a repository's folder nor inside or around one, a `reason`, and optional `notes`. The folder and its grant stay; whatever is in it goes, never through a link |
 | `env` | Optional settings for every command, for example a credential helper's |
+| `notes` | Optional free text, at the top level and in each repository, submodule, folder, package cache and `beforeSnapshot` step; the seed ignores it |
 
-Repositories are cloned with full history. The seed's own Git calls run without
-hooks and with `-c safe.directory=*`. The clean-detach record,
+Repositories are cloned with full history, and each listed submodule is
+initialised alone (`git submodule update --init -- <path>`); a path that is not
+a submodule stops the seed. A submodule on its own branch is fetched and
+checked out at that branch's tip, and its refs are recorded with the
+repository's. The seed's own Git calls run without
+hooks and with `-c safe.directory=*`, and every Git call and package cache
+command runs with `GIT_TERMINAL_PROMPT=0`, `GCM_INTERACTIVE=never` and the
+workers' Git configuration (`GIT_CONFIG_GLOBAL`), so no credential prompt can
+hold the seed. The clean-detach record,
 `pilotswarm-clean-tips` in each repository's and submodule's Git directory,
 holds the object IDs of `HEAD` and then of every ref (`git for-each-ref`), each
 once, one per line, LF line endings, UTF-8 without a byte order mark: exactly
@@ -534,7 +672,8 @@ Git directory, because Git refuses a repository that another account owns
 `sc.exe showsid PilotSwarmWorker` first, and that Windows knows the account:
 `icacls` looks a `*SID` up, and `NT SERVICE\PilotSwarmWorker` exists only where
 its service is installed, so the seed and its refresh run on VMs built from the
-image.
+image. Last, it empties the `beforeSnapshot` folders and records what it
+fetched.
 
 ## Packing a release
 
@@ -650,7 +789,13 @@ on a real repository with a submodule. On Windows, every script is also parsed
 by Windows PowerShell 5.1, the clean-detach records are written by it too, and
 these run for real against temporary folders: the seed's `-Verify` and the
 drain, each called the way the controller's Run Command calls it (one line of a
-script that Windows PowerShell 5.1 runs with `-File`); the disk script's process
+script that Windows PowerShell 5.1 runs with `-File`); the seed of listed
+submodules, one at its own branch, with its folders and `beforeSnapshot` step;
+the drive root's access list; an image build with steps that stops for its
+restarts and goes on after each, with fakes for the installers and Windows;
+each step kind against fakes of what it calls (Visual Studio's bootstrapper and
+vswhere, the partition, `secedit`, `net localgroup` and `dockerd`), and the
+extraction of a NuGet package; the disk script's process
 search, which compiles its C# only in the `TEMP` and `TMP` it is given; its
 access-list report and the attacher's check of `run\ps-temp\` (in an elevated
 shell, also under the list the image gives `C:\pilotswarm`); `tar.exe` zips;
@@ -667,6 +812,20 @@ VM:
   `C:\`, `Q:\`, `C:\pilotswarm\work`, the `copilot\` placeholders and settings
   files, `releases\`, `current\copilot-pkg` and `C:\ProgramData\GitHub`), the
   top-level folder audit, the firewall rule groups and Sysprep;
+- a toolchain in steps: the restarts across real reboots, Windows features,
+  Visual Studio from its fixed-version bootstrapper or a layout with its
+  `.vsconfig`, a NuGet targeting pack that the .NET SDK then finds, the OS
+  partition grown to a larger disk (the image's own disk only: a VM created
+  with a larger OS disk needs the same at its first start), and the docker
+  service with its pipe group, including how the strict `Q:\` access list
+  meets the engine's bind mounts;
+- the worker account's rights and groups after Sysprep and a first start: the
+  service's token holds each granted right (such as
+  `SeCreateSymbolicLinkPrivilege`) and group, and none that the manifest did
+  not grant;
+- a build that calls `git` with no credential fails at once, with
+  `GIT_TERMINAL_PROMPT=0`, `GCM_INTERACTIVE=never` and no askpass program,
+  instead of waiting on Git Credential Manager;
 - no crash dump: a crash of `node.exe` and of the Copilot CLI program as the
   worker account leaves no dump and no queued report;
 - whether the Copilot CLI program reads anything else from its home or the
@@ -693,8 +852,10 @@ VM:
   minutes;
 - the release sync against the real container, a hash mismatch failing every
   start, and `az login --identity` as the worker account;
-- the seed and its refresh on full repositories: clones, LFS, caches, owners
-  (`git status` as the worker account on a fresh copy of the snapshot, with no
-  "dubious ownership"), the snapshot, and `-Verify` as a Run Command;
+- the seed and its refresh on full repositories: clones, listed submodules on
+  their own branches, LFS, caches, owners (`git status` as the worker account
+  on a fresh copy of the snapshot, with no "dubious ownership"), the
+  `beforeSnapshot` folders empty in the snapshot, the snapshot, and `-Verify`
+  as a Run Command;
 - the packer on a Windows x64 agent (`npm ci`, the tarballs, the unpacked
   Copilot CLI program) and the upgrade against a live controller and cluster.

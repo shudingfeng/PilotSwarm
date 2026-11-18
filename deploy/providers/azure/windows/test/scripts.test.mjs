@@ -186,7 +186,7 @@ test("the seed manifest: the example is valid, also on a machine without its dri
     try {
         const base = JSON.parse(fs.readFileSync(path.join(WINDOWS_DIR, "examples", "seed-manifest.json"), "utf8"));
         const variants = {
-            outside: { ...base, modifyFolders: ["Q:\\temp"] },
+            outside: { ...base, modifyFolders: ["Q:\\elsewhere"] },
             rootModify: { ...base, modifyFolders: [...base.modifyFolders, "Q:\\Repos"] },
             credentials: { ...base, repositories: [{ ...base.repositories[0], url: "https://user:pat@example.test/repo.git" }] },
             branch: { ...base, repositories: [{ ...base.repositories[0], branch: "../main" }] },
@@ -198,18 +198,24 @@ test("the seed manifest: the example is valid, also on a machine without its dri
         const missingDrive = [..."ZYXWVUTSRPONMLKJIHGF"].find((letter) => !fs.existsSync(`${letter}:\\`));
         assert.ok(missingDrive, "this machine has a free drive letter");
         const onMissingDrive = (folder) => folder.replace(/^Q:/i, `${missingDrive}:`);
-        fs.writeFileSync(path.join(home, "elsewhere.json"), JSON.stringify({ ...base, reposRoot: onMissingDrive(base.reposRoot), modifyFolders: base.modifyFolders.map(onMissingDrive) }));
+        fs.writeFileSync(path.join(home, "elsewhere.json"), JSON.stringify({
+            ...base, reposRoot: onMissingDrive(base.reposRoot), modifyFolders: base.modifyFolders.map(onMissingDrive),
+            folders: base.folders.map((folder) => ({ ...folder, path: onMissingDrive(folder.path) })),
+            beforeSnapshot: base.beforeSnapshot.map((step) => ({ ...step, emptyFolder: onMissingDrive(step.emptyFolder) })),
+        }));
         const driver = runDriver(home, "manifest.ps1", [
             `. ${psQuote(scriptPath("Seed-WorkerReposDisk.ps1"))}`,
             `$example = Test-SeedManifest (Read-JsonFile -Path ${psQuote(path.join(WINDOWS_DIR, "examples", "seed-manifest.json"))})`,
             `$elsewhere = Test-SeedManifest (Read-JsonFile -Path ${psQuote(path.join(home, "elsewhere.json"))})`,
             "$refused = [ordered]@{}",
             `foreach ($name in @(${Object.keys(variants).map(psQuote).join(", ")})) { try { [void](Test-SeedManifest (Read-JsonFile -Path (Join-Path ${psQuote(home)} ($name + '.json')))); $refused[$name] = 'accepted' } catch { $refused[$name] = $_.Exception.Message } }`,
-            "ConvertTo-Json -Compress -Depth 5 -InputObject @{ repos = @($example.Repositories | ForEach-Object { $_.Path }); elsewhere = @($elsewhere.Repositories | ForEach-Object { $_.Path }); modify = $example.ModifyFolders; caches = @($example.PackageCaches | ForEach-Object { $_.Name }); refused = $refused }",
+            "ConvertTo-Json -Compress -Depth 5 -InputObject @{ repos = @($example.Repositories | ForEach-Object { $_.Path }); elsewhere = @($elsewhere.Repositories | ForEach-Object { $_.Path }); modify = $example.ModifyFolders; emptied = @($example.BeforeSnapshot | ForEach-Object { $_.EmptyFolder }); caches = @($example.PackageCaches | ForEach-Object { $_.Name }); refused = $refused }",
         ].join("\n"));
         assert.equal(driver.status, 0, driver.stderr + driver.stdout);
         assert.deepEqual(driver.json.repos, ["Q:\\Repos\\PilotSwarm", "Q:\\Repos\\Hello-World"]);
         assert.deepEqual(driver.json.elsewhere, [`${missingDrive}:\\Repos\\PilotSwarm`, `${missingDrive}:\\Repos\\Hello-World`]);
+        assert.deepEqual(driver.json.modify, ["Q:\\Repos\\PilotSwarm", "Q:\\Repos\\Hello-World", "Q:\\.cache\\npm", "Q:\\temp"]);
+        assert.deepEqual(driver.json.emptied, ["Q:\\temp"]);
         assert.deepEqual(driver.json.caches, ["npm"]);
         assert.match(driver.json.refused.outside, /no modify folder covers/);
         assert.match(driver.json.refused.rootModify, /reposRoot itself stays read-only/);
@@ -733,13 +739,20 @@ test("the toolchain manifest's steps and workerAccount are checked", { skip: noP
             `. ${psQuote(scriptPath("Build-WorkerOsImage.ps1"))}`,
             `$full = Test-ToolchainManifest (Read-JsonFile -Path (Join-Path ${psQuote(home)} 'full.json'))`,
             `$legacy = Test-ToolchainManifest (Read-JsonFile -Path (Join-Path ${psQuote(home)} 'legacy.json'))`,
+            `$example = Test-ToolchainManifest (Read-JsonFile -Path ${psQuote(path.join(WINDOWS_DIR, "examples", "toolchain-manifest.steps.json"))})`,
             "$refused = [ordered]@{}",
             `foreach ($name in @(${Object.keys(bad).map(psQuote).join(", ")})) { try { [void](Test-ToolchainManifest (Read-JsonFile -Path (Join-Path ${psQuote(home)} ($name + '.json')))); $refused[$name] = 'accepted' } catch { $refused[$name] = $_.Exception.Message } }`,
-            "ConvertTo-Json -Compress -Depth 5 -InputObject ([ordered]@{ steps = @($full.steps | ForEach-Object { $_.name }); legacy = @($legacy.installers | ForEach-Object { $_.name }); refused = $refused })",
+            "ConvertTo-Json -Compress -Depth 5 -InputObject ([ordered]@{ steps = @($full.steps | ForEach-Object { $_.name }); legacy = @($legacy.installers | ForEach-Object { $_.name }); example = @($example.steps | ForEach-Object { $_.step }); exampleVsconfig = @($example.steps | Where-Object { $_.step -eq 'visualStudio' } | ForEach-Object { $_.vsconfig }); refused = $refused })",
         ].join("\n"));
         assert.equal(driver.status, 0, driver.stderr + driver.stdout);
         assert.deepEqual(driver.json.steps, steps.map((step) => step.name));
         assert.deepEqual(driver.json.legacy, ["git"]);
+        // The example in steps is valid, and the .vsconfig it names ships next to it.
+        assert.deepEqual(driver.json.example, ["installer", "command", "windowsFeatures", "restart", "visualStudio", "package", "extendPartition"]);
+        for (const vsconfig of driver.json.exampleVsconfig) {
+            const file = vsconfig.replace("{manifestDir}", path.join(WINDOWS_DIR, "examples"));
+            assert.ok(Array.isArray(JSON.parse(fs.readFileSync(file, "utf8")).components), file);
+        }
         const expected = {
             mixed: /steps replaces installers and commands/,
             empty: /steps lists no step/,
