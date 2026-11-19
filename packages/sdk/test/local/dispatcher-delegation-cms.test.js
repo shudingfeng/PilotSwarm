@@ -1,14 +1,16 @@
 /**
- * Migration 0096 — each user's opt-in to the deployment's dispatcher, and its
+ * Migration 9001 — each user's opt-in to the deployment's dispatcher, and its
  * two stored procedures. Database only: no workers, no model. It was numbered
  * 0090 until upstream's 0090 to 0094 took those numbers, then 0095 until
- * upstream's 0095 took that one; it runs after them.
+ * upstream's 0095 took that one, then 0096; it now has 9001, from the block
+ * this fork keeps for its own migrations, after every upstream migration.
  *
  * Why each block exists:
- *  - 0096 may change number again before it merges, so it must only ADD
- *    objects: a column with a constant default and two new procedures. The
- *    upgrade test compares every procedure and every row across the migration,
- *    from a schema at upstream's last migration, 0095.
+ *  - Upstream migrations added later run after 9001 on an existing database
+ *    and before it on a new one, so it must only ADD objects: a column with a
+ *    constant default and two new procedures. The upgrade test compares every
+ *    procedure and every row across the migration, from a schema at
+ *    upstream's last migration, 0095.
  *  - The flag has its own column because profile_settings is replaced
  *    wholesale on every preference save; a save must not touch the opt-in.
  *  - Turning the flag off must keep the dispatcher's shares (no access
@@ -59,7 +61,7 @@ async function functionDefinitions(pool, schema) {
     return rows;
 }
 
-describe("dispatcher delegation in the CMS (migration 0096)", () => {
+describe("dispatcher delegation in the CMS (migration 9001)", () => {
     it("adds only a false-by-default column and two new procedures, changing no procedure and no row", async () => {
         await withCms(async ({ pool, schema, catalog }) => {
             await catalog.setUserRole(ALICE, "user");
@@ -101,7 +103,7 @@ describe("dispatcher delegation in the CMS (migration 0096)", () => {
 
             const upgradedRecords = (await pool.query(`SELECT * FROM "${schema}".schema_migrations ORDER BY version`)).rows;
             expect(upgradedRecords.slice(0, -1)).toEqual(records);
-            expect(upgradedRecords.at(-1)).toMatchObject({ version: "0096", name: "dispatcher_delegation" });
+            expect(upgradedRecords.at(-1)).toMatchObject({ version: "9001", name: "dispatcher_delegation" });
         }, "0095");
     });
 

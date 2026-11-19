@@ -215,7 +215,7 @@ it ignores `onBehalfOfOwner`, as it did before the parameter existed.
   the **Dispatcher Delegation** switch in Admin Console → Model Providers →
   My Providers (`g` on the same page of the TUI), or
   `PUT /api/v1/me/dispatcher-delegation`. It is stored in
-  `users.allow_dispatcher_delegation` (CMS migration `0096`) and is off until
+  `users.allow_dispatcher_delegation` (CMS migration `9001`) and is off until
   the user turns it on. The switch shows only on deployments that name a
   dispatcher.
 - **Creating for a user.** `createSession` and `createSessionForAgent` accept

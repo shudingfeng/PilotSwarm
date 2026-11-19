@@ -48,7 +48,7 @@ describe("migration identity", () => {
                   WHERE table_schema = $1 AND table_name = 'users' AND column_name = 'allow_dispatcher_delegation'`,
                 [schema],
             );
-            expect(delegationColumn.rowCount, "0096 (dispatcher delegation) did not run").toBe(0);
+            expect(delegationColumn.rowCount, "9001 (dispatcher delegation) did not run").toBe(0);
 
             // The refusal released the migration lock, and code that lists only 0001-0094 still runs against this schema.
             await runMigrations(pool, schema, through0094, CMS_LOCK_SEED);
