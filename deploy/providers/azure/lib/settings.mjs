@@ -54,6 +54,9 @@ export const WIN_WORKER_ENV_DEFAULTS = Object.freeze({
   WIN_WORKER_FEED_ENDPOINTS: UNSET_SENTINEL,
   WIN_WORKER_ALERT_EMAILS: UNSET_SENTINEL,
   WIN_WORKER_STANDBY_POOL_PRINCIPAL_ID: UNSET_SENTINEL,
+  WIN_WORKER_RESOURCE_GROUP: UNSET_SENTINEL,
+  WIN_WORKER_CONTROLLER_ACCESS: "custom-role",
+  WIN_WORKER_VAULT_WRITER_ACCESS: "custom-role",
   WIN_DEV_DRIVE_POOL_COUNT: "10",
   WIN_DEV_DRIVE_SPARE_COUNT: "2",
   WIN_DEV_DRIVE_MAX_PER_USER: "3",
@@ -156,6 +159,9 @@ export function perimeterOperatorIpPrefixes(env) {
 const GUID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
 const EMAIL = /^[^\s@,;]+@[^\s@,;]+\.[^\s@,;]+$/;
 const CONFIGMAP_NAME = /^[a-z0-9](?:[-a-z0-9.]{0,251}[a-z0-9])?$/;
+// Azure's rule for a resource group's name: 1 to 90 letters, digits, '_', '-',
+// '.' and parentheses, not ending in '.'.
+const RESOURCE_GROUP_NAME = /^[-\w.()]{0,89}[-\w()]$/;
 // The SDK's rule for PILOTSWARM_REDACT_SECRET_PREFIXES (secret-redaction.ts).
 const REDACT_PREFIX = /^[A-Za-z0-9][A-Za-z0-9_-]{2,}$/;
 
@@ -245,6 +251,33 @@ export function coordinationHostRedactSecretPrefixes(env) {
   return prefixes;
 }
 
+// How the disk controller gets its rights on the pool's resources
+// (WIN_WORKER_CONTROLLER_ACCESS), and how the personal vault admits the
+// portal's writes and the controller's reads (WIN_WORKER_VAULT_WRITER_ACCESS):
+// the custom role definitions the subscription owner creates, by default, or
+// the fallbacks for a tenant that can't create more of them.
+export const WIN_WORKER_CONTROLLER_ACCESS_MODES = Object.freeze(["custom-role", "built-in-roles"]);
+export const WIN_WORKER_VAULT_WRITER_ACCESS_MODES = Object.freeze(["custom-role", "access-policies"]);
+
+function oneOf(env, key, allowed) {
+  const value = (settingValue(env, key) || WIN_WORKER_ENV_DEFAULTS[key]).toLowerCase();
+  if (!allowed.includes(value)) throw new Error(`${key} must be ${allowed.join(" or ")}, not '${env?.[key]}'.`);
+  return value;
+}
+
+// The pool's resource group: WIN_WORKER_RESOURCE_GROUP, a group of the pool's
+// own that the subscription owner creates, or the stamp's (RESOURCE_GROUP)
+// when unset. `separate` is true when it is not the stamp's group.
+export function winWorkerPoolResourceGroup(env) {
+  const stampGroup = settingValue(env, "RESOURCE_GROUP");
+  const configured = settingValue(env, "WIN_WORKER_RESOURCE_GROUP");
+  if (configured && !RESOURCE_GROUP_NAME.test(configured)) {
+    throw new Error(`WIN_WORKER_RESOURCE_GROUP must be a resource group's name, not '${configured}'.`);
+  }
+  const separate = Boolean(configured) && configured.toLowerCase() !== stampGroup.toLowerCase();
+  return { name: separate ? configured : stampGroup, separate };
+}
+
 // The pool settings the deploy itself uses (base-infra's Bicep and the
 // workers' userData). The controller checks the others when it starts, and
 // the deploy step runs the same check before it publishes the controller.
@@ -275,6 +308,8 @@ export function winWorkerSettings(env) {
     coordinationHostPluginConfigMap: coordinationHostPluginConfigMap(env),
     coordinationHostRedactSecretPrefixes: coordinationHostRedactSecretPrefixes(env),
     alertEmails: winWorkerAlertEmails(env),
+    controllerAccess: oneOf(env, "WIN_WORKER_CONTROLLER_ACCESS", WIN_WORKER_CONTROLLER_ACCESS_MODES),
+    vaultWriterAccess: oneOf(env, "WIN_WORKER_VAULT_WRITER_ACCESS", WIN_WORKER_VAULT_WRITER_ACCESS_MODES),
   };
 }
 

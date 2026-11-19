@@ -33,14 +33,25 @@
 //                                  the state account, other than the grants
 //                                  this deployment makes there itself
 //     data-role-assignment         a role that reads or writes Key Vault
-//                                  secrets or blobs (or a pool custom role)
-//                                  assigned on the subscription, the resource
-//                                  group or those two resources, other than
-//                                  the grants this deployment makes itself
-//     run-command                  Run Command by anyone but the controller
+//                                  secrets or blobs, a pool custom role, or a
+//                                  built-in role that reaches the pool's VMs
+//                                  and drives, assigned on the subscription,
+//                                  the stamp's or the pool's resource group or
+//                                  those two resources, other than the grants
+//                                  this deployment makes itself
+//     run-command                  Run Command in the stamp's or the pool's
+//                                  resource group by anyone but the controller
 //     federated-credential-write   a federated credential written on a stamp
 //                                  identity by anyone but the deploying
 //                                  principal
+//     personal-vault-write         with access policies on the personal vault
+//                                  only: a write of that vault by anyone but
+//                                  the deploying principal, which can change
+//                                  its access policies
+//   Activity Log alert, without the workspace
+//     personal-vault-access-policy-write
+//                                  with access policies on the personal vault
+//                                  only: any write of its access policies
 //   main workspace, kube-audit (the controller's, the portal's and the Linux
 //   worker's service accounts, in the stamp namespace)
 //     pod-exec                     exec or attach into any pod in the stamp
@@ -118,8 +129,14 @@ param ownRoleGrants array = []
 @description('The deploying principal; empty alerts on every writer it would be exempt from.')
 param deployPrincipalId string = ''
 
-@description('Names (GUIDs) of the pool\'s custom role definitions; the personal secret writer has data actions.')
+@description('Names (GUIDs) of the pool\'s custom role definitions the deployment uses; the personal secret writer has data actions.')
 param customRoleIds array = []
+
+@description('The pool\'s own resource group (WIN_WORKER_RESOURCE_GROUP), whose Run Command and role assignments the rules watch too. Empty: this resource group.')
+param poolResourceGroupName string = ''
+
+@description('Whether the personal vault uses access policies (WIN_WORKER_VAULT_WRITER_ACCESS=access-policies). Adds the alerts on its access policy writes and on its writes by anyone but the deploying principal.')
+param personalVaultAccessPolicies bool = false
 
 @description('Whether the Linux worker runs as the coordination host (WIN_WORKER_COORDINATION_HOST=true), which sends every capacity request to the controller. Adds the alert on requests the controller leaves unanswered.')
 param coordinationHost bool = false
@@ -266,6 +283,9 @@ var controllerOid = toLower(controllerPrincipalId)
 var deployOid = toLower(deployPrincipalId)
 var subscriptionScope = toLower(subscription().id)
 var resourceGroupScope = toLower(resourceGroup().id)
+var poolGroupName = toLower(empty(poolResourceGroupName) ? resourceGroup().name : poolResourceGroupName)
+var poolGroupScope = '${subscriptionScope}/resourcegroups/${poolGroupName}'
+var watchedGroupList = join(map(union([toLower(resourceGroup().name)], [poolGroupName]), name => '"${name}"'), ', ')
 var personalKeyVaultScope = toLower(personalKeyVault.id)
 var controllerStorageScope = toLower(controllerStorageAccount.id)
 var serviceAccounts = '"pilotswarm-disk-controller", "pilotswarm-portal", "copilot-runtime-worker"'
@@ -276,8 +296,10 @@ var serviceAccounts = '"pilotswarm-disk-controller", "pilotswarm-portal", "copil
 // `az role definition list` reports them; Key Vault Data Access
 // Administrator, which assigns the Key Vault data roles; and two kept from
 // the first list, Key Vault Certificates Officer and Storage Blob Delegator.
-// A role that can assign any role (Owner, User Access Administrator) is not
-// here: the data role it hands out alerts when it is assigned.
+// Then the built-in roles that reach the pool's VMs and drives, and the
+// pool's custom roles. A role that can assign any role (Owner, User Access
+// Administrator) is not here: the role it hands out alerts when it is
+// assigned.
 var dataRoleIds = concat([
   '00482a5a-887f-4fb3-b363-3b7fe8e74483' // Key Vault Administrator
   'db79e9a7-68ee-4b58-9aeb-b90e7c24fcba' // Key Vault Certificate User (a certificate's secret)
@@ -305,6 +327,12 @@ var dataRoleIds = concat([
   'abed7cd4-f358-4384-9d17-def9303b3b53' // MySQL User Data Reader
   '8894c184-eeb6-45cc-868a-1be782055af3' // MySQL User Data Writer
   'dfce8971-25e3-42e3-ba33-6055438e3080' // VM Restore Operator
+  // Built-in roles that reach the pool's VMs and drives: the controller's
+  // with WIN_WORKER_CONTROLLER_ACCESS=built-in-roles, and the standby pool
+  // resource provider's Virtual Machine Contributor.
+  '9980e02c-c2be-4d73-94e8-173b1dc7cf3c' // Virtual Machine Contributor
+  '1c4770c0-34f7-4110-a1ea-a5855cc7a939' // Elastic SAN Snapshot Exporter
+  'b64e21ea-ac4e-4cdf-9dc9-5b892992bee7' // Azure Connected Machine Onboarding
 ], map(customRoleIds, id => toLower(id)))
 var dataRoleList = join(map(dataRoleIds, id => '"${id}"'), ', ')
 // The deployment's own grants as principal|role|scope: an assignment is exempt
@@ -445,12 +473,12 @@ var rules = [
   }
   {
     name: 'data-role-assignment'
-    description: 'A role that reads or writes Key Vault secrets or blobs was assigned on the subscription, the stamp resource group, the personal vault or the disk controller\'s state account, other than the grants the deployment makes itself.'
+    description: 'A role that reads or writes Key Vault secrets or blobs, or reaches the pool\'s VMs and drives, was assigned on the subscription, the stamp\'s or the pool\'s resource group, the personal vault or the disk controller\'s state account, other than the grants the deployment makes itself.'
     severity: 1
     workspaceId: mainWorkspaceId
     query: join([
       roleAssignmentWrites
-      'where scope in ("${subscriptionScope}", "${resourceGroupScope}") or scope startswith "${personalKeyVaultScope}" or scope startswith "${controllerStorageScope}"'
+      'where scope in ("${subscriptionScope}", "${resourceGroupScope}", "${poolGroupScope}") or scope startswith "${personalKeyVaultScope}" or scope startswith "${controllerStorageScope}"'
       'where role in (${dataRoleList})'
       'where assignment !in (${ownRoleGrantList})'
       newRows
@@ -458,12 +486,12 @@ var rules = [
   }
   {
     name: 'run-command'
-    description: 'Run Command was used on a stamp VM by a principal other than the disk controller.'
+    description: 'Run Command was used on a VM of the stamp\'s or the pool\'s resource group by a principal other than the disk controller.'
     severity: 1
     workspaceId: mainWorkspaceId
     query: join([
       'AzureActivity'
-      'where ResourceGroup =~ "${resourceGroup().name}"'
+      'where ResourceGroup in~ (${watchedGroupList})'
       'where OperationNameValue in~ ("Microsoft.Compute/virtualMachines/runCommand/action", "Microsoft.Compute/virtualMachines/runCommands/write", "Microsoft.Compute/virtualMachineScaleSets/virtualMachines/runCommand/action", "Microsoft.Compute/virtualMachineScaleSets/virtualMachines/runCommands/write")'
       'where tolower(Caller) != "${controllerOid}"'
       newRows
@@ -605,8 +633,28 @@ var rules = [
   }
 ]
 
+// With access policies on the personal vault, a vault write can change who
+// reads its secrets. The deploy writes the vault on every run, so only
+// another principal's write alerts; personalVaultAccessPolicyAlert below
+// catches the access policy writes themselves.
+var personalVaultRules = personalVaultAccessPolicies ? [
+  {
+    name: 'personal-vault-write'
+    description: 'The personal vault, which uses access policies, was written by a principal other than the deploying one: a vault write can change who reads its secrets.'
+    severity: 1
+    workspaceId: mainWorkspaceId
+    query: join([
+      'AzureActivity'
+      'where OperationNameValue =~ "Microsoft.KeyVault/vaults/write"'
+      'where tolower(_ResourceId) == "${personalKeyVaultScope}"'
+      'where tolower(Caller) != "${deployOid}"'
+      newRows
+    ], '\n| ')
+  }
+] : []
+
 // A rule's query reads the last hour unless the rule sets its own windowSize.
-var rulesWithWindow = map(rules, rule => union({ windowSize: 'PT1H' }, rule))
+var rulesWithWindow = map(concat(rules, personalVaultRules), rule => union({ windowSize: 'PT1H' }, rule))
 
 resource alertRules 'Microsoft.Insights/scheduledQueryRules@2023-12-01' = [
   for rule in rulesWithWindow: {
@@ -701,5 +749,39 @@ resource capacityRequestAlert 'Microsoft.Insights/scheduledQueryRules@2023-12-01
   }
 }
 
+// An Activity Log alert, so it fires even before the subscription's Activity
+// Log reaches the workspace. The deploy sets the vault's access policies with
+// the vault itself, so any write of them alerts.
+resource personalVaultAccessPolicyAlert 'Microsoft.Insights/activityLogAlerts@2020-10-01' = if (personalVaultAccessPolicies) {
+  name: '${resourceNamePrefix}-personal-vault-access-policy-write'
+  location: 'global'
+  properties: {
+    description: 'An access policy of the personal vault was written: access policies decide who reads, writes and deletes the owners\' tokens.'
+    enabled: true
+    scopes: [
+      personalKeyVault.id
+    ]
+    condition: {
+      allOf: [
+        {
+          field: 'category'
+          equals: 'Administrative'
+        }
+        {
+          field: 'operationName'
+          equals: 'Microsoft.KeyVault/vaults/accessPolicies/write'
+        }
+      ]
+    }
+    actions: {
+      actionGroups: [
+        {
+          actionGroupId: actionGroup.id
+        }
+      ]
+    }
+  }
+}
+
 output actionGroupId string = actionGroup.id
-output alertRuleNames array = [for rule in rules: '${resourceNamePrefix}-${rule.name}']
+output alertRuleNames array = [for rule in rulesWithWindow: '${resourceNamePrefix}-${rule.name}']

@@ -17,6 +17,7 @@ import {
   perimeterOperatorIpPrefixes,
   winWorkersEnabled,
   winWorkerSettings,
+  winWorkerPoolResourceGroup,
   settingValue,
   diskControllerTokenScope,
 } from "./settings.mjs";
@@ -387,10 +388,12 @@ function deployStepValue(env, key, check, what) {
 
 // Parameters that only WIN_WORKERS_ENABLED=true adds to base-infra. With the
 // setting off nothing is added, so redeploying an existing stamp changes
-// nothing. The deploy step resolves the custom role definitions, whether the
-// scale set exists, the standby pool provider's principal and the CA bundle
-// (WIN_WORKER_CA_CERT) before Bicep runs; a missing answer must not pass as a
-// default.
+// nothing. The deploy step resolves the chosen custom role definitions,
+// whether the scale set exists, the standby pool provider's principal and the
+// CA bundle (WIN_WORKER_CA_CERT) before Bicep runs; a missing answer must not
+// pass as a default. A fallback (WIN_WORKER_CONTROLLER_ACCESS=built-in-roles,
+// WIN_WORKER_VAULT_WRITER_ACCESS=access-policies) and a resource group of the
+// pool's own add their parameter only when chosen.
 export function winWorkerParameters(module, env) {
   if (module !== "base-infra" || !winWorkersEnabled(env)) return null;
   const settings = winWorkerSettings(env);
@@ -402,13 +405,21 @@ export function winWorkerParameters(module, env) {
     winWorkerVmSize: settings.vmSize,
     winWorkerImageVersion: settings.imageVersion ?? "",
     winWorkerAlertEmails: settings.alertEmails,
-    diskPoolControllerRoleId: deployStepValue(env, "WIN_WORKER_CONTROLLER_ROLE_ID", (v) => GUID.test(v),
-      "the custom role definition PilotSwarm Disk Pool Controller"),
-    workerSubnetJoinRoleId: deployStepValue(env, "WIN_WORKER_SUBNET_JOIN_ROLE_ID", (v) => GUID.test(v),
-      "the custom role definition PilotSwarm Worker Subnet Join"),
-    personalVaultWriterRoleId: deployStepValue(env, "WIN_WORKER_VAULT_WRITER_ROLE_ID", (v) => GUID.test(v),
-      "the custom role definition PilotSwarm Personal Secret Writer"),
   };
+  if (settings.controllerAccess === "custom-role") {
+    params.diskPoolControllerRoleId = deployStepValue(env, "WIN_WORKER_CONTROLLER_ROLE_ID", (v) => GUID.test(v),
+      "the custom role definition PilotSwarm Disk Pool Controller");
+  } else {
+    params.winWorkerControllerBuiltInRoles = true;
+  }
+  if (settings.vaultWriterAccess === "custom-role") {
+    params.personalVaultWriterRoleId = deployStepValue(env, "WIN_WORKER_VAULT_WRITER_ROLE_ID", (v) => GUID.test(v),
+      "the custom role definition PilotSwarm Personal Secret Writer");
+  } else {
+    params.winWorkerPersonalVaultAccessPolicies = true;
+  }
+  const poolGroup = winWorkerPoolResourceGroup(env);
+  if (poolGroup.separate) params.winWorkerResourceGroup = poolGroup.name;
   if (settings.imageVersion) {
     const exists = deployStepValue(env, "WIN_WORKER_SCALE_SET_EXISTS", (v) => ["true", "false"].includes(v.toLowerCase()),
       "whether the scale set exists").toLowerCase();

@@ -157,7 +157,9 @@ Linux and the Windows machines are not in one cluster:
   AKS,** in `win-workers-subnet` of the same VNet. They reach the controller
   through its internal load balancer, Blob through its private endpoint, and
   PostgreSQL and the internet through a NAT gateway. Nothing else in the VNet
-  is reachable from them, and nothing reaches them.
+  is reachable from them, and nothing reaches them. The scale set, the standby
+  pool and every VM, disk, NIC and snapshot of the pool can have a
+  [resource group of their own](#the-pools-resource-group).
 - **One deploy run creates both.** `deploy.mjs` runs base-infra's Bicep, which
   creates the pool's Azure resources, then publishes the cluster's manifests,
   and the Portal's rollout step runs the database role Job. With the pool,
@@ -676,7 +678,8 @@ session tree:
   service's SID only where that service is installed. It waits until Azure
   reports the snapshot `Succeeded` with its background copy complete, and
   stops with an error if the snapshot fails to provision. Set
-  `WIN_DEV_DRIVE_GOLDEN_SNAPSHOT_ID` to the snapshot.
+  `WIN_DEV_DRIVE_GOLDEN_SNAPSHOT_ID` to the snapshot, which must be in the
+  [pool's resource group](#the-pools-resource-group).
 - **The weekly refresh.** Every `PS_DISK_CONTROLLER_SNAPSHOT_REFRESH_DAYS` (7;
   `0` turns it off) the controller scales out one VM that it never activates,
   attaches a copy of the current snapshot, and runs
@@ -1033,6 +1036,12 @@ See [Session Message Scope](../reference/configuration.md#session-message-scope)
   coordination host call the controller with that app's v2 tokens. See
   [Roles for application identities](./entra-app-roles.md#roles-for-application-identities).
 - **At least one alert receiver** in `WIN_WORKER_ALERT_EMAILS`.
+- **Two custom role definitions, or their built-in fallbacks,** which the
+  subscription owner creates or chooses with you: see
+  [Custom roles and built-in fallbacks](#custom-roles-and-built-in-fallbacks).
+  The controller's fallback also needs a
+  [resource group of the pool's own](#the-pools-resource-group), which the
+  subscription owner creates with its policy.
 - **The coordination host** (`WIN_WORKER_COORDINATION_HOST=true`) with owner
   routing (`PILOTSWARM_OWNER_ROUTING=1`): the Windows workers run only their
   owners' work, and the host runs everything else. See
@@ -1074,10 +1083,11 @@ the edge mode, the stamp's database and its identity,
 `PORTAL_AUTH_ENTRA_CLIENT_ID`, the alert receivers, the coordination host,
 owner routing and `AUTHZ_ENFORCE_OWNERSHIP`. It also refuses
 `DISPATCHER_SP_OBJECT_ID` without `AUTHZ_ENFORCE_OWNERSHIP=true`, the
-coordination host without the pool, and `PILOTSWARM_OWNER_ROUTING=1` without
-the pool: only a bound Windows worker serves an owner tag. It can't check the
-Entra app's roles, Azure capacity, the tools or the dispatcher, so check those
-yourself.
+coordination host without the pool, `PILOTSWARM_OWNER_ROUTING=1` without
+the pool, since only a bound Windows worker serves an owner tag, and
+`WIN_WORKER_CONTROLLER_ACCESS=built-in-roles` without a resource group of the
+pool's own. It can't check the Entra app's roles, Azure capacity, the tools
+or the dispatcher, so check those yourself.
 
 **The reference GitHub workflow can't deploy a pool.** **Deploy Azure stamp**
 (`deploy-azure.yml`) requires `EDGE_MODE=public`, an external HorizonDB
@@ -1095,12 +1105,17 @@ the `stamp` profile, and the security logs go to the perimeter's workspace. See
 
 ### Step by step
 
-1. **Custom role definitions.** The subscription owner creates three once:
-   "PilotSwarm Disk Pool Controller", "PilotSwarm Worker Subnet Join" and
+1. **Roles and the pool's resource group.** The subscription owner creates
+   two custom role definitions once: "PilotSwarm Disk Pool Controller" and
    "PilotSwarm Personal Secret Writer". A role that can assign roles can't
-   create role definitions, so the deploy only assigns them. When one is
-   missing, the deploy step stops and prints its definition for
-   `az role definition create --role-definition @<file>`.
+   create role definitions, so the deploy only assigns them. When a chosen one
+   is missing, the deploy step stops and prints its definition for
+   `az role definition create --role-definition @<file>`. A tenant that can't
+   create more custom role definitions chooses either role's built-in
+   fallback instead ([Custom roles and built-in fallbacks](#custom-roles-and-built-in-fallbacks)).
+   For a [resource group of the pool's own](#the-pools-resource-group), which
+   the controller's fallback needs, the subscription owner also creates that
+   group with its resource type policy.
 2. **The Entra app.** Run `deploy/scripts/auth/Setup-PortalAuth.ps1` with
    `-WorkerRoles`, for a new app or an existing one (`-ExistingAppId`). It
    switches the app to v2 access tokens and adds the application roles
@@ -1160,14 +1175,15 @@ the `stamp` profile, and the security logs go to the perimeter's workspace. See
    [Capturing it into the gallery](../../../deploy/providers/azure/windows/README.md#capturing-it-into-the-gallery).
 8. **The golden snapshot.** Seed it on a VM built from that image version
    ([The golden snapshot](#the-golden-snapshot)), keep the snapshot in the
-   stamp's resource group, where the controller's role reaches it, and set
-   `WIN_DEV_DRIVE_GOLDEN_SNAPSHOT_ID` to its resource ID.
+   pool's resource group, the only one where the controller's roles reach
+   disks and snapshots, and set `WIN_DEV_DRIVE_GOLDEN_SNAPSHOT_ID` to its
+   resource ID. The controller refuses a snapshot in another resource group.
 9. **The second deploy.** Set `WIN_WORKER_IMAGE_VERSION` and deploy again.
    Base-infra now creates the scale set, with capacity `Y`, and its standby
-   pool, and the controller gets their IDs. The deploy step generates the VMs'
-   local administrator password once, keeps it only in the deploy-only vault and
-   passes it as a secure parameter. Nobody signs in with it: operators use Run
-   Command.
+   pool in the pool's resource group, and the controller gets their IDs. The
+   deploy step generates the VMs' local administrator password once, keeps it
+   only in the deploy-only vault and passes it as a secure parameter. Nobody
+   signs in with it: operators use Run Command.
 10. **No idle VM** (optional): set `WIN_WORKER_MIN_RUNNING=0`, so the pool
     pays for no Windows VM while nothing runs; the coordination host runs
     everything but the owners' work. See
@@ -1182,6 +1198,157 @@ never names the capacity, which the controller owns. It also deletes the Portal
 identity's old account-wide Blob grant once its container grant exists, and an
 `AllowAllAzureServices` firewall rule.
 
+### Custom roles and built-in fallbacks
+
+Two settings choose, each on its own, how the disk controller and the Portal
+get their rights in the pool: a custom role, by default, or a built-in
+fallback for a tenant that can't create more custom role definitions (Azure's
+limit is 5,000 per tenant). A deployment that sets neither keeps its custom
+roles.
+
+| Setting | `custom-role` (the default) | The fallback |
+|---|---|---|
+| `WIN_WORKER_CONTROLLER_ACCESS` | "PilotSwarm Disk Pool Controller" on the pool's resource group and, when that is not the stamp's group, on the workers' data collection rule and the image definition | `built-in-roles`: Virtual Machine Contributor, Elastic SAN Snapshot Exporter and Azure Connected Machine Onboarding on the pool's resource group, which must then be [a group of its own](#the-pools-resource-group); Reader on the data collection rule; Compute Gallery Image Reader on the image definition |
+| `WIN_WORKER_VAULT_WRITER_ACCESS` | The personal vault in RBAC mode: "PilotSwarm Personal Secret Writer" for the Portal, Key Vault Secrets User for the controller | `access-policies`: the vault in access policy mode, with secrets `set`, `delete` and `list` for the Portal, and `get` and `list` for the controller |
+
+Either way, the controller gets the built-in Windows 365 Network User on the
+worker subnet only, to join its VMs' NICs to it, and Managed Identity Operator
+on the workers' identity only. What each fallback accepts:
+
+- **The controller's built-in roles grant more than its custom role.** In the
+  pool's group they also allow action-based Run Command (`runCommand/action`),
+  extensions and VM applications, which run code as System as the
+  controller's Managed Run Commands already do; the serial console, power,
+  reimage and patching; the boot diagnostics' blob URIs; deleting the scale
+  set or its instances; deployments; backups into a Recovery Services vault;
+  and other resource types, such as dedicated hosts, Cloud Services, SQL VMs,
+  availability sets and Arc servers. The group's "Allowed resource types"
+  policy refuses every type but the pool's, so none of those resources, a
+  vault for backups included, can be created there. One grant no policy
+  blocks: Virtual Machine Contributor's
+  `Microsoft.Compute/virtualMachineScaleSets/disks/beginGetAccess/action`,
+  which returns a SAS URL to a scale set's disk. Whether it reaches the OS
+  disks of a Flexible scale set's VMs isn't documented, so check it before you
+  keep this fallback for good.
+- **The vault's access policies let anyone who may write the vault give
+  itself reads.** A principal with Contributor or Key Vault Contributor on the
+  vault, its resource group or the subscription can add an access policy that
+  reads every token, which is why Microsoft recommends RBAC, where reading
+  takes a role assignment. The Portal can also update a secret's attributes,
+  and `get` and `list` cover deleted secrets too. The deploy then adds two
+  alerts, `personal-vault-access-policy-write` and `personal-vault-write`
+  ([Detection and alerts](#detection-and-alerts)), and `personal-vault-read`
+  still fires on every read but the controller's.
+
+**The deploy checks the built-in roles it gives the controller.** Before
+base-infra, the deploy step reads each one's definition as Azure has it then,
+and stops if one is not a built-in role, or grants a sensitive operation that
+this page doesn't accept for it. Less the role's `notActions`, sensitive
+means:
+
+- any data action, such as Key Vault's `getSecret`;
+- any action entry that names an action handing out a SAS URL, a key or a
+  credential (`beginGetAccess`, `retrieveSasUris`,
+  `retrieveBootDiagnosticsData`, `listKeys`, `listAccountSas`,
+  `listServiceSas`, `regenerateKey`, `listCredentials`, `listSecrets`), on
+  any resource type, wildcards included, such as `*/listSecrets/action`;
+- any action entry whose wildcard covers one of the operations the step
+  lists: the SAS of a disk, a snapshot, a scale set's disk, a restore point's
+  disk or a gallery's container image, a restore point's SAS URIs, a VM's boot
+  diagnostics, a storage account's keys or SAS, and an Elastic SAN snapshot's
+  SAS, such as `Microsoft.Compute/restorePointCollections/*`;
+- a subnet's write or delete, named or through a wildcard.
+
+So a role that gains, for example,
+`Microsoft.Compute/disks/beginGetAccess/action`,
+`Microsoft.Compute/snapshots/beginGetAccess/action`, a Key Vault data action
+or `Microsoft.Network/virtualNetworks/subnets/write` stops the deploy until
+someone reviews it. The check covers Windows 365 Network User on every deploy,
+and the other five only with `built-in-roles`:
+
+| Role | Accepted sensitive operations |
+|---|---|
+| Windows 365 Network User | None |
+| Virtual Machine Contributor | `Microsoft.Compute/virtualMachineScaleSets/disks/beginGetAccess/action`, documented above; `retrieveBootDiagnosticsData/action` on VMs and scale set VMs, through its wildcards; `Microsoft.Storage/storageAccounts/listKeys/action`, which finds no storage account in the pool's group |
+| Elastic SAN Snapshot Exporter | `Microsoft.ElasticSan/elasticSans/volumeGroups/snapshots/beginGetAccess/action`, which finds no Elastic SAN in the pool's group |
+| Azure Connected Machine Onboarding, Reader, Compute Gallery Image Reader | None |
+
+The standby pool resource provider's roles are not checked: they go to the
+platform's own service principal, not to code the deployment runs.
+
+**A pool deployed before these settings** keeps its custom roles and its
+group. Its controller gets Windows 365 Network User on the worker subnet in
+place of "PilotSwarm Worker Subnet Join", and the standby pool resource
+provider's Managed Identity Operator and gallery roles move from the resource
+group to the workers' identity and the gallery. An incremental deployment
+deletes nothing, so the old assignments stay until you delete them: the
+controller's "PilotSwarm Worker Subnet Join" on the subnet, and the provider's
+Managed Identity Operator, Compute Gallery Sharing Admin and Compute Gallery
+Artifacts Publisher on the resource group. The subscription owner can then
+delete the "PilotSwarm Worker Subnet Join" definition.
+
+### The pool's resource group
+
+`WIN_WORKER_RESOURCE_GROUP` names a resource group of the pool's own, in the
+stamp's subscription. It holds the scale set, the standby pool, and every VM,
+OS disk, NIC, Dev Drive and snapshot of the pool, the golden snapshot
+included. The gallery, the worker subnet, the workers' identity and data
+collection rule, the vaults and the controller's state account stay in the
+stamp's group. Unset, the stamp's group holds everything, as before. The
+controller's built-in roles need a group of the pool's own: on the stamp's
+group they would reach every VM, disk and NIC there, and its storage
+accounts' keys.
+
+The subscription owner creates the group before the first deploy that names
+it, and assigns it the built-in policy "Allowed resource types"
+(`a08ec900-254a-4555-9bf5-e42af04b5c5c`, effect Deny) with only the pool's
+types in `listOfResourceTypesAllowed`:
+
+- `Microsoft.Compute/virtualMachineScaleSets`
+- `Microsoft.Compute/virtualMachineScaleSets/extensions`
+- `Microsoft.Compute/virtualMachineScaleSets/virtualMachines`
+- `Microsoft.Compute/virtualMachines`
+- `Microsoft.Compute/virtualMachines/extensions`
+- `Microsoft.Compute/virtualMachines/runCommands`
+- `Microsoft.Compute/disks`
+- `Microsoft.Compute/snapshots`
+- `Microsoft.Network/networkInterfaces`
+- `Microsoft.StandbyPool/standbyVirtualMachinePools`
+
+The policy evaluates only resource types that support tags and a location, so
+the deployments, role assignments and data collection rule associations the
+pool makes there need no entry. The deploying principal needs the same rights
+on the group as on the stamp's: it creates the scale set and the standby pool
+there, and assigns roles there.
+
+The standby pool resource provider's roles follow the same split. It creates
+the VMs, with their disks and NICs, in the pool's group, where it gets
+Virtual Machine Contributor and Network Contributor. But it joins each NIC to
+the worker subnet, gives each VM the workers' identity and builds it from the
+gallery's image, all in the stamp's group, which a role on the pool's group
+doesn't reach. So it also gets Network Contributor on the worker subnet, for
+`Microsoft.Network/virtualNetworks/subnets/join/action`, Managed Identity
+Operator on the workers' identity, and Compute Gallery Sharing Admin and
+Compute Gallery Artifacts Publisher on the gallery. Base-infra makes these
+grants once `WIN_WORKER_IMAGE_VERSION` is set, before the standby pool.
+
+Before base-infra, the deploy step checks that the group exists. And on every
+deploy, whatever the setting, it stops when a group other than the pool's
+holds the pool's scale set: a deploy doesn't move a pool into, out of or
+between groups of its own, since a second pool would start there and the
+first one's VMs, drives and snapshots would stay behind. To move a pool,
+delete it, with its drives and snapshots, and deploy it again. The step finds
+the scale set by its name, `<prefix>-win-workers`, in a list of the
+subscription's scale sets, which holds those of every group the deploying
+principal can read, and through the scale set ID an earlier deploy recorded
+(`WIN_WORKER_SCALE_SET_ID`, from the env file or the outputs cache). Where
+Azure refuses the deploying principal that list, the step looks in the
+stamp's group by name instead, and a pool in another group of its own is
+found only through the recorded ID; a recorded ID in a group the principal
+can't read stops the deploy until that ID is removed. The controller takes
+the group from the scale set's resource ID (`WIN_WORKER_SCALE_SET_ID`), and
+refuses a golden snapshot in another group.
+
 ### What the deploy creates
 
 Base-infra, only with `WIN_WORKERS_ENABLED=true`:
@@ -1192,10 +1359,10 @@ Base-infra, only with `WIN_WORKERS_ENABLED=true`:
 | Controller's identity | `<prefix>-disk-pool-mid` | Federated with the controller's service account |
 | Coordination host's identity | `<prefix>-linux-worker-mid` | Federated with the Linux worker's service account ([The coordination host](#the-coordination-host)) |
 | Compute gallery and image definition | `<alphaprefix>gallery`, `pilotswarm-win-worker` | Windows, generalized, Gen2 |
-| Scale set and standby pool | `<prefix>-win-workers`, `<prefix>-win-worker-standby` | Once `WIN_WORKER_IMAGE_VERSION` is set: one zone, Standard security, a 256 GiB managed OS disk, manual upgrades, no automatic repairs, the Azure Monitor Agent |
+| Scale set and standby pool | `<prefix>-win-workers`, `<prefix>-win-worker-standby` | Once `WIN_WORKER_IMAGE_VERSION` is set, in [the pool's resource group](#the-pools-resource-group): one zone, Standard security, a 256 GiB managed OS disk, manual upgrades, no automatic repairs, the Azure Monitor Agent |
 | Worker subnet, NAT gateway and NSG | `win-workers-subnet`, `<prefix>-win-worker-nat` | [The network](#the-network) |
 | Private endpoints and DNS zones | in `pe-subnet` | Blob, the controller's state account, the personal vault |
-| Personal vault | `<alphaprefix>kvpers` | RBAC, purge protection, 7-day soft delete, no public access |
+| Personal vault | `<alphaprefix>kvpers` | RBAC, or access policies with `WIN_WORKER_VAULT_WRITER_ACCESS=access-policies`; purge protection, 7-day soft delete, no public access |
 | Deploy-only vault | `<alphaprefix>kvdep` | The controller's CA key and certificate, and during a CA rotation the next CA's certificate and key and the previous CA's certificate; the VMs' administrator password. Only the deploying principal has a role |
 | Controller's state account | `<alphaprefix>poolsa`, container `disk-pool-state` | No shared keys, no public access, only the controller has a data role |
 | Release container | `win-worker-releases` in the main storage account | Only the deploying principal writes it |
@@ -1203,7 +1370,8 @@ Base-infra, only with `WIN_WORKERS_ENABLED=true`:
 | Logs, alerts and action group | `win-worker-alerts.bicep` | [Detection and alerts](#detection-and-alerts) |
 
 `<alphaprefix>` is the resource prefix in lowercase without hyphens or
-underscores.
+underscores. Of these, only the scale set and the standby pool are in the
+pool's resource group.
 
 In the cluster, with the pool: the `disk-controller` service; the database role
 Job, which the Portal's rollout step applies from outside the Flux tree; and the
@@ -1236,9 +1404,11 @@ comes only with `WIN_WORKERS_ENABLED=true`:
   grant exists.
 - **The database role Job** runs at every rollout of the Portal, and
   `deploy all` deploys the `worker` service just after the `portal`.
-- **First, by hand:** the subscription owner creates three custom role
-  definitions (step 1). A deploy-only vault then holds the controller's CA key
-  and the VMs' administrator password.
+- **First, by hand:** the subscription owner creates two custom role
+  definitions, or the deployment chooses their fallbacks, and creates the
+  pool's own resource group when the deployment names one (step 1). A
+  deploy-only vault then holds the controller's CA key and the VMs'
+  administrator password.
 
 ## The database role Job
 
@@ -1696,12 +1866,12 @@ in the controller's README has the full procedure and each check.
 | Identity | Used by | Grants | Never |
 |---|---|---|---|
 | `<prefix>-win-worker-mid`, on the scale set model, so every VM has it | The worker service, Git, NuGet, the Azure CLI | The `worker` app role; `pilotswarm_worker_group` in PostgreSQL; Storage Blob Data Contributor on `copilot-sessions` and Reader on `win-worker-releases`, container scopes only; Cognitive Services OpenAI User on the stamp's Foundry account | Key Vault; `disk-pool-state` |
-| `<prefix>-disk-pool-mid`, the controller's workload identity | The disk controller and broker | "PilotSwarm Disk Pool Controller" on the resource group; "PilotSwarm Worker Subnet Join" on the worker subnet only; Managed Identity Operator on the workers' identity only; Storage Blob Data Contributor on `disk-pool-state`; Key Vault Secrets User on the personal vault and on the secret `disk-controller-tls` | Write a secret |
-| `<prefix>-csi-mid`, the workload identity of the Portal and of the database role Job | The Portal and its Key Vault store, the database role Job | Its existing grants, PostgreSQL's Entra administrator among them, with Blob Data Contributor narrowed to `copilot-sessions`; "PilotSwarm Personal Secret Writer" on the personal vault | Read a personal secret; write a release or a Flux manifest |
+| `<prefix>-disk-pool-mid`, the controller's workload identity | The disk controller and broker | On the pool's resource group, "PilotSwarm Disk Pool Controller", or with `WIN_WORKER_CONTROLLER_ACCESS=built-in-roles` Virtual Machine Contributor, Elastic SAN Snapshot Exporter and Azure Connected Machine Onboarding; when that group is not the stamp's, the custom role, or Reader and Compute Gallery Image Reader, on the workers' data collection rule and the image definition; Windows 365 Network User on the worker subnet only; Managed Identity Operator on the workers' identity only; Storage Blob Data Contributor on `disk-pool-state`; Key Vault Secrets User on the secret `disk-controller-tls` and on the personal vault, or with `WIN_WORKER_VAULT_WRITER_ACCESS=access-policies` secrets `get` and `list` there | Write a secret |
+| `<prefix>-csi-mid`, the workload identity of the Portal and of the database role Job | The Portal and its Key Vault store, the database role Job | Its existing grants, PostgreSQL's Entra administrator among them, with Blob Data Contributor narrowed to `copilot-sessions`; "PilotSwarm Personal Secret Writer" on the personal vault, or with `WIN_WORKER_VAULT_WRITER_ACCESS=access-policies` secrets `set`, `delete` and `list` there | Read a personal secret; write a release or a Flux manifest |
 | `<prefix>-linux-worker-mid`, the coordination host's workload identity (`coordination-host-fedcred`) | The coordination host | `pilotswarm_worker_group` in PostgreSQL; Storage Blob Data Contributor on `copilot-sessions` only; Cognitive Services OpenAI User on the stamp's Foundry account; the `coordinator` app role | Key Vault, `disk-pool-state`, a personal token, any controller route but the coordination route |
 | The dispatcher's service principal | The dispatcher | The `user` app role | Any Azure role in the deployment |
 | The deploying principal | `deploy.mjs` | Key Vault Secrets Officer on the stamp and deploy-only vaults; writes the releases and the Flux manifests; the `deployer` app role for the upgrade freeze | — |
-| The Standby Pool resource provider | The standby pool | Virtual Machine Contributor, Network Contributor, Managed Identity Operator, Compute Gallery Sharing Admin and Compute Gallery Artifacts Publisher on the resource group | — |
+| The Standby Pool resource provider | The standby pool | On the pool's resource group, for the VMs, disks and NICs it creates there: Virtual Machine Contributor and Network Contributor. In the stamp's group, which a role on the pool's group doesn't reach: Network Contributor on the worker subnet, whose `Microsoft.Network/virtualNetworks/subnets/join/action` joins each VM's NIC to it; Managed Identity Operator on the workers' identity; Compute Gallery Sharing Admin and Compute Gallery Artifacts Publisher on the gallery | — |
 
 - **The controller tells VMs apart by their private source address,** never by
   identity, because every VM has the same one.
@@ -1713,7 +1883,9 @@ in the controller's README has the full procedure and each check.
   step deletes it and fails while one remains, so no pod of that service
   account can sign in as PostgreSQL's administrator.
 - **The custom role definitions** are created once by the subscription owner,
-  and the deploy assigns them. The deploy step finds the Standby Pool resource
+  unless the deployment chooses their
+  [built-in fallbacks](#custom-roles-and-built-in-fallbacks), and the deploy
+  assigns them. The deploy step finds the Standby Pool resource
   provider's principal by name, which needs directory read access, or takes
   `WIN_WORKER_STANDBY_POOL_PRINCIPAL_ID`.
 - **The deploying principal controls the deployment.** Protect it like an owner:
@@ -1794,19 +1966,21 @@ as an administrator of its VM and is not bound by them.
 ### Detection and alerts
 
 `win-worker-alerts.bicep` deploys the logs and alerts with the pool. Each alert
-is a scheduled query that runs every 5 minutes on the rows ingested since its
-last run, so a late row still counts once, all of them emailing
-`WIN_WORKER_ALERT_EMAILS` through one action group.
+but `personal-vault-access-policy-write` is a scheduled query that runs every 5
+minutes on the rows ingested since its last run, so a late row still counts
+once. All of them email `WIN_WORKER_ALERT_EMAILS` through one action group.
 
 | Alert | Fires on |
 |---|---|
 | `personal-vault-read` | A secret read in the personal vault by anyone but the controller |
+| `personal-vault-write`, with `WIN_WORKER_VAULT_WRITER_ACCESS=access-policies` | A write of the personal vault by anyone but the deploying principal: such a write can change its access policies |
+| `personal-vault-access-policy-write`, with `WIN_WORKER_VAULT_WRITER_ACCESS=access-policies` | Any write of the personal vault's access policies. An Activity Log alert, so it fires without the subscription's Activity Log in the workspace |
 | `deploy-vault-ca-key-read` | Any read of a key of the controller's CA, the current one or, during a rotation, the next one. A rotation's promote reads both, so expect it then |
 | `controller-state-access` | Any access to `disk-pool-state` by anyone but the controller |
 | `release-or-manifest-write` | A write or delete in `win-worker-releases` or a Flux manifest container by anyone but the deploying principal |
 | `sensitive-role-assignment` | Any role assigned on the personal vault or the state account, other than the deployment's own grants there |
-| `data-role-assignment` | A built-in role that reads or writes Key Vault secrets or blobs (Key Vault Certificate User among them), one that hands those roles out, or a pool custom role, assigned on the subscription, the resource group or those two resources, other than the deployment's own grants |
-| `run-command` | Run Command by anyone but the controller |
+| `data-role-assignment` | A built-in role that reads or writes Key Vault secrets or blobs (Key Vault Certificate User among them), one that hands those roles out, one that reaches the pool's VMs and drives (Virtual Machine Contributor, Elastic SAN Snapshot Exporter, Azure Connected Machine Onboarding), or a pool custom role, assigned on the subscription, the stamp's or the pool's resource group, or those two resources, other than the deployment's own grants |
+| `run-command` | Run Command in the stamp's or the pool's resource group by anyone but the controller |
 | `federated-credential-write` | A federated credential written on a stamp identity by anyone but the deploying principal |
 | `pod-exec` | An exec or attach session into a pod in the stamp's namespace, as it opens |
 | `pod-created-directly`, `service-account-token` | A pod created with the controller's, the Portal's or the Linux worker's service account by anyone but its ReplicaSet or Job; a token requested for one of them by anyone but a node |
@@ -1835,9 +2009,11 @@ last run, so a late row still counts once, all of them emailing
   storage accounts' `StorageBlobLogs` and the three vaults' `AuditEvent` go to
   the perimeter's workspace with `AZURE_POLICY_RESTRICTED=true`, and to the main one
   otherwise.
-- **The Activity Log.** Four rules read the subscription's Activity Log in the
-  main workspace. Sending it there is the subscription owner's job; until then
-  those rules never fire.
+- **The Activity Log.** Four rules, five with the personal vault's access
+  policies, read the subscription's Activity Log in the main workspace.
+  Sending it there is the subscription owner's job; until then those rules
+  never fire. `personal-vault-access-policy-write` reads the Activity Log
+  itself.
 - **The VMs.** The data collection rule sends the System and Application event
   logs' errors and warnings and basic performance counters, and the agent its
   heartbeat, to the main workspace.
@@ -1874,6 +2050,13 @@ These remain with the pool as built. Each says what bounds it.
   pool's own, that reads secrets or blobs isn't recognized when it is
   assigned. A read of a personal secret, or any access to the controller's
   state, still alerts whatever the role.
+- **The fallbacks grant more than the custom roles.** With
+  `WIN_WORKER_CONTROLLER_ACCESS=built-in-roles`, the controller's roles in
+  the pool's group include a SAS URL to a scale set's disk, which no policy
+  blocks. With `WIN_WORKER_VAULT_WRITER_ACCESS=access-policies`, anyone who
+  may write the personal vault can give itself reads of every token: two
+  alerts watch the vault's writes, and `personal-vault-read` each read. See
+  [Custom roles and built-in fallbacks](#custom-roles-and-built-in-fallbacks).
 - **The deploying principal controls the deployment.** A protected pipeline and
   the alerts bound it.
 - **The Portal is trusted like the deployment.** It makes every access decision,
@@ -2003,6 +2186,9 @@ each.
 | `WIN_WORKER_EXTRA_ENV` | unset | Non-secret `NAME=VALUE` pairs for your own tools, separated by semicolons |
 | `WIN_WORKER_FEED_ENDPOINTS` | unset | Comma-separated https package feed URLs the workers' NuGet credential provider signs in to with their identity |
 | `WIN_WORKER_STANDBY_POOL_PRINCIPAL_ID` | unset (looked up) | The Standby Pool resource provider's object ID, when the deploying principal can't read the directory |
+| `WIN_WORKER_RESOURCE_GROUP` | unset (the stamp's resource group) | A [resource group of the pool's own](#the-pools-resource-group), which the subscription owner creates with its policy; the deploy doesn't move an existing pool into, out of or between such groups |
+| `WIN_WORKER_CONTROLLER_ACCESS` | `custom-role` | `custom-role`; `built-in-roles`, with `WIN_WORKER_RESOURCE_GROUP`, when the tenant can't create more custom role definitions ([Custom roles and built-in fallbacks](#custom-roles-and-built-in-fallbacks)) |
+| `WIN_WORKER_VAULT_WRITER_ACCESS` | `custom-role` | `custom-role`; `access-policies` when the tenant can't create more custom role definitions |
 | `WIN_DEV_DRIVE_POOL_COUNT` (`M`) | `10` | Concurrent trees plus spares |
 | `WIN_DEV_DRIVE_SPARE_COUNT` | `2` | `2` |
 | `WIN_DEV_DRIVE_MAX_PER_USER` (`N`) | `3` | `1` to `5` |
@@ -2114,7 +2300,8 @@ fails the build instead of every worker.
   [Windows image README](../../../deploy/providers/azure/windows/README.md#userdata).
 - **The controller's overlay,** from base-infra's outputs:
   `PS_DISK_POOL_STATE_URL`, `EXPECTED_WIN_WORKER_OID`, `WIN_WORKER_SCALE_SET_ID`,
-  `WIN_WORKER_STANDBY_POOL_ID`, `WIN_WORKER_DCR_ID`,
+  whose resource group the controller keeps every VM, disk, NIC and snapshot
+  in, `WIN_WORKER_STANDBY_POOL_ID`, `WIN_WORKER_DCR_ID`,
   `WIN_WORKER_GALLERY_IMAGE_ID`, `WIN_WORKER_CONFIG_VERSION`, its identity's
   client ID, and `PILOTSWARM_PERSONAL_SECRET_VAULT_URI`. With `EDGE_MODE=afd`,
   its `APPGW_TRUSTED_ROOT_CERTS` is the list of App Gateway roots that hold

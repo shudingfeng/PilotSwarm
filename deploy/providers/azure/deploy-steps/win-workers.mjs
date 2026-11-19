@@ -2,9 +2,18 @@
 // calls it only with WIN_WORKERS_ENABLED=true, around the steps that Bicep
 // alone can't do for the pool:
 //
-//   before base-infra  look up the three custom role definitions that the
+//   before base-infra  look up the custom role definitions that the deployment
+//                      chooses (WIN_WORKER_CONTROLLER_ACCESS and
+//                      WIN_WORKER_VAULT_WRITER_ACCESS) and that the
 //                      subscription owner creates once (and print a missing
-//                      one's definition). With WIN_WORKER_IMAGE_VERSION set:
+//                      one's definition); read the built-in roles it assigns
+//                      the controller instead, and stop if one now grants a
+//                      SAS, data or subnet write action beyond those
+//                      documented; with a resource group of the pool's own
+//                      (WIN_WORKER_RESOURCE_GROUP), check that it exists; and
+//                      check that no other resource group holds the pool's
+//                      scale set, so a deploy never moves a pool.
+//                      With WIN_WORKER_IMAGE_VERSION set:
 //                      check whether the scale set exists, so Bicep sets its
 //                      capacity only when it creates it; find the standby pool
 //                      resource provider's principal; read the disk
@@ -50,7 +59,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { log, run } from "../../../scripts/lib/common.mjs";
 import { deploysPostgres } from "../../../scripts/lib/database-env.mjs";
-import { policyRestricted, settingValue, winWorkerSettings, winWorkersEnabled } from "../../../scripts/lib/aks-env.mjs";
+import { policyRestricted, settingValue, winWorkerPoolResourceGroup, winWorkerSettings, winWorkersEnabled } from "../../../scripts/lib/aks-env.mjs";
 import { renderWinWorkerUserData } from "../../../scripts/lib/render-params.mjs";
 import { diskControllerOverlayEnv } from "../../../scripts/lib/stage-manifests.mjs";
 import { COORDINATION_HOST_CA_HASH_KEY, caBundleHash } from "../../../scripts/lib/coordination-host.mjs";
@@ -86,12 +95,16 @@ const BLOB_DATA_CONTRIBUTOR_ROLE_ID = "ba92f5b4-2d11-453d-a403-e96b0029c9fe";
 const GUID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
 const NOT_FOUND = /ResourceNotFound|ResourceGroupNotFound|ParentResourceNotFound|NotFound|was not found|could not be found/i;
 const SECRET_NOT_FOUND = /SecretNotFound|was not found|could not be found|\(NotFound\)/i;
+const AUTHORIZATION_FAILED = /AuthorizationFailed|does not have authorization/i;
+const SCALE_SET_ID = /^\/subscriptions\/([^/]+)\/resourceGroups\/([^/]+)\/providers\/Microsoft\.Compute\/virtualMachineScaleSets\/([^/]+)$/i;
 
-// The custom role definitions the subscription owner creates once. A role
-// that can assign roles can't create role definitions, so the deploying
-// principal only assigns them (win-workers.bicep, personal-keyvault.bicep).
-// The controller's actions are those of deploy/providers/azure/disk-controller/README.md
-// ("Permissions").
+// The custom role definitions the subscription owner creates once, for the
+// deployments that choose them: WIN_WORKER_CONTROLLER_ACCESS and
+// WIN_WORKER_VAULT_WRITER_ACCESS, both `custom-role` by default. A role that
+// can assign roles can't create role definitions, so the deploying principal
+// only assigns them (win-workers.bicep, win-worker-pool.bicep,
+// personal-keyvault.bicep). The controller's actions are those of
+// deploy/providers/azure/disk-controller/README.md ("Permissions").
 export const CUSTOM_ROLES = Object.freeze({
   diskPoolController: Object.freeze({
     envKey: "WIN_WORKER_CONTROLLER_ROLE_ID",
@@ -128,13 +141,6 @@ export const CUSTOM_ROLES = Object.freeze({
     ]),
     dataActions: Object.freeze([]),
   }),
-  workerSubnetJoin: Object.freeze({
-    envKey: "WIN_WORKER_SUBNET_JOIN_ROLE_ID",
-    roleName: "PilotSwarm Worker Subnet Join",
-    description: "Join a NIC to a subnet; assigned on the PilotSwarm Windows worker subnet only.",
-    actions: Object.freeze(["Microsoft.Network/virtualNetworks/subnets/join/action"]),
-    dataActions: Object.freeze([]),
-  }),
   personalVaultWriter: Object.freeze({
     envKey: "WIN_WORKER_VAULT_WRITER_ROLE_ID",
     roleName: "PilotSwarm Personal Secret Writer",
@@ -147,6 +153,99 @@ export const CUSTOM_ROLES = Object.freeze({
     ]),
   }),
 });
+
+// The custom roles a deployment's settings choose.
+export function chosenCustomRoles(settings) {
+  return [
+    ...(settings.controllerAccess === "custom-role" ? [CUSTOM_ROLES.diskPoolController] : []),
+    ...(settings.vaultWriterAccess === "custom-role" ? [CUSTOM_ROLES.personalVaultWriter] : []),
+  ];
+}
+
+// The built-in roles the deploy assigns the controller: Windows 365 Network
+// User on the worker subnet, always, for its NIC joins; and with
+// WIN_WORKER_CONTROLLER_ACCESS=built-in-roles, instead of "PilotSwarm Disk
+// Pool Controller", Virtual Machine Contributor, Elastic SAN Snapshot Exporter
+// and Azure Connected Machine Onboarding on the pool's resource group, Reader
+// on the workers' data collection rule and Compute Gallery Image Reader on the
+// image (win-workers.bicep, win-worker-pool.bicep). `accepted` lists the
+// sensitive operations (sensitiveGrants) that docs/developer/deploy/windows-workers.md
+// documents for each: the deploy stops if a role grants any other.
+export const BUILT_IN_ROLES = Object.freeze({
+  windows365NetworkUser: Object.freeze({
+    id: "7eabc9a4-85f7-4f71-b8ab-75daaccc1033",
+    roleName: "Windows 365 Network User",
+    accepted: Object.freeze([]),
+  }),
+  virtualMachineContributor: Object.freeze({
+    id: "9980e02c-c2be-4d73-94e8-173b1dc7cf3c",
+    roleName: "Virtual Machine Contributor",
+    // The pool's group holds no storage account, which its resource type
+    // policy refuses, so listKeys finds none there.
+    accepted: Object.freeze([
+      "Microsoft.Compute/virtualMachineScaleSets/disks/beginGetAccess/action",
+      "Microsoft.Compute/virtualMachines/retrieveBootDiagnosticsData/action",
+      "Microsoft.Compute/virtualMachineScaleSets/virtualMachines/retrieveBootDiagnosticsData/action",
+      "Microsoft.Storage/storageAccounts/listKeys/action",
+    ]),
+  }),
+  elasticSanSnapshotExporter: Object.freeze({
+    id: "1c4770c0-34f7-4110-a1ea-a5855cc7a939",
+    roleName: "Elastic SAN Snapshot Exporter",
+    // Elastic SAN volumes are none of the pool's resource types.
+    accepted: Object.freeze(["Microsoft.ElasticSan/elasticSans/volumeGroups/snapshots/beginGetAccess/action"]),
+  }),
+  connectedMachineOnboarding: Object.freeze({
+    id: "b64e21ea-ac4e-4cdf-9dc9-5b892992bee7",
+    roleName: "Azure Connected Machine Onboarding",
+    accepted: Object.freeze([]),
+  }),
+  reader: Object.freeze({
+    id: "acdd72a7-3385-48ef-bd42-f606fba81ae7",
+    roleName: "Reader",
+    accepted: Object.freeze([]),
+  }),
+  computeGalleryImageReader: Object.freeze({
+    id: "cf7c76d2-98a3-4358-a134-615aa78bf44d",
+    roleName: "Compute Gallery Image Reader",
+    accepted: Object.freeze([]),
+  }),
+});
+
+// The built-in roles a deployment's settings assign the controller.
+export function controllerBuiltInRoles(settings) {
+  const roles = [BUILT_IN_ROLES.windows365NetworkUser];
+  if (settings.controllerAccess === "built-in-roles") {
+    roles.push(BUILT_IN_ROLES.virtualMachineContributor, BUILT_IN_ROLES.elasticSanSnapshotExporter,
+      BUILT_IN_ROLES.connectedMachineOnboarding, BUILT_IN_ROLES.reader, BUILT_IN_ROLES.computeGalleryImageReader);
+  }
+  return roles;
+}
+
+// Operations that hand out a SAS URL to a disk, a snapshot, a restore point's
+// disks, a gallery's container image or a boot log, or a storage account's
+// keys, and a subnet's write and delete, which could take the worker subnet's
+// NSG off. A wildcard in a role counts when it covers one.
+export const SENSITIVE_OPERATIONS = Object.freeze([
+  "Microsoft.Compute/disks/beginGetAccess/action",
+  "Microsoft.Compute/snapshots/beginGetAccess/action",
+  "Microsoft.Compute/virtualMachineScaleSets/disks/beginGetAccess/action",
+  "Microsoft.Compute/restorePointCollections/restorePoints/diskRestorePoints/beginGetAccess/action",
+  "Microsoft.Compute/restorePointCollections/restorePoints/retrieveSasUris/action",
+  "Microsoft.Compute/galleries/remoteContainerImages/beginGetAccess/action",
+  "Microsoft.Compute/virtualMachines/retrieveBootDiagnosticsData/action",
+  "Microsoft.Compute/virtualMachineScaleSets/virtualMachines/retrieveBootDiagnosticsData/action",
+  "Microsoft.ElasticSan/elasticSans/volumeGroups/snapshots/beginGetAccess/action",
+  "Microsoft.Storage/storageAccounts/listKeys/action",
+  "Microsoft.Storage/storageAccounts/listAccountSas/action",
+  "Microsoft.Storage/storageAccounts/listServiceSas/action",
+  "Microsoft.Storage/storageAccounts/regenerateKey/action",
+  "Microsoft.Network/virtualNetworks/subnets/write",
+  "Microsoft.Network/virtualNetworks/subnets/delete",
+]);
+// An action of this name hands out a SAS URL, a key or a credential, on
+// whatever resource type.
+const SENSITIVE_ACTION = /\/(?:begingetaccess|retrievesasuris|retrievebootdiagnosticsdata|listkeys|listaccountsas|listservicesas|regeneratekey|listcredentials?|listsecrets)\/action$/i;
 
 function firstLine(text) {
   return String(text ?? "").trim().split(/\r?\n/)[0].slice(0, 300);
@@ -163,7 +262,10 @@ function modulesInclude(modules, name) {
 }
 
 // Resource names by the conventions of base-infra/bicep/main.bicep and its
-// modules: the step runs before base-infra has reported any output.
+// modules: the step runs before base-infra has reported any output. The
+// scale set, the standby pool and every VM, disk, NIC and snapshot of the
+// pool are in the pool's resource group (WIN_WORKER_RESOURCE_GROUP, else the
+// stamp's); everything else is in the stamp's.
 export function winWorkerResourceNames(env) {
   for (const key of ["SUBSCRIPTION_ID", "RESOURCE_GROUP", "RESOURCE_PREFIX"]) {
     if (!env[key]) throw new Error(`The Windows worker deploy step needs ${key}.`);
@@ -171,12 +273,17 @@ export function winWorkerResourceNames(env) {
   const prefix = env.RESOURCE_PREFIX;
   const alpha = prefix.toLowerCase().replace(/[-_]/g, "");
   const group = `/subscriptions/${env.SUBSCRIPTION_ID}/resourceGroups/${env.RESOURCE_GROUP}`;
+  const pool = winWorkerPoolResourceGroup(env);
+  const poolGroup = pool.separate ? `/subscriptions/${env.SUBSCRIPTION_ID}/resourceGroups/${pool.name}` : group;
   return {
     subscriptionId: env.SUBSCRIPTION_ID,
     resourceGroup: env.RESOURCE_GROUP,
     resourceGroupId: group,
+    poolResourceGroup: pool.separate ? pool.name : env.RESOURCE_GROUP,
+    poolResourceGroupId: poolGroup,
+    separatePoolResourceGroup: pool.separate,
     scaleSetName: `${prefix}-win-workers`,
-    scaleSetId: `${group}/providers/Microsoft.Compute/virtualMachineScaleSets/${prefix}-win-workers`,
+    scaleSetId: `${poolGroup}/providers/Microsoft.Compute/virtualMachineScaleSets/${prefix}-win-workers`,
     galleryImageId: `${group}/providers/Microsoft.Compute/galleries/${alpha}gallery/images/pilotswarm-win-worker`,
     deployKeyVaultName: `${alpha}kvdep`,
     personalKeyVaultName: `${alpha}kvpers`,
@@ -216,14 +323,15 @@ export function customRoleDefinition(role, subscriptionId) {
   };
 }
 
-// Finds each custom role definition by name and sets its ID (a GUID) in the
-// env map for render-params.mjs. A missing role stops the deploy with the
-// definition the subscription owner creates; a role without one of the
-// actions the pool needs is reported.
-export function resolveCustomRoles(env, { runFn = run } = {}) {
+// Finds each chosen custom role definition by name and sets its ID (a GUID)
+// in the env map for render-params.mjs. A missing role stops the deploy with
+// the definition the subscription owner creates; a role without one of the
+// actions the pool needs is reported. A role the settings don't choose is
+// never looked up.
+export function resolveCustomRoles(env, { runFn = run, roles = chosenCustomRoles(winWorkerSettings(env)) } = {}) {
   const { subscriptionId } = winWorkerResourceNames(env);
   const missing = [];
-  for (const role of Object.values(CUSTOM_ROLES)) {
+  for (const role of roles) {
     const found = azJson(runFn, [
       "role", "definition", "list", "--custom-role-only", "true",
       "--name", role.roleName, "--scope", `/subscriptions/${subscriptionId}`,
@@ -248,6 +356,163 @@ export function resolveCustomRoles(env, { runFn = run } = {}) {
         `the subscription owner creates once, with \`az role definition create --role-definition @<file>\` for each:\n${definitions}`,
     );
   }
+}
+
+// ─── The built-in roles' safeguard ───
+
+// A role definition's action entry as a pattern: `*` matches any run of
+// characters, `/` included, as in Azure RBAC.
+function actionPattern(entry) {
+  const parts = String(entry).split("*").map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&"));
+  return new RegExp(`^${parts.join(".*")}$`, "i");
+}
+
+/**
+ * The sensitive operations a role definition grants, in lower case: every
+ * data action; every action entry that SENSITIVE_ACTION matches, as written,
+ * a wildcard entry included; and every one of SENSITIVE_OPERATIONS that an
+ * action entry covers, wildcards included; each less what the entry's
+ * notActions take out.
+ */
+export function sensitiveGrants(definition) {
+  const found = new Set();
+  for (const permission of definition?.permissions ?? []) {
+    const notActions = (permission?.notActions ?? []).map(actionPattern);
+    const kept = (operation) => !notActions.some((pattern) => pattern.test(operation));
+    for (const entry of (permission?.actions ?? []).map(String)) {
+      if (SENSITIVE_ACTION.test(entry) && kept(entry)) found.add(entry.toLowerCase());
+      const pattern = actionPattern(entry);
+      for (const operation of SENSITIVE_OPERATIONS) {
+        if (pattern.test(operation) && kept(operation)) found.add(operation.toLowerCase());
+      }
+    }
+    for (const entry of permission?.dataActions ?? []) found.add(String(entry).toLowerCase());
+  }
+  return [...found].sort();
+}
+
+// Reads each built-in role's definition, as Azure has it now, and stops the
+// deploy if one grants a sensitive operation beyond its `accepted` list, or
+// is not that built-in role.
+export function checkBuiltInRoles(env, roles, { runFn = run } = {}) {
+  const { subscriptionId } = winWorkerResourceNames(env);
+  const problems = [];
+  for (const role of roles) {
+    const found = azJson(runFn, [
+      "role", "definition", "list", "--name", role.id, "--scope", `/subscriptions/${subscriptionId}`,
+    ], `read the built-in role definition '${role.roleName}'`) ?? [];
+    const definition = (Array.isArray(found) ? found : []).find((d) => String(d?.name ?? "").toLowerCase() === role.id);
+    if (!definition || definition.roleType !== "BuiltInRole") {
+      problems.push(`'${role.roleName}' (${role.id}) is not a built-in role definition here`);
+      continue;
+    }
+    const accepted = new Set(role.accepted.map((operation) => operation.toLowerCase()));
+    const extra = sensitiveGrants(definition).filter((operation) => !accepted.has(operation));
+    if (extra.length > 0) problems.push(`'${role.roleName}' (${role.id}) now grants ${extra.join(", ")}`);
+  }
+  if (problems.length > 0) {
+    throw new Error(
+      `The Windows worker pool assigns the disk controller built-in roles whose definitions must grant no SAS, data or ` +
+        `subnet write action beyond those docs/developer/deploy/windows-workers.md documents: ${problems.join("; ")}. ` +
+        "Review the change before deploying again; WIN_WORKER_CONTROLLER_ACCESS=custom-role assigns the custom role instead.",
+    );
+  }
+}
+
+// The pool's resource group, before base-infra. With a group of the pool's
+// own, the subscription owner creates it, with its resource type policy,
+// before the first deploy. And whatever the setting, the deploy doesn't move
+// a pool: a scale set of the pool's name in any other group stops it, since
+// a second pool would start and the first one's VMs, drives and snapshots
+// would stay behind.
+export function checkPoolResourceGroup(names, { runFn = run, recordedScaleSetId = "" } = {}) {
+  if (names.separatePoolResourceGroup) {
+    const group = runFn("az", ["group", "show", "--name", names.poolResourceGroup, "--query", "id", "--output", "tsv"],
+      { capture: true, allowFail: true });
+    if (group.status !== 0) {
+      if (NOT_FOUND.test(String(group.stderr ?? ""))) {
+        throw new Error(
+          `WIN_WORKER_RESOURCE_GROUP names ${names.poolResourceGroup}, which doesn't exist. The subscription owner creates it, with ` +
+            "the \"Allowed resource types\" policy that docs/developer/deploy/windows-workers.md lists, before the deploy.",
+        );
+      }
+      throw new Error(`Cannot read resource group ${names.poolResourceGroup}: ${firstLine(group.stderr) || `exit ${group.status}`}`);
+    }
+  }
+  const elsewhere = scaleSetGroupsElsewhere(names, { runFn, recordedScaleSetId });
+  if (elsewhere.length === 0) return;
+  const setting = names.separatePoolResourceGroup ? "WIN_WORKER_RESOURCE_GROUP names" : "with WIN_WORKER_RESOURCE_GROUP unset, it is the stamp's group,";
+  const deleteOld = `or delete the old pool, with its drives and snapshots, before deploying one in ${names.poolResourceGroup}`;
+  const remedy = elsewhere.length > 1
+    ? "Delete the pools you don't use, with their drives and snapshots, and point WIN_WORKER_RESOURCE_GROUP at the group of the one " +
+      "you keep, or unset it for the stamp's group."
+    : elsewhere[0].toLowerCase() === names.resourceGroup.toLowerCase()
+      ? `Unset WIN_WORKER_RESOURCE_GROUP to keep the pool where it is, ${deleteOld}.`
+      : `Set WIN_WORKER_RESOURCE_GROUP=${elsewhere[0]} to keep the pool where it is, ${deleteOld}.`;
+  const where = elsewhere.length > 1
+    ? `Scale sets named ${names.scaleSetName} are in resource groups ${elsewhere.slice(0, -1).join(", ")} and ${elsewhere.at(-1)}`
+    : `Scale set ${names.scaleSetName} is in resource group ${elsewhere[0]}`;
+  throw new Error(
+    `${where}, but the pool's resource group is ` +
+      `${names.poolResourceGroup} (${setting} ${names.poolResourceGroup}). The deploy doesn't move a pool between resource ` +
+      `groups: a second pool would start there, and the old one's VMs, drives and snapshots would stay behind. ${remedy}`,
+  );
+}
+
+// The resource groups other than the pool's that hold a scale set of the
+// pool's name. A list across the subscription finds them in every group the
+// deploying principal can read. A principal that may read only the stamp's
+// and the pool's groups sees those alone; where Azure refuses such a
+// principal the list, the step looks in the stamp's group by name instead.
+// The scale set ID an earlier deploy recorded (WIN_WORKER_SCALE_SET_ID, from
+// the env file or the outputs cache) names one more group, which counts
+// while that scale set is still there.
+export function scaleSetGroupsElsewhere(names, { runFn = run, recordedScaleSetId = "" } = {}) {
+  const pool = names.poolResourceGroup.toLowerCase();
+  const name = names.scaleSetName.toLowerCase();
+  const found = new Map();
+  const note = (group) => {
+    if (group.toLowerCase() !== pool && !found.has(group.toLowerCase())) found.set(group.toLowerCase(), group);
+  };
+  const listed = runFn("az", ["vmss", "list", "--subscription", names.subscriptionId, "--query", "[].id", "--output", "json"],
+    { capture: true, allowFail: true });
+  if (listed.status === 0) {
+    let ids;
+    try {
+      ids = JSON.parse(listed.stdout || "[]");
+    } catch {
+      throw new Error("Cannot list the subscription's scale sets: the Azure CLI returned no JSON.");
+    }
+    for (const id of Array.isArray(ids) ? ids : []) {
+      const match = SCALE_SET_ID.exec(String(id ?? ""));
+      if (match && match[3].toLowerCase() === name) note(match[2]);
+    }
+  } else if (AUTHORIZATION_FAILED.test(String(listed.stderr ?? ""))) {
+    log("warn", "[win-workers] the deploying principal may not list the subscription's scale sets, so the check that the pool stays " +
+      "in its resource group looks only in the stamp's group and at the scale set an earlier deploy recorded.");
+    if (names.resourceGroup.toLowerCase() !== pool && scaleSetExists({ resourceGroup: names.resourceGroup, name: names.scaleSetName }, { runFn })) {
+      note(names.resourceGroup);
+    }
+  } else {
+    throw new Error(`Cannot list the subscription's scale sets: ${firstLine(listed.stderr) || `exit ${listed.status}`}`);
+  }
+  const recorded = SCALE_SET_ID.exec(String(recordedScaleSetId ?? "").trim());
+  if (recorded && recorded[1].toLowerCase() === names.subscriptionId.toLowerCase() && recorded[3].toLowerCase() === name
+    && recorded[2].toLowerCase() !== pool && !found.has(recorded[2].toLowerCase())) {
+    let exists;
+    try {
+      exists = scaleSetExists({ resourceGroup: recorded[2], name: recorded[3] }, { runFn });
+    } catch (error) {
+      throw new Error(
+        `${error.message.replace(/\.$/, "")}. An earlier deploy recorded it in resource group ${recorded[2]} (WIN_WORKER_SCALE_SET_ID), and the ` +
+          "deploy doesn't move a pool between resource groups. Once that pool is gone, remove WIN_WORKER_SCALE_SET_ID from the " +
+          "env file and from the outputs cache, deploy/.tmp/<env>/bicep-outputs.cache.json.",
+        { cause: error },
+      );
+    }
+    if (exists) note(recorded[2]);
+  }
+  return [...found.values()];
 }
 
 // ─── The scale set, the standby pool's principal, the CA ───
@@ -470,13 +735,15 @@ export function deleteAccountWideBlobGrant(names, { runFn = run } = {}) {
 export function beforeBicep({ env, modules }, { runFn = run, randomBytesFn = randomBytes, tmpRoot = tmpdir() } = {}) {
   if (!modulesInclude(modules, "base-infra")) return { secureParameters: {} };
   const names = winWorkerResourceNames(env);
-  resolveCustomRoles(env, { runFn });
   const settings = winWorkerSettings(env);
+  resolveCustomRoles(env, { runFn, roles: chosenCustomRoles(settings) });
+  checkBuiltInRoles(env, controllerBuiltInRoles(settings), { runFn });
+  checkPoolResourceGroup(names, { runFn, recordedScaleSetId: settingValue(env, "WIN_WORKER_SCALE_SET_ID") });
   if (!settings.imageVersion) {
     log("info", "[win-workers] WIN_WORKER_IMAGE_VERSION is unset: base-infra creates the gallery and its image definition, and no scale set yet.");
     return { secureParameters: {} };
   }
-  const exists = scaleSetExists({ resourceGroup: names.resourceGroup, name: names.scaleSetName }, { runFn });
+  const exists = scaleSetExists({ resourceGroup: names.poolResourceGroup, name: names.scaleSetName }, { runFn });
   env.WIN_WORKER_SCALE_SET_EXISTS = String(exists);
   env.WIN_WORKER_STANDBY_POOL_PRINCIPAL_ID = standbyPoolPrincipalId(env, { runFn });
   const deployVaultName = settingValue(env, "DEPLOY_KEY_VAULT_NAME") || names.deployKeyVaultName;

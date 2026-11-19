@@ -165,7 +165,8 @@ An operator who adds a Windows worker pool to their own stamp
 (`WIN_WORKERS_ENABLED=true`) runs `deploy.mjs` from their own pipeline or by
 hand, and follows [Windows workers](../docs/developer/deploy/windows-workers.md)
 for the steps outside it: the subscription owner's custom role definitions,
-app role assignments, the Windows image, the golden drive snapshot, the
-four-step upgrade, whose freeze reaches the disk controller only through
-`kubectl port-forward`, and the rotation of the disk controller's CA
-(`npm run deploy:rotate-ca`).
+or their built-in fallbacks, and the pool's own resource group with its
+resource type policy, app role assignments, the Windows image, the golden
+drive snapshot, the four-step upgrade, whose freeze reaches the disk
+controller only through `kubectl port-forward`, and the rotation of the disk
+controller's CA (`npm run deploy:rotate-ca`).

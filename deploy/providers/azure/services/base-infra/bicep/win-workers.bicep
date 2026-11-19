@@ -6,38 +6,26 @@
 //   * the stamp's Azure Compute Gallery and its image definition
 //     `pilotswarm-win-worker` (Windows, generalized, Gen2), which the image
 //     build publishes each version to. Output as WIN_WORKER_GALLERY_IMAGE_ID;
-//   * the disk controller's grants: the custom role "PilotSwarm Disk Pool
-//     Controller" on the resource group, the custom role "PilotSwarm Worker
-//     Subnet Join" on the worker subnet only (a NIC write can't be scoped to a
-//     subnet, so the controller's NIC writes stay at resource-group scope) and
-//     Managed Identity Operator on the workers' identity only. The
-//     subscription owner creates both custom role definitions once; this only
-//     assigns them;
+//   * win-worker-pool.bicep on the pool's resource group (poolResourceGroupName,
+//     WIN_WORKER_RESOURCE_GROUP, else this group), with the disk controller's
+//     grants there and, once WIN_WORKER_IMAGE_VERSION is set, the Flexible
+//     scale set and its standby pool;
+//   * the disk controller's grants outside that group: Windows 365 Network
+//     User on the worker subnet only (a NIC write can't be scoped to a subnet,
+//     so its NIC writes stay on the pool's group) and Managed Identity Operator
+//     on the workers' identity only; with a pool group of its own, its role on
+//     the workers' data collection rule, which it associates each VM with, and
+//     on the image definition: the custom role "PilotSwarm Disk Pool
+//     Controller", or with WIN_WORKER_CONTROLLER_ACCESS=built-in-roles, Reader
+//     and Compute Gallery Image Reader. The subscription owner creates the
+//     custom role definition once; this only assigns it;
 //   * Cognitive Services OpenAI User on the stamp's Foundry account, when it
 //     has one, for the workers' identity and the coordination host's.
 //
-// Once WIN_WORKER_IMAGE_VERSION is set (the model needs an image version):
-//   * the Flexible scale set, created with capacity `initialCapacity` (Y) and
-//     never touched by Bicep again. A deploy that wrote a capacity back would
-//     add or remove VMs behind the disk controller, which owns the capacity.
-//     The Windows worker deploy step (deploy/providers/azure/deploy-steps/win-workers.mjs)
-//     tells this module whether the scale set exists, and changes the model of
-//     an existing one with a PATCH that never names sku.capacity;
-//   * its standby pool of deallocated VMs, with the five roles the standby
-//     pool resource provider needs on the resource group.
-//
-// The model: one zone (Premium SSD v2 Dev Drives are zonal), one fault domain,
-// Standard security (nested virtualization), a managed 256 GiB OS disk
-// (standby pools cannot deallocate ephemeral OS disks), the OS disk and NIC
-// deleted with the VM, a NIC in the worker subnet without IP forwarding,
-// exactly one user-assigned identity (a second would break the workers'
-// database sign-in, which cannot choose between identities), userData with
-// the stamp's values (render-params.mjs, renderWinWorkerUserData), the Azure
-// Monitor Agent signed in as that identity, manual upgrades and no automatic
-// repairs. The local administrator account that a Windows model requires
-// shares one generated password, kept only in the deploy-only vault; nobody
-// signs in with it (operators use Run Command), and the worker subnet's NSG
-// keeps VMs from reaching each other.
+// Once WIN_WORKER_IMAGE_VERSION is set, the standby pool resource provider's
+// grants outside the pool's group: Network Contributor on the worker subnet,
+// Compute Gallery Sharing Admin and Compute Gallery Artifacts Publisher on the
+// gallery, and Managed Identity Operator on the workers' identity.
 // ==============================================================================
 
 @description('Azure region.')
@@ -89,11 +77,17 @@ param vnetName string
 @description('Name of the worker subnet in it.')
 param workerSubnetName string
 
-@description('Name (GUID) of the custom role definition "PilotSwarm Disk Pool Controller".')
-param diskPoolControllerRoleId string
+@description('The pool\'s own resource group (WIN_WORKER_RESOURCE_GROUP), which holds the scale set, the standby pool and every VM, disk, NIC and snapshot of the pool. Empty: this resource group.')
+param poolResourceGroupName string = ''
 
-@description('Name (GUID) of the custom role definition "PilotSwarm Worker Subnet Join".')
-param workerSubnetJoinRoleId string
+@description('Name (GUID) of the custom role definition "PilotSwarm Disk Pool Controller". Empty with controllerBuiltInRoles.')
+param diskPoolControllerRoleId string = ''
+
+@description('WIN_WORKER_CONTROLLER_ACCESS=built-in-roles: the controller gets built-in roles instead of "PilotSwarm Disk Pool Controller". The deploy allows it only with a pool resource group other than this one.')
+param controllerBuiltInRoles bool = false
+
+@description('Resource ID of the workers\' data collection rule, in this resource group, which the controller associates each VM with.')
+param dataCollectionRuleId string
 
 @description('Object ID of the standby pool resource provider\'s service principal in the tenant. Needed once the standby pool is deployed.')
 param standbyPoolPrincipalId string = ''
@@ -107,19 +101,30 @@ param coordinationHostPrincipalId string = ''
 var alphaPrefix = toLower(replace(replace(resourceNamePrefix, '-', ''), '_', ''))
 var galleryName = '${alphaPrefix}gallery'
 var imageDefinitionName = 'pilotswarm-win-worker'
-var scaleSetName = '${resourceNamePrefix}-win-workers'
-var standbyPoolName = '${resourceNamePrefix}-win-worker-standby'
 var deployScaleSet = !empty(imageVersion)
-var scaleSetId = resourceId('Microsoft.Compute/virtualMachineScaleSets', scaleSetName)
+var poolGroupName = empty(poolResourceGroupName) ? resourceGroup().name : poolResourceGroupName
+var separatePoolGroup = toLower(poolGroupName) != toLower(resourceGroup().name)
 
 var managedIdentityOperatorRoleId = 'f1a07417-d97a-45cb-824c-7a7467783830'
 var cognitiveServicesOpenAiUserRoleId = '5e0bd9bd-7b93-4f28-af87-19fc36ad61bd'
-// What the standby pool resource provider needs to create, deallocate and
-// delete VMs from the gallery image, with their NICs and the workers' identity.
-var standbyPoolRoleIds = [
+var windows365NetworkUserRoleId = '7eabc9a4-85f7-4f71-b8ab-75daaccc1033'
+var networkContributorRoleId = '4d97b98b-1d4f-4787-a291-c67834d212e7'
+var readerRoleId = 'acdd72a7-3385-48ef-bd42-f606fba81ae7'
+var computeGalleryImageReaderRoleId = 'cf7c76d2-98a3-4358-a134-615aa78bf44d'
+// The controller's roles on the pool's group: the custom role, or the
+// built-in roles that together grant its actions there.
+var controllerPoolRoleIds = controllerBuiltInRoles ? [
   '9980e02c-c2be-4d73-94e8-173b1dc7cf3c' // Virtual Machine Contributor
-  '4d97b98b-1d4f-4787-a291-c67834d212e7' // Network Contributor
-  managedIdentityOperatorRoleId // Managed Identity Operator
+  '1c4770c0-34f7-4110-a1ea-a5855cc7a939' // Elastic SAN Snapshot Exporter
+  'b64e21ea-ac4e-4cdf-9dc9-5b892992bee7' // Azure Connected Machine Onboarding
+] : [
+  diskPoolControllerRoleId
+]
+var controllerDcrRoleId = controllerBuiltInRoles ? readerRoleId : diskPoolControllerRoleId
+var controllerImageRoleId = controllerBuiltInRoles ? computeGalleryImageReaderRoleId : diskPoolControllerRoleId
+// What the standby pool resource provider needs on the gallery to build VMs
+// from its image; its roles on the pool's group are in win-worker-pool.bicep.
+var standbyPoolGalleryRoleIds = [
   '1ef6a3be-d0ac-425d-8c01-acb62866290b' // Compute Gallery Sharing Admin
   '85a2d0d9-2eba-4c9c-b355-11c2cc0788ab' // Compute Gallery Artifacts Publisher
 ]
@@ -164,24 +169,16 @@ resource imageDefinition 'Microsoft.Compute/galleries/images@2024-03-03' = {
   }
 }
 
-// ─── The disk controller's grants ───
+// ─── The disk controller's grants outside the pool's group ───
 
-resource controllerRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(resourceGroup().id, controllerPrincipalId, diskPoolControllerRoleId)
-  properties: {
-    principalId: controllerPrincipalId
-    principalType: 'ServicePrincipal'
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', diskPoolControllerRoleId)
-  }
-}
-
+// The controller's scale-outs join each new NIC to the worker subnet.
 resource controllerSubnetJoin 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(workerSubnet.id, controllerPrincipalId, workerSubnetJoinRoleId)
+  name: guid(workerSubnet.id, controllerPrincipalId, windows365NetworkUserRoleId)
   scope: workerSubnet
   properties: {
     principalId: controllerPrincipalId
     principalType: 'ServicePrincipal'
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', workerSubnetJoinRoleId)
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', windows365NetworkUserRoleId)
   }
 }
 
@@ -193,6 +190,32 @@ resource controllerIdentityOperator 'Microsoft.Authorization/roleAssignments@202
     principalId: controllerPrincipalId
     principalType: 'ServicePrincipal'
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', managedIdentityOperatorRoleId)
+  }
+}
+
+resource dataCollectionRule 'Microsoft.Insights/dataCollectionRules@2023-03-11' existing = {
+  name: last(split(dataCollectionRuleId, '/'))
+}
+
+// On the stamp's group, the controller's role there covers the rule and the
+// image already.
+resource controllerDcrRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (separatePoolGroup) {
+  name: guid(dataCollectionRule.id, controllerPrincipalId, controllerDcrRoleId)
+  scope: dataCollectionRule
+  properties: {
+    principalId: controllerPrincipalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', controllerDcrRoleId)
+  }
+}
+
+resource controllerImageRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (separatePoolGroup) {
+  name: guid(imageDefinition.id, controllerPrincipalId, controllerImageRoleId)
+  scope: imageDefinition
+  properties: {
+    principalId: controllerPrincipalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', controllerImageRoleId)
   }
 }
 
@@ -224,11 +247,28 @@ resource coordinationHostFoundryRole 'Microsoft.Authorization/roleAssignments@20
   }
 }
 
-// ─── Scale set and standby pool (once an image version is set) ───
+// ─── The standby pool's grants outside the pool's group (once an image version is set) ───
 
-resource standbyPoolRoles 'Microsoft.Authorization/roleAssignments@2022-04-01' = [
-  for roleId in standbyPoolRoleIds: if (deployScaleSet) {
-    name: guid(resourceGroup().id, standbyPoolPrincipalId, roleId)
+// The standby pool resource provider creates the VMs, with their disks and
+// NICs, in the pool's group, where win-worker-pool.bicep gives it Virtual
+// Machine Contributor and Network Contributor. It also joins each NIC to the
+// worker subnet, builds the VMs from the gallery's image and gives them the
+// workers' identity, all in this group, which a role on the pool's group
+// doesn't reach: hence these grants here.
+resource standbyPoolSubnetRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (deployScaleSet) {
+  name: guid(workerSubnet.id, standbyPoolPrincipalId, networkContributorRoleId)
+  scope: workerSubnet
+  properties: {
+    principalId: standbyPoolPrincipalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', networkContributorRoleId)
+  }
+}
+
+resource standbyPoolGalleryRoles 'Microsoft.Authorization/roleAssignments@2022-04-01' = [
+  for roleId in standbyPoolGalleryRoleIds: if (deployScaleSet) {
+    name: guid(gallery.id, standbyPoolPrincipalId, roleId)
+    scope: gallery
     properties: {
       principalId: standbyPoolPrincipalId
       principalType: 'ServicePrincipal'
@@ -237,160 +277,54 @@ resource standbyPoolRoles 'Microsoft.Authorization/roleAssignments@2022-04-01' =
   }
 ]
 
-// The Azure Monitor Agent signs in as the workers' identity, so it adds no
-// identity of its own. The disk controller associates each VM with the
-// workers' data collection rule (win-worker-dcr.bicep).
-var monitorAgentExtension = {
-  name: 'AzureMonitorWindowsAgent'
+resource standbyPoolIdentityOperator 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (deployScaleSet) {
+  name: guid(workerIdentity.id, standbyPoolPrincipalId, managedIdentityOperatorRoleId)
+  scope: workerIdentity
   properties: {
-    publisher: 'Microsoft.Azure.Monitor'
-    type: 'AzureMonitorWindowsAgent'
-    typeHandlerVersion: '1.0'
-    autoUpgradeMinorVersion: true
-    enableAutomaticUpgrade: true
-    settings: {
-      authentication: {
-        managedIdentity: {
-          'identifier-name': 'mi_res_id'
-          'identifier-value': workerIdentity.id
-        }
-      }
-    }
+    principalId: standbyPoolPrincipalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', managedIdentityOperatorRoleId)
   }
 }
 
-// How a VM gets the Standard security type depends on the Compute API version.
-// Below 2025-11-01, a model that names no securityProfile gets it, in a
-// subscription not registered for Trusted Launch as default (the preview
-// feature Microsoft.Compute/TrustedLaunchByDefaultPreview), while an explicit
-// `securityType: 'Standard'` needs the subscription feature
-// Microsoft.Compute/UseStandardSecurityType there. From 2025-11-01, Trusted
-// Launch is the default for the images and sizes that support it, and the
-// model must name `securityType: 'Standard'`, the documented opt-out. Every
-// write to the scale set's model or capacity uses this version: the Windows
-// worker deploy step's PATCH (SCALE_SET_API_VERSION in win-workers.mjs) and the
-// disk controller's capacity PATCH (lib/azure.mjs). Tests keep the model and
-// those versions in step with this one.
-resource scaleSet 'Microsoft.Compute/virtualMachineScaleSets@2024-11-01' = if (deployScaleSet && !scaleSetExists) {
-  name: scaleSetName
-  location: location
-  zones: [
-    '1'
-  ]
-  sku: {
-    name: vmSize
-    tier: 'Standard'
-    capacity: initialCapacity
-  }
-  identity: {
-    type: 'UserAssigned'
-    userAssignedIdentities: {
-      '${workerIdentity.id}': {}
-    }
-  }
-  properties: {
-    orchestrationMode: 'Flexible'
-    platformFaultDomainCount: 1
-    upgradePolicy: {
-      mode: 'Manual'
-    }
-    automaticRepairsPolicy: {
-      enabled: false
-    }
-    virtualMachineProfile: {
-      userData: userData
-      osProfile: {
-        computerNamePrefix: 'pswin'
-        adminUsername: adminUsername
-        adminPassword: adminPassword
-        windowsConfiguration: {
-          provisionVMAgent: true
-          enableAutomaticUpdates: false
-          patchSettings: {
-            patchMode: 'Manual'
-          }
-        }
-      }
-      storageProfile: {
-        imageReference: {
-          id: '${imageDefinition.id}/versions/${imageVersion}'
-        }
-        osDisk: {
-          createOption: 'FromImage'
-          caching: 'ReadWrite'
-          diskSizeGB: 256
-          deleteOption: 'Delete'
-          managedDisk: {
-            storageAccountType: 'Premium_LRS'
-          }
-        }
-      }
-      networkProfile: {
-        networkApiVersion: '2020-11-01'
-        networkInterfaceConfigurations: [
-          {
-            name: 'worker-nic'
-            properties: {
-              primary: true
-              enableIPForwarding: false
-              deleteOption: 'Delete'
-              ipConfigurations: [
-                {
-                  name: 'worker-ip'
-                  properties: {
-                    primary: true
-                    subnet: {
-                      id: workerSubnet.id
-                    }
-                  }
-                }
-              ]
-            }
-          }
-        ]
-      }
-      diagnosticsProfile: {
-        bootDiagnostics: {
-          enabled: true
-        }
-      }
-      extensionProfile: {
-        extensions: [
-          monitorAgentExtension
-        ]
-      }
-    }
-  }
-}
+// ─── The pool's resource group ───
 
-resource standbyPool 'Microsoft.StandbyPool/standbyVirtualMachinePools@2025-03-01' = if (deployScaleSet) {
-  name: standbyPoolName
-  location: location
-  properties: {
-    attachedVirtualMachineScaleSetId: scaleSetId
-    virtualMachineState: 'Deallocated'
-    elasticityProfile: {
-      maxReadyCapacity: maxVms
-      minReadyCapacity: standbyMin
-    }
+module pool './win-worker-pool.bicep' = {
+  name: '${resourceNamePrefix}-win-worker-pool'
+  scope: resourceGroup(poolGroupName)
+  params: {
+    location: location
+    resourceNamePrefix: resourceNamePrefix
+    deployScaleSet: deployScaleSet
+    imageVersionId: deployScaleSet ? '${imageDefinition.id}/versions/${imageVersion}' : ''
+    vmSize: vmSize
+    maxVms: maxVms
+    initialCapacity: initialCapacity
+    standbyMin: standbyMin
+    scaleSetExists: scaleSetExists
+    adminUsername: adminUsername
+    adminPassword: adminPassword
+    userData: userData
+    workerIdentityId: workerIdentity.id
+    workerSubnetId: workerSubnet.id
+    controllerPrincipalId: controllerPrincipalId
+    controllerRoleIds: controllerPoolRoleIds
+    standbyPoolPrincipalId: standbyPoolPrincipalId
   }
   dependsOn: [
-    scaleSet
-    standbyPoolRoles
+    standbyPoolSubnetRole
+    standbyPoolGalleryRoles
+    standbyPoolIdentityOperator
   ]
 }
 
 output galleryImageId string = imageDefinition.id
-output scaleSetName string = scaleSetName
-output scaleSetId string = deployScaleSet ? scaleSetId : ''
-output standbyPoolId string = deployScaleSet ? standbyPool.id : ''
-// The controller's grant on the resource group, which the role assignment
-// alerts watch and exempt exactly (win-worker-alerts.bicep). Its other
-// grants are on the subnet and the workers' identity, which they don't watch.
-output roleGrants array = [
-  {
-    principalId: controllerPrincipalId
-    roleId: diskPoolControllerRoleId
-    scope: resourceGroup().id
-  }
-]
+output scaleSetName string = pool.outputs.scaleSetName
+output scaleSetId string = pool.outputs.scaleSetId
+output standbyPoolId string = pool.outputs.standbyPoolId
+// The controller's and the standby pool resource provider's grants on the
+// pool's group, which the role assignment alerts watch and exempt exactly
+// (win-worker-alerts.bicep). Their other grants are on the subnet, the
+// gallery, the image, the data collection rule and the workers' identity,
+// which those alerts don't watch.
+output roleGrants array = pool.outputs.roleGrants

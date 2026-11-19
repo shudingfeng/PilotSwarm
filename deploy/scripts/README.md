@@ -258,17 +258,26 @@ Base-infra then deploys, each only with the setting:
 - the workers' data collection rule, and the pool's security logs, alerts and
   action group;
 - once `WIN_WORKER_IMAGE_VERSION` is set, the Flexible scale set and its
-  standby pool.
+  standby pool, in the pool's resource group: `WIN_WORKER_RESOURCE_GROUP`, a
+  group of the pool's own that the subscription owner creates with an
+  "Allowed resource types" policy, or the stamp's group when it is unset.
+  Every VM, disk, NIC and snapshot of the pool is there too.
 
-Before the first deploy, the subscription owner creates three custom role
-definitions: "PilotSwarm Disk Pool Controller", "PilotSwarm Worker Subnet
-Join" and "PilotSwarm Personal Secret Writer". A role that can assign roles
-can't create role definitions, so the deploy only assigns them; when one is
-missing, it stops and prints the definition to create with
-`az role definition create --role-definition @<file>`. Set up the portal's
-Entra app with `deploy/scripts/auth/Setup-PortalAuth.ps1 -WorkerRoles`. The
-alert rules on the Activity Log need the subscription's Activity Log sent to
-the stamp's Log Analytics workspace, which the subscription owner configures.
+Before the first deploy, the subscription owner creates two custom role
+definitions: "PilotSwarm Disk Pool Controller" and "PilotSwarm Personal
+Secret Writer". A role that can assign roles can't create role definitions,
+so the deploy only assigns them; when a chosen one is missing, it stops and
+prints the definition to create with
+`az role definition create --role-definition @<file>`. A tenant that can't
+create more custom role definitions chooses built-in fallbacks instead:
+`WIN_WORKER_CONTROLLER_ACCESS=built-in-roles`, with `WIN_WORKER_RESOURCE_GROUP`,
+and `WIN_WORKER_VAULT_WRITER_ACCESS=access-policies`; see
+[Custom roles and built-in fallbacks](../../docs/developer/deploy/windows-workers.md#custom-roles-and-built-in-fallbacks).
+The controller's subnet join is the built-in Windows 365 Network User either
+way. Set up the portal's Entra app with
+`deploy/scripts/auth/Setup-PortalAuth.ps1 -WorkerRoles`. The alert rules on
+the Activity Log need the subscription's Activity Log sent to the stamp's Log
+Analytics workspace, which the subscription owner configures.
 
 The pool comes up in two deploys. The first, without
 `WIN_WORKER_IMAGE_VERSION`, creates the gallery, vaults, network and
@@ -278,8 +287,13 @@ deploy again: base-infra then creates the scale set.
 
 `deploy/providers/azure/deploy-steps/win-workers.mjs` runs with the setting:
 
-- before base-infra's Bicep: it looks up the custom role definitions and,
-  with an image version, checks whether the scale set exists, finds the
+- before base-infra's Bicep: it looks up the custom role definitions that the
+  settings choose; reads the built-in roles it assigns the controller, and
+  stops if one now grants a SAS, data or subnet write action beyond those the
+  Windows workers guide accepts; with `WIN_WORKER_RESOURCE_GROUP`, checks that
+  the group exists; checks that no other resource group holds the pool's
+  scale set, whatever the setting, so a deploy never moves a pool; and, with
+  an image version, checks whether the scale set exists, finds the
   standby pool resource provider's principal (or takes
   `WIN_WORKER_STANDBY_POOL_PRINCIPAL_ID`) and reads the controller's trusted
   CAs for the VMs' `userData`, certificates only. When Bicep is to create the

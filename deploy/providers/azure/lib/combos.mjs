@@ -14,6 +14,7 @@ import {
   ownershipEnforced,
   settingValue,
   winWorkerSettings,
+  winWorkerPoolResourceGroup,
   diskControllerTokenScope,
 } from "./settings.mjs";
 import { winWorkerExtraEnv, winWorkerFeedEndpoints } from "./bicep-parameters.mjs";
@@ -60,6 +61,12 @@ export function blobUsesManagedIdentity(env) {
 //                                   must be 1.
 //   win-workers-extra-env         — a WIN_WORKER_EXTRA_ENV pair is malformed or
 //                                   names a reserved setting.
+//   win-workers-built-in-roles-require-pool-group
+//                                 — WIN_WORKER_CONTROLLER_ACCESS=built-in-roles
+//                                   needs WIN_WORKER_RESOURCE_GROUP, a group of
+//                                   the pool's own: on the stamp's group those
+//                                   roles would reach every VM, disk and NIC
+//                                   there, and the storage accounts' keys.
 //   win-workers-requires-coordination-host
 //                                 — the coordination host makes the Windows
 //                                   workers owner-only and runs everything
@@ -165,6 +172,20 @@ export function validateWinWorkersCombo({ edgeMode, tlsSource, env }) {
       winWorkerFeedEndpoints(env, "");
     } catch (e) {
       refuse("win-workers-settings", e.message);
+    }
+    let poolGroup = null;
+    try {
+      poolGroup = winWorkerPoolResourceGroup(env);
+    } catch (e) {
+      refuse("win-workers-settings", e.message);
+    }
+    if (settings?.controllerAccess === "built-in-roles" && poolGroup && !poolGroup.separate) {
+      refuse(
+        "win-workers-built-in-roles-require-pool-group",
+        "WIN_WORKER_CONTROLLER_ACCESS=built-in-roles needs WIN_WORKER_RESOURCE_GROUP, a resource group of the pool's own " +
+          "other than the stamp's: on the stamp's group those roles would reach every VM, disk and NIC there, and the " +
+          "storage accounts' keys.",
+      );
     }
   }
 

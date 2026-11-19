@@ -118,13 +118,13 @@ function userDataHolds(userData, der) {
  * Returns { scaleSet, checked, lacking: [names] }.
  */
 export function workersLackingCa(names, der, { runFn = run } = {}) {
-  const scaleSet = readJson(runFn, "az", ["vmss", "show", "--resource-group", names.resourceGroup, "--name", names.scaleSetName,
+  const scaleSet = readJson(runFn, "az", ["vmss", "show", "--resource-group", names.poolResourceGroup, "--name", names.scaleSetName,
     "--include-user-data", "--output", "json"], `read the model of scale set ${names.scaleSetName}`);
   // No scale set yet (WIN_WORKER_IMAGE_VERSION unset): no VM to wait for.
   if (scaleSet === null) return { scaleSet: false, checked: 0, lacking: [] };
   const model = property(scaleSet, "virtualMachineProfile")?.userData;
   const lacking = userDataHolds(model, der) ? [] : [`the scale set model ${names.scaleSetName}`];
-  const ids = readJson(runFn, "az", ["vm", "list", "--resource-group", names.resourceGroup, "--vmss", names.scaleSetId,
+  const ids = readJson(runFn, "az", ["vm", "list", "--resource-group", names.poolResourceGroup, "--vmss", names.scaleSetId,
     "--query", "[].id", "--output", "json"], `list the VMs of scale set ${names.scaleSetName}`) ?? [];
   let checked = 0;
   for (const id of Array.isArray(ids) ? ids : []) {

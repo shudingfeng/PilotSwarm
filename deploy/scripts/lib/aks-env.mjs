@@ -36,6 +36,7 @@ export {
   coordinationHostPluginConfigMap,
   coordinationHostRedactSecretPrefixes,
   winWorkerSettings,
+  winWorkerPoolResourceGroup,
   diskControllerTokenScope,
   personalSecretVaultUri,
 } from "../../providers/azure/lib/settings.mjs";
