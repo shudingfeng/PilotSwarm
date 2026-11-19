@@ -1,9 +1,9 @@
 /**
  * The dispatcher-delegation opt-in on the direct management client: it reads
  * and writes the named user's flag (the local default user when none is
- * named) and accepts only a boolean. Its CMS migration is 0096, after
- * upstream's 0090 to 0095 (it was numbered 0090, then 0095, before they
- * shipped).
+ * named) and accepts only a boolean. Its CMS migration is 9001, from the block
+ * this fork keeps for its own migrations, after upstream's 0090 to 0095 (it
+ * was numbered 0090, then 0095, then 0096 before).
  *
  * Run: node --test test/unit/management-dispatcher-delegation.test.mjs
  */
@@ -12,7 +12,7 @@ import assert from "node:assert/strict";
 
 import { PilotSwarmManagementClient } from "../../dist/management-client.js";
 import { CMS_MIGRATIONS } from "../../dist/cms-migrations.js";
-import { dispatcherDelegationMigration } from "../../dist/migrations/dispatcher-delegation-0096.js";
+import { dispatcherDelegationMigration } from "../../dist/migrations/dispatcher-delegation-9001.js";
 
 function clientWithCatalog() {
     const calls = [];
@@ -56,11 +56,11 @@ test("setMyDispatcherDelegation accepts only true or false", async () => {
     assert.deepEqual(calls, []);
 });
 
-test("the opt-in's migration is 0096, registered after upstream's 0090 to 0095", () => {
+test("the opt-in's migration is 9001, registered after upstream's 0090 to 0095", () => {
     const list = CMS_MIGRATIONS("s");
     assert.deepEqual(list.filter(item => item.version >= "0090").map(item => [item.version, item.name]), [
         ["0090", "workflow_carry"], ["0091", "workflow_approvals"], ["0093", "session_summary_title_guard"],
-        ["0094", "session_resurrection"], ["0095", "canvas_ten_slots"], ["0096", "dispatcher_delegation"],
+        ["0094", "session_resurrection"], ["0095", "canvas_ten_slots"], ["9001", "dispatcher_delegation"],
     ]);
     assert.equal(list.at(-1).sql, dispatcherDelegationMigration("s"));
     assert.equal(new Set(list.map(item => item.version)).size, list.length, "every version once");

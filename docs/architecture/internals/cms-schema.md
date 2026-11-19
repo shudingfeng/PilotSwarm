@@ -31,6 +31,17 @@ naming the version, the recorded name and the code's name
 code doesn't list, from newer code, are not compared. A migration's name is
 therefore part of its identity: never rename one that has shipped.
 
+This fork's own migrations take versions from `9001` up (the block `9000` to
+`9999`, which upstream's sequence never reaches) and are listed after every
+upstream migration, so an upstream sync never changes what a recorded version
+means. Upstream's later migrations run after them on an existing database and
+before them on a new one, so a fork migration only adds objects (columns with
+constant defaults, new procedures), is idempotent and replaces no upstream
+procedure. `FORK_CMS_MIGRATION_BASES` (`fork-migrations.ts`) records the
+upstream migration each one was written against, and
+`test/local/fork-migrations.test.js` checks that both orders give the same
+schema.
+
 The chain starts at `0001_baseline` (the schema as of v1.0.41) and currently
 runs through the migrations listed at the top of `cms-migrations.ts`
 (metric summaries, stored procedures, session owners, user profiles,
@@ -44,8 +55,9 @@ deleted session's Workflows. Migration `0089`
 (`migrations/workflow-session-names-0089.ts`) names the session-owned
 definitions' tables `session_workflow_*` (definitions, revisions, operations,
 seen, notes), the pin columns `session_definition_id` and `session_revision`, and
-the trigger `workflow_owner_session_ended`, in one transaction. Migration `0096`
-(`migrations/dispatcher-delegation-0096.ts`), which runs after `0090` to `0095`,
+the trigger `workflow_owner_session_ended`, in one transaction. Migration `9001`
+(`migrations/dispatcher-delegation-9001.ts`), this fork's own and listed after
+every upstream migration,
 adds each user's dispatcher-delegation opt-in, `users.allow_dispatcher_delegation`,
 and its two stored procedures. Every statement
 is idempotent; fresh and existing databases converge to the same shape.
@@ -165,7 +177,7 @@ connection and also looks every 5 s while a turn runs.
 | `session_groups` / `session_group_owners` | session groups + per-user ownership (groups are private per-user organization) |
 | `user_session_group_placements` | migration 0034: `(user_id, root_session_id) → group_id` — each viewer's private placement of a session tree in one of their own groups; composite FK into `session_group_owners` makes cross-user placement structurally impossible |
 | `session_child_outcomes` | terminal outcomes of sub-agents for parent digests |
-| `users` / `session_owners` | principals, per-user profile/keys, the dispatcher-delegation opt-in (`allow_dispatcher_delegation`, migration `0096`), session ownership |
+| `users` / `session_owners` | principals, per-user profile/keys, the dispatcher-delegation opt-in (`allow_dispatcher_delegation`, migration `9001`), session ownership |
 
 ## The catalog client
 

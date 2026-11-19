@@ -62,6 +62,7 @@ $$ LANGUAGE plpgsql;
 - **Stored procedures**: All new data-access queries must be stored procedures (`CREATE OR REPLACE FUNCTION`). No inline SQL in TypeScript.
 - **Transactional**: Each migration runs inside its own `BEGIN`/`COMMIT` block (handled by the migrator).
 - **Version numbering**: Use sequential 4-digit zero-padded versions (`0001`, `0002`, ...). Check the current highest version in the migrations list.
+- **This fork's own migrations**: take the next version from `9001` up (the block `9000` to `9999`, which upstream's sequence never reaches), stay after every upstream migration, and get an entry in `FORK_CMS_MIGRATION_BASES` (`src/fork-migrations.ts`) naming the last upstream migration they were written against. They only add objects and replace no upstream procedure, so they give the same schema before or after upstream's later migrations (`test/local/fork-migrations.test.js`).
 
 ### 3. Generate the diff file (REQUIRED)
 
