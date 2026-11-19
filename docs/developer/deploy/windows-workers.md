@@ -1310,6 +1310,17 @@ pool makes there need no entry. The deploying principal needs the same rights
 on the group as on the stamp's: it creates the scale set and the standby pool
 there, and assigns roles there.
 
+The standby pool resource provider's roles follow the same split. It creates
+the VMs, with their disks and NICs, in the pool's group, where it gets
+Virtual Machine Contributor and Network Contributor. But it joins each NIC to
+the worker subnet, gives each VM the workers' identity and builds it from the
+gallery's image, all in the stamp's group, which a role on the pool's group
+doesn't reach. So it also gets Network Contributor on the worker subnet, for
+`Microsoft.Network/virtualNetworks/subnets/join/action`, Managed Identity
+Operator on the workers' identity, and Compute Gallery Sharing Admin and
+Compute Gallery Artifacts Publisher on the gallery. Base-infra makes these
+grants once `WIN_WORKER_IMAGE_VERSION` is set, before the standby pool.
+
 Before base-infra, the deploy step checks that the group exists, and stops
 when the stamp's group already holds the pool's scale set: a deploy doesn't
 move a pool between groups, since its drives and VMs would stay behind. The
@@ -1838,7 +1849,7 @@ in the controller's README has the full procedure and each check.
 | `<prefix>-linux-worker-mid`, the coordination host's workload identity (`coordination-host-fedcred`) | The coordination host | `pilotswarm_worker_group` in PostgreSQL; Storage Blob Data Contributor on `copilot-sessions` only; Cognitive Services OpenAI User on the stamp's Foundry account; the `coordinator` app role | Key Vault, `disk-pool-state`, a personal token, any controller route but the coordination route |
 | The dispatcher's service principal | The dispatcher | The `user` app role | Any Azure role in the deployment |
 | The deploying principal | `deploy.mjs` | Key Vault Secrets Officer on the stamp and deploy-only vaults; writes the releases and the Flux manifests; the `deployer` app role for the upgrade freeze | — |
-| The Standby Pool resource provider | The standby pool | Virtual Machine Contributor and Network Contributor on the pool's resource group; Network Contributor on the worker subnet; Compute Gallery Sharing Admin and Compute Gallery Artifacts Publisher on the gallery; Managed Identity Operator on the workers' identity | — |
+| The Standby Pool resource provider | The standby pool | On the pool's resource group, for the VMs, disks and NICs it creates there: Virtual Machine Contributor and Network Contributor. In the stamp's group, which a role on the pool's group doesn't reach: Network Contributor on the worker subnet, whose `Microsoft.Network/virtualNetworks/subnets/join/action` joins each VM's NIC to it; Managed Identity Operator on the workers' identity; Compute Gallery Sharing Admin and Compute Gallery Artifacts Publisher on the gallery | — |
 
 - **The controller tells VMs apart by their private source address,** never by
   identity, because every VM has the same one.

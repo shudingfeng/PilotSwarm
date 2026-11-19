@@ -249,9 +249,12 @@ resource coordinationHostFoundryRole 'Microsoft.Authorization/roleAssignments@20
 
 // ─── The standby pool's grants outside the pool's group (once an image version is set) ───
 
-// The standby pool resource provider joins each VM's NIC to the worker
-// subnet, builds the VMs from the gallery's image and gives them the workers'
-// identity. Its roles on the pool's group are in win-worker-pool.bicep.
+// The standby pool resource provider creates the VMs, with their disks and
+// NICs, in the pool's group, where win-worker-pool.bicep gives it Virtual
+// Machine Contributor and Network Contributor. It also joins each NIC to the
+// worker subnet, builds the VMs from the gallery's image and gives them the
+// workers' identity, all in this group, which a role on the pool's group
+// doesn't reach: hence these grants here.
 resource standbyPoolSubnetRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (deployScaleSet) {
   name: guid(workerSubnet.id, standbyPoolPrincipalId, networkContributorRoleId)
   scope: workerSubnet

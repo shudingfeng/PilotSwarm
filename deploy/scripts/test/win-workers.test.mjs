@@ -1526,6 +1526,33 @@ test("every template the pool adds or changes compiles, and the compiled scale s
   assert.equal(inner.find((r) => r.type === "Microsoft.StandbyPool/standbyVirtualMachinePools").condition, "[parameters('deployScaleSet')]");
   const gated = template.resources.filter((r) => r.type === "Microsoft.Resources/deployments" && r.condition === "[parameters('winWorkersEnabled')]");
   assert.equal(gated.length, 9, "the pool's nine modules");
+  // The standby pool resource provider's grants, by scope. It creates the VMs
+  // with their disks and NICs in the pool's group, but joins each NIC to the
+  // worker subnet, builds from the gallery's image and gives the VMs the
+  // workers' identity, all in the stamp's group, which a role on the pool's
+  // group doesn't reach. So those grants belong to the stamp's deployment, and
+  // the pool's deployment waits for the subnet's.
+  const standbyGrants = (deployment) => {
+    const { resources, variables } = deployment.properties.template;
+    const where = (scope) => (scope === undefined ? "the deployment's group"
+      : /subnets/.test(scope) ? "the worker subnet"
+        : /galleries/.test(scope) ? "the gallery"
+          : /userAssignedIdentities/.test(scope) ? "the workers' identity" : scope);
+    return resources
+      .filter((r) => r.type === "Microsoft.Authorization/roleAssignments" && r.properties.principalId === "[parameters('standbyPoolPrincipalId')]")
+      .map((r) => [where(r.scope), [variables[/variables\('(\w+)'\)/.exec(r.properties.roleDefinitionId)[1]]].flat(), r.condition]);
+  };
+  const networkContributor = "4d97b98b-1d4f-4787-a291-c67834d212e7";
+  assert.deepEqual(standbyGrants(module), [
+    ["the worker subnet", [networkContributor], "[variables('deployScaleSet')]"],
+    ["the gallery", ["1ef6a3be-d0ac-425d-8c01-acb62866290b", "85a2d0d9-2eba-4c9c-b355-11c2cc0788ab"], "[variables('deployScaleSet')]"],
+    ["the workers' identity", ["f1a07417-d97a-45cb-824c-7a7467783830"], "[variables('deployScaleSet')]"],
+  ]);
+  assert.deepEqual(standbyGrants(poolModule), [
+    ["the deployment's group", ["9980e02c-c2be-4d73-94e8-173b1dc7cf3c", networkContributor], "[parameters('deployScaleSet')]"],
+  ]);
+  assert.ok(poolModule.dependsOn.some((d) => /virtualNetworks\/subnets/.test(d) && /standbyPoolPrincipalId/.test(d)),
+    "the standby pool waits for its grant on the worker subnet");
   // The access policy alert is an Activity Log alert, with the fallback only.
   const alertModule = template.resources.find((r) => r.type === "Microsoft.Resources/deployments" && String(r.name).includes("-win-worker-alerts-"));
   const activityLogAlert = alertModule.properties.template.resources.find((r) => r.type === "Microsoft.Insights/activityLogAlerts");
