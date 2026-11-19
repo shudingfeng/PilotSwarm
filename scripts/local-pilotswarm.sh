@@ -13,7 +13,8 @@
 #   portal         http://localhost:3001 with dev sign-in (pick Ada, Alice, Bob,
 #                  Carol or Dave) and 2 workers inside the portal process
 #   workspaces     the reference setup in packages/sdk/examples/repo-workspaces:
-#     repo service http://127.0.0.1:8080: mirrors duroxide and tfenv, makes session clones
+#     repo service http://127.0.0.1:8080: mirrors duroxide and tfenv, makes session clones;
+#                  Repo Coder can add more repos by URL (add_repo, PS_LOCAL_REPO_PREFIXES)
 #     folders      ~/pilotswarm-local/ws: plain folders that stand in for the NFS share
 #                    a/       repo clones (the repo root)
 #                    shared/  a folder every session gets
@@ -25,6 +26,10 @@
 # Optional settings:
 #   PS_LOCAL_DIR             where the folders and logs go (default ~/pilotswarm-local)
 #   PS_LOCAL_REPO_PORT       the repo service's port (default 8080)
+#   PS_LOCAL_REPO_PREFIXES   comma list of URL prefixes agents may add repos from with add_repo
+#                            (default https://github.com/,https://dev.azure.com/; empty = off).
+#                            The repo service fetches them with your own git credentials, so
+#                            any repo you can read under them; pushes go to a local sandbox.
 #   PORT                     the portal's port (default 3001)
 #   PS_MODEL_PROVIDERS_PATH  the model catalog (default: .model_providers.json when it exists,
 #                            else deploy/config/model_providers.local-docker.json, which has
@@ -53,6 +58,8 @@ esac
 # The same two repos as the release environment (deploy/providers/azure/gitops/repo-cache).
 REPOS='{"duroxide": {"upstream": "https://github.com/microsoft/duroxide.git", "sandbox": true, "adopt": {"agents": true, "skills": true, "instructions": true}},
         "tfenv": {"upstream": "https://github.com/tfutils/tfenv.git", "sandbox": true, "adopt": {"agents": true, "skills": true, "instructions": true}}}'
+# Where add_repo may add repos from; set PS_LOCAL_REPO_PREFIXES= (empty) to turn adding off.
+REPO_PREFIXES="${PS_LOCAL_REPO_PREFIXES-https://github.com/,https://dev.azure.com/}"
 
 cd "$REPO_ROOT"
 
@@ -130,6 +137,7 @@ start_repo_service() {
     REPO_SERVICE_STATE_FILE="$LOCAL_DIR/repo-service/state.json" \
     REPO_SERVICE_CLONE_UID="$(id -u)" \
     REPO_SERVICE_CREDENTIAL_HELPER="!node $EXAMPLE/credential-helper.mjs" \
+    REPO_SERVICE_REGISTER_PREFIXES="$REPO_PREFIXES" \
         nohup node "$EXAMPLE/repo-service.mjs" >>"$LOGS/repo-service.log" 2>&1 &
     echo $! >"$REPO_PID"
     for _ in $(seq 1 300); do

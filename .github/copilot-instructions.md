@@ -544,6 +544,7 @@ scripts/local-pilotswarm.sh logs      # follow the portal and repo service logs
 | Workspace tab | The side pane's Workspace tab reads and writes the same folders: the portal gets `PORTAL_WORKSPACE_ROOTS` for them. File limit: `PORTAL_WORKSPACE_MAX_FILE_MB` (default 20). |
 | Canvas apps (canvas-ws) | Canvas apps may run the git commands their agent declared: `PORTAL_CANVAS_COMMANDS_RUNNER=local`. The Azure GitOps deployment sets it too when `WORKSPACES_ENABLED=true`. The program runs as the portal's own user, so turn it on only where you trust the people who sign in. |
 | Workspace cases | `PS_LOCAL_WORKSPACES=on` (default), `no-defaults` (repo clones only: a session without a repo has no folders), `no-portal` (the workers have workspaces, the portal serves none, so no Workspace tab), `off` (no workspaces). For example `PS_LOCAL_WORKSPACES=off scripts/local-pilotswarm.sh restart`. |
+| Adding repos | Repo Coder's `add_repo` serves another repo by URL, mirrored with your own git credentials and pushed only to a local sandbox. `PS_LOCAL_REPO_PREFIXES` lists the allowed URL prefixes (default `https://github.com/,https://dev.azure.com/`; empty turns adding off). |
 | Models | `.model_providers.json` when it exists, else the GitHub Copilot catalog in `deploy/config/model_providers.local-docker.json`. `GITHUB_TOKEN` comes from `.env`. |
 
 It needs `.env` with `DATABASE_URL` and `GITHUB_TOKEN`, and git 2.46 or later.

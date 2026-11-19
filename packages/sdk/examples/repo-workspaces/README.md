@@ -31,7 +31,7 @@ Every session also gets two default folders (proposal section 4.11):
 | `nfs-server.sh` | the repo pod | Starts the node kernel's NFS server for the repo pod's exports (NFS 4.1 and 4.2 only). Needs a privileged container. |
 | `attacher.mjs` | each worker node | The node attacher: mounts each root's NFS export at `/mnt/ps/<root>` on the node, at start and when asked over a unix socket. A root it cannot mount at start (the repo pod may come up later) is retried every 30 s. Worker pods see `/mnt/ps` at `/ws`. It never unmounts. |
 | `provider.mjs` | each worker | The `WorkspaceProvider`s. The repo provider checks the root's `.pilotswarm-export` marker in a child process, then takes a lease on the session clone that holds the folder; it serves session clones and folders inside them only. For a turn, it asks the service to restore a clone that idle cleanup removed, and passes the service's note to PilotSwarm once. The plain-root provider checks the marker and nothing else: no leases. Both ask the attacher to mount a root that is not mounted, and to remount one that answers `ESTALE`. |
-| `tools.mjs` | each worker | Agent tools: `create_session_clone`, `list_session_clones`, `remove_session_clone`. |
+| `tools.mjs` | each worker | Agent tools: `list_repos`, `add_repo`, `create_session_clone`, `list_session_clones`, `remove_session_clone`. |
 | `credential-helper.mjs` | each worker | The git credential helper each clone sets after an empty one. It sends the repo service the protocol, host and path git asks about. The service answers only for the remote of a repo it serves; it does not check that the remote is the calling clone's own. |
 | `home-provider.mjs` | each worker | The home root's provider: each person's own folder (below). `defaultFolders` names the person's folder and the default extra folders; `ensureAttached` allows only the session owner's folder, makes it on first use and copies the starter files into it. |
 | `seed/home/`, `seed/shared/` | each worker, the repo pod | Starter files: a new person's folder gets `seed/home` (an `AGENTS.md`, a `notes` skill, a `summarizer` agent); the repo pod copies `seed/shared` into the shared folder at every start (a `README.md`, a `reviewer` agent, a `share-a-file` skill). |
@@ -96,11 +96,42 @@ REPO_SERVICE_PUBLIC_URL=http://repo-cache:8080   how workers reach this service;
 REPO_SERVICE_CREDENTIAL_HELPER=!node /app/packages/sdk/examples/repo-workspaces/credential-helper.mjs
 REPO_SERVICE_IDLE_CLONE_HOURS=168           remove a clone no session has used for this long
                                             (default 168 = 7 days; 0 = never; the test stamp uses 6)
+REPO_SERVICE_REGISTER_PREFIXES=https://github.com/acme/   optional: URL prefixes agents may add
+                                            repos from with add_repo (comma list; unset = off)
+REPO_SERVICE_REGISTER_MAX=50                optional: how many repos may be added
 ```
 
 A repo with `remote` instead of `sandbox` uses its real remote, and the
 deployment then passes its own token minter (`mintToken`) to
 `createRepoService()`.
+
+### Adding repos at run time
+
+With `REPO_SERVICE_REGISTER_PREFIXES` set, an agent (or anyone who reaches the
+service's port) can serve one more repo: `add_repo({ url })`, which calls
+`POST /v1/repos { upstream, name? }`. `list_repos` (`GET /v1/repos`) shows the
+served repos, the ones being added, the failed adds and the allowed prefixes.
+
+- The URL must start with one of the prefixes. Each prefix ends with `/`, so
+  `https://github.com/acme/` does not let `https://github.com/acme-other/` in.
+  A URL with a password, a query or a fragment is refused; an Azure DevOps
+  `org@` user name is dropped.
+- The service mirrors the URL with **its own** git credentials. Anyone who can
+  reach the port can therefore have it mirror any repo those credentials read
+  under the prefixes: list narrow prefixes (an organization, not a host) in a
+  shared deployment.
+- An added repo always gets a sandbox remote, so pushes from its clones never
+  reach the URL. Nothing is adopted: its agents, skills and instructions are
+  not loaded, whatever its files say.
+- The call waits up to two minutes for the first mirror, then answers
+  `status: "mirroring"` and goes on in the background; the same call again
+  waits for it. A clone of the repo is refused with `REPO_PREPARING` until
+  then. A failed first mirror is removed and listed under `failed`.
+- Added repos are kept in the state file and served again after a restart,
+  even with adding turned off later. The configured repos win a name clash.
+  There is no route to remove one: clones borrow the mirror's objects. To
+  remove one, stop the service, delete it from `registeredRepos` in the state
+  file and remove its mirror and sandbox after its clones are gone.
 
 Attacher (`attacher.mjs`):
 
@@ -262,7 +293,7 @@ example included, with no NFS and no Kubernetes:
 |---|---|
 | PostgreSQL | the `pilotswarm-pg` container (`DATABASE_URL` in `.env`), started if it is stopped |
 | Portal | `http://localhost:3001`, with dev sign-in (pick Ada, Alice, Bob, Carol or Dave) and 2 workers inside the portal process |
-| Repo service | `http://127.0.0.1:8080`, with the same two repos as the release environment |
+| Repo service | `http://127.0.0.1:8080`, with the same two repos as the release environment. Agents can add more with `add_repo` from GitHub and Azure DevOps URLs, fetched with your own git credentials (`PS_LOCAL_REPO_PREFIXES`; empty turns it off). The Azure deployment leaves adding off |
 | Folders | `~/pilotswarm-local/ws/a`, `shared` and `home`: plain folders with the marker, in place of the NFS exports |
 
 ```text

@@ -21,6 +21,9 @@
  *   POST   /v1/mirrors/fetch { repo }                    fetch the mirror from its remote        (admin token)
  *   POST   /v1/maintenance   { repo, operation }         a named maintenance operation           (admin token)
  *   POST   /v1/token         { protocol, host, path }    a token for a served repo's remote only
+ *   GET    /v1/repos                                     the repos served here, the ones being
+ *                                                        added and the ones that failed to add
+ *   POST   /v1/repos         { upstream, name? }         serve one more repo (only with registerPrefixes)
  *   GET/POST /git/<repo>.git/...                         a repo's sandbox remote (git smart HTTP,
  *                                                        token in HTTP Basic auth); only for repos
  *                                                        with `sandbox: true`
@@ -28,6 +31,14 @@
  * Worker pods, and so agent shells, can reach this port (section 5.2). The
  * two admin endpoints therefore need the admin token, which workers never
  * get; without one configured they are off.
+ *
+ * Adding a repo at run time (POST /v1/repos) is off unless the deployment
+ * lists the URL prefixes it may come from (`registerPrefixes`). An added repo
+ * is mirrored from its URL with this service's own git credentials, and it
+ * always gets a sandbox remote: pushes from its clones never reach the URL.
+ * Its agents, skills and instructions are not adopted (a repo's files cannot
+ * turn adoption on). Added repos are kept in the state file and served again
+ * after a restart; the repos from the configuration win a name clash.
  *
  * Idle cleanup (section 5.3): a clone no session has used for `idleCloneMs`
  * (7 days by default) is removed. "Used" means a lease taken or released.
@@ -60,6 +71,55 @@ const MAX_CLONE_USERS = 100;
 /** Each git call that inspects a clone before its removal. */
 const INSPECT_TIMEOUT_MS = 20_000;
 const SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+/** How many repos may be added at run time (POST /v1/repos). */
+export const DEFAULT_REGISTER_MAX = 50;
+/** How long POST /v1/repos waits for the first mirror before answering "mirroring". */
+export const DEFAULT_REGISTER_WAIT_MS = 120 * 1000;
+/** The longest one git network call of an added repo's first mirror may take. */
+export const DEFAULT_REGISTER_TIMEOUT_MS = 30 * 60 * 1000;
+const REGISTER_PROTOCOLS = new Set(["https:", "http:", "file:"]);
+
+/**
+ * The URL prefixes repos may be added from: a comma list or an array. Each
+ * becomes a URL that ends with "/", so "https://github.com/acme" does not let
+ * "https://github.com/acme-other" through.
+ */
+export function parseRegisterPrefixes(value) {
+    const list = Array.isArray(value) ? value : String(value ?? "").split(",");
+    return list.map((entry) => String(entry).trim()).filter(Boolean).map((entry) => {
+        let url;
+        try { url = new URL(entry); } catch { throw new Error(`repo URL prefix "${entry}" is not a URL`); }
+        if (!REGISTER_PROTOCOLS.has(url.protocol) || url.username || url.password || url.search || url.hash) {
+            throw new Error(`repo URL prefix "${entry}" must be a plain https, http or file URL`);
+        }
+        return url.href.endsWith("/") ? url.href : `${url.href}/`;
+    });
+}
+
+/** A repo URL as compared: without user name, trailing "/" or ".git". */
+function repoUrlKey(value) {
+    let text = String(value ?? "").trim();
+    try {
+        const url = new URL(text);
+        url.username = "";
+        url.password = "";
+        text = url.href;
+    } catch { /* a plain path */ }
+    return text.replace(/\/+$/, "").replace(/\.git$/, "");
+}
+
+/** The repo name a URL suggests: its last path segment without ".git". */
+export function repoNameFromUrl(value) {
+    const last = new URL(value).pathname.split("/").filter(Boolean).pop() ?? "";
+    let name = last;
+    try { name = decodeURIComponent(last); } catch { /* keep it encoded; SEGMENT refuses it */ }
+    return name.replace(/\.git$/, "");
+}
+
+/** Git calls that reach a remote: a service never waits for a password prompt. */
+function networkGitEnv() {
+    return { ...process.env, GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never" };
+}
 
 /** How often the idle pass runs: a twelfth of the idle time, from 1 to 15 minutes. */
 export function idleCheckIntervalMs(idleCloneMs) {
@@ -188,6 +248,13 @@ export function removeStaleGitLocks(clonePath) {
  * @param {string} [options.credentialHelper]  the helper each clone sets after clearing others
  * @param {number} [options.cloneUid]      the session uid clone creation runs as (a deployment sets 1000)
  * @param {string} [options.adminToken]    required for mirror fetch and maintenance; without it they are off
+ * @param {string[]|string} [options.registerPrefixes]  URL prefixes POST /v1/repos may add repos from
+ *        (comma list or array); without any, adding repos is off
+ * @param {number} [options.registerMax]   how many repos may be added (default 50)
+ * @param {number} [options.registerWaitMs]  how long POST /v1/repos waits for the first mirror
+ *        before it answers "mirroring" (default 2 minutes); the mirror goes on in the background
+ * @param {number} [options.registerTimeoutMs]  the longest one git network call of that first
+ *        mirror may take (default 30 minutes)
  * @param {string} [options.stateFile]     service-private state; never on the export
  * @param {number} [options.idleCloneMs]   remove a clone no session has used for this long
  *        (default 7 days; 0 = never)
@@ -200,12 +267,22 @@ export function removeStaleGitLocks(clonePath) {
 export function createRepoService(options) {
     const root = path.resolve(options.root);
     const rootName = options.rootName ?? "a";
+    const publicBase = options.publicUrl ? String(options.publicUrl).replace(/\/+$/, "") : null;
     // A sandbox repo's remote is this service; fill it in from publicUrl.
     const repos = Object.fromEntries(Object.entries(options.repos ?? {}).map(([name, config]) => {
         if (!config?.sandbox) return [name, config];
-        if (!options.publicUrl) throw new Error(`repo "${name}" has a sandbox remote, which needs publicUrl`);
-        return [name, { ...config, remote: `${String(options.publicUrl).replace(/\/+$/, "")}/git/${name}.git` }];
+        if (!publicBase) throw new Error(`repo "${name}" has a sandbox remote, which needs publicUrl`);
+        return [name, { ...config, remote: `${publicBase}/git/${name}.git` }];
     }));
+    const registerPrefixes = parseRegisterPrefixes(options.registerPrefixes ?? []);
+    if (registerPrefixes.length > 0 && !publicBase) throw new Error("adding repos (registerPrefixes) needs publicUrl: an added repo gets a sandbox remote");
+    const registerMax = options.registerMax ?? DEFAULT_REGISTER_MAX;
+    if (!Number.isInteger(registerMax) || registerMax < 0) throw new Error(`registerMax must be a whole number, not "${registerMax}"`);
+    const registerWaitMs = options.registerWaitMs ?? DEFAULT_REGISTER_WAIT_MS;
+    const registerTimeoutMs = options.registerTimeoutMs ?? DEFAULT_REGISTER_TIMEOUT_MS;
+    // Repos being added: name -> { upstream, startedAt, done }. Failed adds: name -> { upstream, message, failedAt }.
+    const registering = new Map();
+    const registerFailures = new Map();
     const entryTtlMs = options.entryTtlMs ?? DEFAULT_ENTRY_TTL_MS;
     const now = options.now ?? (() => Date.now());
     const runGit = options.runGit ?? defaultRunGit;
@@ -221,15 +298,16 @@ export function createRepoService(options) {
         sandboxTokens.set(token, now() + tokenTtlMs);
         return token;
     };
-    const hasSandbox = Object.values(repos).some((config) => config?.sandbox);
-    const sandboxes = hasSandbox ? createSandboxRemotes({
+    // Made when the first sandbox repo is served: at start, or when a repo is added.
+    let sandboxes = null;
+    const sandboxRemotes = () => (sandboxes ??= createSandboxRemotes({
         root,
         runGit: (args) => runGit(args),
         isValidToken: (token) => {
             const expiry = sandboxTokens.get(token);
             return typeof expiry === "number" && expiry > now();
         },
-    }) : null;
+    }));
     const idleCloneMs = options.idleCloneMs ?? DEFAULT_IDLE_CLONE_MS;
     const removalRecordMs = options.removalRecordMs ?? DEFAULT_REMOVAL_RECORD_MS;
     const iso = (ms) => new Date(ms).toISOString();
@@ -261,13 +339,26 @@ export function createRepoService(options) {
             leases.set(checkout, new Map(entries.map((entry) => [entry.sessionId, entry])));
         }
         removals = Array.isArray(saved.removals) ? saved.removals : [];
+        for (const [name, record] of Object.entries(saved.registeredRepos ?? {})) {
+            // The configuration wins a name clash; the added repo is then forgotten at the next write.
+            if (Object.hasOwn(repos, name) || !SEGMENT.test(name) || typeof record?.upstream !== "string") continue;
+            if (!publicBase) {
+                emit("repo.registered_skipped", { repo: name, message: "an added repo needs publicUrl for its sandbox remote" });
+                continue;
+            }
+            repos[name] = { upstream: record.upstream, sandbox: true, remote: `${publicBase}/git/${name}.git`, registeredAt: record.registeredAt ?? now() };
+        }
     }
+    if (Object.values(repos).some((config) => config?.sandbox)) sandboxRemotes();
     const persist = () => {
         if (!stateFile) return;
         const data = {
             clones: Object.fromEntries(clones),
             leases: Object.fromEntries([...leases].map(([checkout, entries]) => [checkout, [...entries.values()]])),
             removals,
+            registeredRepos: Object.fromEntries(Object.entries(repos)
+                .filter(([, config]) => config?.registeredAt !== undefined)
+                .map(([name, config]) => [name, { upstream: config.upstream, registeredAt: config.registeredAt }])),
         };
         fs.mkdirSync(path.dirname(stateFile), { recursive: true });
         fs.writeFileSync(`${stateFile}.tmp`, JSON.stringify(data));
@@ -292,10 +383,11 @@ export function createRepoService(options) {
     const idleHours = (ms) => Math.round((ms / (60 * 60 * 1000)) * 10) / 10;
 
     const repoConfig = (repo) => {
-        if (!SEGMENT.test(String(repo || "")) || !Object.hasOwn(repos, repo)) {
-            throw new ServiceError(404, "REPO_UNKNOWN", `repo "${repo}" is not served here`);
+        if (SEGMENT.test(String(repo || "")) && Object.hasOwn(repos, repo)) return repos[repo];
+        if (registering.has(repo)) {
+            throw new ServiceError(409, "REPO_PREPARING", `repo "${repo}" is still being mirrored; ask again shortly`);
         }
-        return repos[repo];
+        throw new ServiceError(404, "REPO_UNKNOWN", `repo "${repo}" is not served here`);
     };
     const mirrorPath = (repo) => path.join(root, "repos", `${repo}.git`);
 
@@ -322,8 +414,7 @@ export function createRepoService(options) {
         return live;
     }
 
-    async function ensureMirror(repo) {
-        const config = repoConfig(repo);
+    async function ensureMirror(repo, config = repoConfig(repo), { timeoutMs } = {}) {
         const mirror = mirrorPath(repo);
         if (fs.existsSync(mirror)) return mirror;
         fs.mkdirSync(path.dirname(mirror), { recursive: true });
@@ -336,8 +427,8 @@ export function createRepoService(options) {
             ["gc.pruneExpire", "never"],
         ]) await runGit(["-C", mirror, "config", key, value]);
         await runGit(["-C", mirror, "config", "--add", "remote.origin.fetch", "+refs/tags/*:refs/tags/*"]);
-        await runGit(["-C", mirror, "fetch", "-q", "--prune", "origin"]);
-        await followUpstreamHead(mirror);
+        await runGit(["-C", mirror, "fetch", "-q", "--prune", "origin"], { env: networkGitEnv(), timeoutMs });
+        await followUpstreamHead(mirror, { timeoutMs });
         return mirror;
     }
 
@@ -346,8 +437,8 @@ export function createRepoService(options) {
      * names its own default (often master); a clone of a mirror whose HEAD
      * names a missing branch checks out nothing.
      */
-    async function followUpstreamHead(mirror) {
-        const symref = await runGit(["-C", mirror, "ls-remote", "--symref", "origin", "HEAD"]).catch(() => "");
+    async function followUpstreamHead(mirror, { timeoutMs } = {}) {
+        const symref = await runGit(["-C", mirror, "ls-remote", "--symref", "origin", "HEAD"], { env: networkGitEnv(), timeoutMs }).catch(() => "");
         const match = /^ref:\s+(refs\/heads\/\S+)\s+HEAD/m.exec(symref);
         if (match) await runGit(["-C", mirror, "symbolic-ref", "HEAD", match[1]]);
     }
@@ -556,7 +647,133 @@ export function createRepoService(options) {
         return removed;
     }
 
+    /** A served repo as GET /v1/repos shows it. */
+    const describeRepo = (name, config) => ({
+        repo: name,
+        upstream: config?.upstream ?? config?.remote ?? null,
+        sandbox: Boolean(config?.sandbox),
+        added: config?.registeredAt !== undefined,
+        ...(config?.registeredAt !== undefined ? { addedAt: iso(config.registeredAt) } : {}),
+    });
+
+    /**
+     * Adds a repo (POST /v1/repos). Returns { answer } when the repo is
+     * already served, else { repo, upstream, done }: `done` settles when the
+     * mirror and the sandbox are ready and the repo is served.
+     */
+    function registerRepo({ upstream, name }) {
+        if (registerPrefixes.length === 0) {
+            throw new ServiceError(403, "REGISTER_DISABLED", "adding repos is off here: only the deployment's repos are served");
+        }
+        let url;
+        try { url = new URL(String(upstream ?? "").trim()); } catch {
+            throw new ServiceError(400, "BAD_REQUEST", "upstream must be the repo's clone URL, for example https://github.com/<owner>/<repo>.git");
+        }
+        if (url.password) throw new ServiceError(400, "BAD_REQUEST", "the URL must not carry a password or token; the service uses its own git credentials");
+        if (url.search || url.hash) throw new ServiceError(400, "BAD_REQUEST", "the URL must not have a query or a fragment");
+        // Azure DevOps clone URLs carry the organization as user name; it is not a credential.
+        url.username = "";
+        const href = url.href;
+        if (!registerPrefixes.some((prefix) => href.startsWith(prefix))) {
+            throw new ServiceError(403, "REGISTER_NOT_ALLOWED", `repos can be added only from ${registerPrefixes.join(", ")}`);
+        }
+        const repo = name === undefined || name === null || name === "" ? repoNameFromUrl(href) : String(name);
+        if (!SEGMENT.test(repo)) {
+            throw new ServiceError(400, "BAD_REQUEST", `"${repo}" cannot be a repo name: use letters, digits, ".", "_" and "-"; pass name`);
+        }
+        const served = Object.entries(repos).find(([, config]) => repoUrlKey(config?.upstream ?? config?.remote) === repoUrlKey(href));
+        if (served) return { answer: { ...describeRepo(...served), status: "served" } };
+        if (Object.hasOwn(repos, repo)) {
+            throw new ServiceError(409, "REPO_EXISTS", `repo "${repo}" is already served from ${describeRepo(repo, repos[repo]).upstream}; pass another name`);
+        }
+        const pending = registering.get(repo);
+        if (pending) {
+            if (repoUrlKey(pending.upstream) !== repoUrlKey(href)) {
+                throw new ServiceError(409, "REPO_EXISTS", `repo "${repo}" is being added from ${pending.upstream}; pass another name`);
+            }
+            return { repo, upstream: pending.upstream, done: pending.done };
+        }
+        const added = Object.values(repos).filter((config) => config?.registeredAt !== undefined).length;
+        if (added + registering.size >= registerMax) {
+            throw new ServiceError(409, "REGISTER_FULL", `${registerMax} repos have been added already; an operator must remove one first`);
+        }
+        const config = { upstream: href, sandbox: true, remote: `${publicBase}/git/${repo}.git`, registeredAt: now() };
+        const done = (async () => {
+            const mirror = mirrorPath(repo);
+            const sandboxDir = sandboxRemotes().sandboxPath(repo);
+            let madeMirror = false;
+            let madeSandbox = false;
+            try {
+                if (fs.existsSync(mirror)) {
+                    // Left from an earlier run: reused only when it mirrors the same URL.
+                    const origin = await runGit(["-C", mirror, "config", "--get", "remote.origin.url"]).catch(() => "");
+                    if (repoUrlKey(origin) !== repoUrlKey(href)) {
+                        throw new ServiceError(409, "REPO_EXISTS", `${path.relative(root, mirror)} exists and mirrors another URL; pass another name`);
+                    }
+                    await runGit(["-C", mirror, "fetch", "-q", "--prune", "origin"], { env: networkGitEnv(), timeoutMs: registerTimeoutMs });
+                    await followUpstreamHead(mirror, { timeoutMs: registerTimeoutMs });
+                } else {
+                    madeMirror = true;
+                    await ensureMirror(repo, config, { timeoutMs: registerTimeoutMs });
+                }
+                madeSandbox = !fs.existsSync(sandboxDir);
+                await sandboxRemotes().ensure(repo, mirror);
+                await sandboxRemotes().syncFromMirror(repo, mirror);
+            } catch (error) {
+                // A half-made mirror would be taken as ready by the next try.
+                if (madeMirror) await fs.promises.rm(mirror, { recursive: true, force: true }).catch(() => undefined);
+                if (madeSandbox) await fs.promises.rm(sandboxDir, { recursive: true, force: true }).catch(() => undefined);
+                if (error instanceof ServiceError) throw error;
+                throw new ServiceError(502, "REPO_FETCH_FAILED", `could not mirror ${href}: ${String(error?.message ?? error)}`);
+            }
+            repos[repo] = config;
+            persist();
+            return describeRepo(repo, config);
+        })();
+        registering.set(repo, { upstream: href, startedAt: now(), done });
+        registerFailures.delete(repo);
+        emit("repo.add_started", { repo, upstream: href });
+        done.then(
+            () => emit("repo.added", { repo, upstream: href }),
+            (error) => {
+                registerFailures.set(repo, { upstream: href, code: error?.code ?? "INTERNAL", message: String(error?.message ?? error), failedAt: now() });
+                emit("repo.add_failed", { repo, upstream: href, code: error?.code ?? "INTERNAL", message: String(error?.message ?? error) });
+            },
+        ).finally(() => registering.delete(repo));
+        return { repo, upstream: href, done };
+    }
+
     const handlers = {
+        async "GET /v1/repos"() {
+            return {
+                repos: Object.entries(repos).map(([name, config]) => describeRepo(name, config)),
+                adding: [...registering].map(([name, entry]) => ({ repo: name, upstream: entry.upstream, startedAt: iso(entry.startedAt) })),
+                failed: [...registerFailures].map(([name, entry]) => ({ repo: name, upstream: entry.upstream, code: entry.code, message: entry.message, failedAt: iso(entry.failedAt) })),
+                add: registerPrefixes.length > 0
+                    ? { allowed: true, prefixes: registerPrefixes, max: registerMax }
+                    : { allowed: false },
+            };
+        },
+
+        async "POST /v1/repos"({ upstream, name }) {
+            const started = registerRepo({ upstream, name });
+            if (started.answer) return started.answer;
+            let timer;
+            const outcome = await Promise.race([
+                started.done.then((value) => ({ value }), (error) => ({ error })),
+                new Promise((resolve) => { timer = setTimeout(() => resolve(null), registerWaitMs); timer.unref?.(); }),
+            ]);
+            clearTimeout(timer);
+            if (!outcome) {
+                return {
+                    repo: started.repo, upstream: started.upstream, status: "mirroring",
+                    message: "the first mirror is still being made; ask again with the same URL to wait for it",
+                };
+            }
+            if (outcome.error) throw outcome.error;
+            return { ...outcome.value, status: "added" };
+        },
+
         async "POST /v1/clones"({ rootSessionId, repo, sessionId }) {
             if (!SEGMENT.test(String(rootSessionId || ""))) throw new ServiceError(400, "BAD_REQUEST", "rootSessionId is required");
             repoConfig(repo);
@@ -742,27 +959,43 @@ export function createRepoService(options) {
         },
     };
 
-    /** Mirrors every repo, and makes its sandbox; at start, before the first clone asks. */
-    async function prepare() {
+    /**
+     * Runs `work` for every repo. A configured repo's error stops the pass;
+     * an added repo's is logged, so one gone or unreachable added repo
+     * neither keeps the service from starting nor holds back the others.
+     */
+    async function eachRepo(pass, work) {
         for (const [repo, config] of Object.entries(repos)) {
-            const existed = fs.existsSync(mirrorPath(repo));
-            const mirror = await ensureMirror(repo);
-            if (existed) await followUpstreamHead(mirror);
-            if (config?.sandbox) {
-                await sandboxes.ensure(repo, mirror);
-                await sandboxes.syncFromMirror(repo, mirror);
+            try {
+                await work(repo, config);
+            } catch (error) {
+                if (config?.registeredAt === undefined) throw error;
+                emit("repo.pass_failed", { pass, repo, message: String(error?.message ?? error) });
             }
         }
     }
 
+    /** Mirrors every repo, and makes its sandbox; at start, before the first clone asks. */
+    async function prepare() {
+        await eachRepo("prepare", async (repo, config) => {
+            const existed = fs.existsSync(mirrorPath(repo));
+            const mirror = await ensureMirror(repo);
+            if (existed) await followUpstreamHead(mirror);
+            if (config?.sandbox) {
+                await sandboxRemotes().ensure(repo, mirror);
+                await sandboxRemotes().syncFromMirror(repo, mirror);
+            }
+        });
+    }
+
     /** Fetches every mirror from its upstream, then brings each sandbox's protected branches up to date. */
     async function refresh() {
-        for (const [repo, config] of Object.entries(repos)) {
+        await eachRepo("refresh", async (repo, config) => {
             const mirror = mirrorPath(repo);
-            if (!fs.existsSync(mirror)) continue;
-            await runGit(["-C", mirror, "fetch", "-q", "--prune", "origin"]);
-            if (config?.sandbox) await sandboxes.syncFromMirror(repo, mirror);
-        }
+            if (!fs.existsSync(mirror)) return;
+            await runGit(["-C", mirror, "fetch", "-q", "--prune", "origin"], { env: networkGitEnv() });
+            if (config?.sandbox) await sandboxRemotes().syncFromMirror(repo, mirror);
+        });
     }
 
     const server = http.createServer(async (req, res) => {
@@ -849,6 +1082,11 @@ export function createRepoService(options) {
  *   REPO_SERVICE_IDLE_CLONE_HOURS   remove a clone no session has used for this many hours
  *                            (default 168 = 7 days; 0 = never)
  *   REPO_SERVICE_ADMIN_TOKEN the admin token for mirror fetch and maintenance (never given to workers)
+ *   REPO_SERVICE_REGISTER_PREFIXES  comma list of URL prefixes POST /v1/repos may add repos from,
+ *                            e.g. "https://github.com/acme/"; unset = adding repos is off.
+ *                            Anyone who reaches the port, agents included, can then have the
+ *                            service mirror any repo its git credentials read under them.
+ *   REPO_SERVICE_REGISTER_MAX       how many repos may be added (default 50)
  * Token minting and the worker registry are deployment-specific; wire them
  * in a wrapper that calls createRepoService() with mintToken and isWorkerAlive.
  */
@@ -872,6 +1110,8 @@ async function main() {
         adminToken: env.REPO_SERVICE_ADMIN_TOKEN || undefined,
         publicUrl: env.REPO_SERVICE_PUBLIC_URL || undefined,
         idleCloneMs: idleCloneMsFromEnv(env.REPO_SERVICE_IDLE_CLONE_HOURS),
+        registerPrefixes: env.REPO_SERVICE_REGISTER_PREFIXES || undefined,
+        registerMax: env.REPO_SERVICE_REGISTER_MAX ? Number(env.REPO_SERVICE_REGISTER_MAX) : undefined,
     });
     // Mirror and sandbox every repo before taking requests: a first clone
     // then finds a ready mirror.
