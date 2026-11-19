@@ -291,8 +291,9 @@ deploy again: base-infra then creates the scale set.
   settings choose; reads the built-in roles it assigns the controller, and
   stops if one now grants a SAS, data or subnet write action beyond those the
   Windows workers guide accepts; with `WIN_WORKER_RESOURCE_GROUP`, checks that
-  the group exists and that the stamp's group holds no scale set of the pool;
-  and, with an image version, checks whether the scale set exists, finds the
+  the group exists; checks that no other resource group holds the pool's
+  scale set, whatever the setting, so a deploy never moves a pool; and, with
+  an image version, checks whether the scale set exists, finds the
   standby pool resource provider's principal (or takes
   `WIN_WORKER_STANDBY_POOL_PRINCIPAL_ID`) and reads the controller's trusted
   CAs for the VMs' `userData`, certificates only. When Bicep is to create the

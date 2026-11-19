@@ -1243,12 +1243,23 @@ on the workers' identity only. What each fallback accepts:
 **The deploy checks the built-in roles it gives the controller.** Before
 base-infra, the deploy step reads each one's definition as Azure has it then,
 and stops if one is not a built-in role, or grants a sensitive operation that
-this page doesn't accept for it. Sensitive means any data action, such as
-Key Vault's `getSecret`; any action that hands out a SAS URL, a key or a
-credential (`beginGetAccess`, `retrieveBootDiagnosticsData`, `listKeys`,
-`listAccountSas`, `listServiceSas`, `regenerateKey`, `listCredentials`,
-`listSecrets`), named or through a wildcard, less the role's `notActions`;
-and a subnet's write or delete. So a role that gains, for example,
+this page doesn't accept for it. Less the role's `notActions`, sensitive
+means:
+
+- any data action, such as Key Vault's `getSecret`;
+- any action entry that names an action handing out a SAS URL, a key or a
+  credential (`beginGetAccess`, `retrieveSasUris`,
+  `retrieveBootDiagnosticsData`, `listKeys`, `listAccountSas`,
+  `listServiceSas`, `regenerateKey`, `listCredentials`, `listSecrets`), on
+  any resource type, wildcards included, such as `*/listSecrets/action`;
+- any action entry whose wildcard covers one of the operations the step
+  lists: the SAS of a disk, a snapshot, a scale set's disk, a restore point's
+  disk or a gallery's container image, a restore point's SAS URIs, a VM's boot
+  diagnostics, a storage account's keys or SAS, and an Elastic SAN snapshot's
+  SAS, such as `Microsoft.Compute/restorePointCollections/*`;
+- a subnet's write or delete, named or through a wildcard.
+
+So a role that gains, for example,
 `Microsoft.Compute/disks/beginGetAccess/action`,
 `Microsoft.Compute/snapshots/beginGetAccess/action`, a Key Vault data action
 or `Microsoft.Network/virtualNetworks/subnets/write` stops the deploy until
@@ -1321,11 +1332,22 @@ Operator on the workers' identity, and Compute Gallery Sharing Admin and
 Compute Gallery Artifacts Publisher on the gallery. Base-infra makes these
 grants once `WIN_WORKER_IMAGE_VERSION` is set, before the standby pool.
 
-Before base-infra, the deploy step checks that the group exists, and stops
-when the stamp's group already holds the pool's scale set: a deploy doesn't
-move a pool between groups, since its drives and VMs would stay behind. The
-controller takes the group from the scale set's resource ID
-(`WIN_WORKER_SCALE_SET_ID`), and refuses a golden snapshot in another group.
+Before base-infra, the deploy step checks that the group exists. And on every
+deploy, whatever the setting, it stops when a group other than the pool's
+holds the pool's scale set: a deploy doesn't move a pool into, out of or
+between groups of its own, since a second pool would start there and the
+first one's VMs, drives and snapshots would stay behind. To move a pool,
+delete it, with its drives and snapshots, and deploy it again. The step finds
+the scale set by its name, `<prefix>-win-workers`, in a list of the
+subscription's scale sets, which holds those of every group the deploying
+principal can read, and through the scale set ID an earlier deploy recorded
+(`WIN_WORKER_SCALE_SET_ID`, from the env file or the outputs cache). Where
+Azure refuses the deploying principal that list, the step looks in the
+stamp's group by name instead, and a pool in another group of its own is
+found only through the recorded ID; a recorded ID in a group the principal
+can't read stops the deploy until that ID is removed. The controller takes
+the group from the scale set's resource ID (`WIN_WORKER_SCALE_SET_ID`), and
+refuses a golden snapshot in another group.
 
 ### What the deploy creates
 
@@ -2164,7 +2186,7 @@ each.
 | `WIN_WORKER_EXTRA_ENV` | unset | Non-secret `NAME=VALUE` pairs for your own tools, separated by semicolons |
 | `WIN_WORKER_FEED_ENDPOINTS` | unset | Comma-separated https package feed URLs the workers' NuGet credential provider signs in to with their identity |
 | `WIN_WORKER_STANDBY_POOL_PRINCIPAL_ID` | unset (looked up) | The Standby Pool resource provider's object ID, when the deploying principal can't read the directory |
-| `WIN_WORKER_RESOURCE_GROUP` | unset (the stamp's resource group) | A [resource group of the pool's own](#the-pools-resource-group), which the subscription owner creates with its policy; the deploy doesn't move an existing pool to it |
+| `WIN_WORKER_RESOURCE_GROUP` | unset (the stamp's resource group) | A [resource group of the pool's own](#the-pools-resource-group), which the subscription owner creates with its policy; the deploy doesn't move an existing pool into, out of or between such groups |
 | `WIN_WORKER_CONTROLLER_ACCESS` | `custom-role` | `custom-role`; `built-in-roles`, with `WIN_WORKER_RESOURCE_GROUP`, when the tenant can't create more custom role definitions ([Custom roles and built-in fallbacks](#custom-roles-and-built-in-fallbacks)) |
 | `WIN_WORKER_VAULT_WRITER_ACCESS` | `custom-role` | `custom-role`; `access-policies` when the tenant can't create more custom role definitions |
 | `WIN_DEV_DRIVE_POOL_COUNT` (`M`) | `10` | Concurrent trees plus spares |

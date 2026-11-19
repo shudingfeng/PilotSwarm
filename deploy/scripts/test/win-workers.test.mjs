@@ -1680,11 +1680,29 @@ const BUILT_IN_DEFINITIONS = [
   ]),
 ];
 
+// The pool's scale set in a resource group, and other scale sets the
+// subscription holds: an AKS node pool's, and one whose name only starts like
+// the pool's.
+const scaleSetIn = (group, name = "psstamp-win-workers") =>
+  `/subscriptions/${SUBSCRIPTION}/resourceGroups/${group}/providers/Microsoft.Compute/virtualMachineScaleSets/${name}`;
+const OTHER_SCALE_SETS = [
+  scaleSetIn("MC_stamp-rg_psstamp-aks_westus3", "aks-system-12345678-vmss"),
+  scaleSetIn("other-rg", "psstamp-win-workers-old"),
+];
+const authorizationFailed = (scope) => ({
+  status: 1,
+  stderr: `ERROR: (AuthorizationFailed) The client does not have authorization to perform action 'Microsoft.Compute/virtualMachineScaleSets/read' over scope '${scope}' or the scope is invalid.`,
+});
+
 // An Azure CLI the test answers: role definitions, the resource groups, the
-// scale set, the standby pool provider, the deploy-only vault, PostgreSQL's
-// rule, the portal identity and its Blob grants, the scale set PATCH.
+// scale set (in `scaleSetGroups`, of which a principal that may read only
+// `readableGroups` sees those alone, and with `listDenied` may not list the
+// subscription's), the standby pool provider, the deploy-only vault,
+// PostgreSQL's rule, the portal identity and its Blob grants, the scale set
+// PATCH.
 function fakeStepAz({
   roles = [...ROLE_DEFINITIONS, ...BUILT_IN_DEFINITIONS], scaleSetExists = false, scaleSetGroup = scaleSetExists ? "stamp-rg" : null,
+  scaleSetGroups = scaleSetGroup ? [scaleSetGroup] : [], readableGroups = null, listDenied = false,
   groups = ["stamp-rg", "pool-rg"], secrets = { [CA_CERT_SECRET]: pki.caPem }, ruleExists = false,
   accountGrants = [], containerGrants = [], standbyPools = [{ id: STANDBY_OID, displayName: step.STANDBY_POOL_PROVIDER_NAME }],
 } = {}) {
@@ -1692,6 +1710,8 @@ function fakeStepAz({
   const patches = [];
   const stored = {};
   const accountScope = `/subscriptions/${SUBSCRIPTION}/resourceGroups/stamp-rg/providers/Microsoft.Storage/storageAccounts/psstampsa`;
+  const among = (list, group) => list.some((item) => item.toLowerCase() === String(group).toLowerCase());
+  const readable = (group) => !readableGroups || among(readableGroups, group);
   const answer = (args) => {
     const is = (...words) => words.every((word, i) => args[i] === word);
     if (is("role", "definition", "list")) {
@@ -1706,9 +1726,16 @@ function fakeStepAz({
         ? { stdout: `/subscriptions/${SUBSCRIPTION}/resourceGroups/${name}\n` }
         : { status: 3, stderr: `ERROR: (ResourceGroupNotFound) Resource group '${name}' could not be found.` };
     }
+    if (is("vmss", "list")) {
+      // `--query "[].id"`, across the subscription, of the groups the principal may read.
+      if (listDenied) return authorizationFailed(`/subscriptions/${option(args, "--subscription")}`);
+      const ids = [...OTHER_SCALE_SETS, ...scaleSetGroups.map((group) => scaleSetIn(group))];
+      return { stdout: JSON.stringify(ids.filter((id) => readable(id.split("/")[4]))) };
+    }
     if (is("vmss", "show")) {
-      return scaleSetGroup && option(args, "--resource-group").toLowerCase() === scaleSetGroup.toLowerCase()
-        ? { stdout: `${OUTPUTS.WIN_WORKER_SCALE_SET_ID}\n` } : notFound("Microsoft.Compute/virtualMachineScaleSets/psstamp-win-workers");
+      const group = option(args, "--resource-group");
+      if (!readable(group)) return authorizationFailed(`/subscriptions/${SUBSCRIPTION}/resourceGroups/${group}`);
+      return among(scaleSetGroups, group) ? { stdout: `${scaleSetIn(group)}\n` } : notFound("Microsoft.Compute/virtualMachineScaleSets/psstamp-win-workers");
     }
     if (is("ad", "sp", "list")) return { stdout: JSON.stringify(standbyPools) };
     if (is("keyvault", "secret", "list")) {
@@ -1877,7 +1904,7 @@ test("the built-in roles' safeguard: Azure's definitions pass, the scale set dis
     [changed(vmRole.id, (p) => p.actions.push("Microsoft.Compute/disks/beginGetAccess/action")),
       /'Virtual Machine Contributor' \(9980e02c-c2be-4d73-94e8-173b1dc7cf3c\) now grants microsoft\.compute\/disks\/begingetaccess\/action\. /],
     [changed(reader.id, (p) => p.actions.push("Microsoft.Compute/*")),
-      /'Reader' \([^)]+\) now grants microsoft\.compute\/disks\/begingetaccess\/action, microsoft\.compute\/snapshots\/begingetaccess\/action, /],
+      /'Reader' \([^)]+\) now grants microsoft\.compute\/disks\/begingetaccess\/action, microsoft\.compute\/galleries\/remotecontainerimages\/begingetaccess\/action, microsoft\.compute\/restorepointcollections\/restorepoints\/diskrestorepoints\/begingetaccess\/action, /],
     [changed(subnetRole.id, (p) => p.actions.push("Microsoft.Network/virtualNetworks/subnets/*")),
       /'Windows 365 Network User' \([^)]+\) now grants microsoft\.network\/virtualnetworks\/subnets\/delete, microsoft\.network\/virtualnetworks\/subnets\/write\. /],
     [changed(imageRole.id, (p) => p.dataActions.push("Microsoft.KeyVault/vaults/secrets/getSecret/action")),
@@ -1885,6 +1912,12 @@ test("the built-in roles' safeguard: Azure's definitions pass, the scale set dis
     // A SAS action on a resource type the list doesn't name.
     [changed(imageRole.id, (p) => p.actions.push("Microsoft.Compute/galleries/images/versions/beginGetAccess/action")),
       /now grants microsoft\.compute\/galleries\/images\/versions\/begingetaccess\/action\. /],
+    // A wildcard entry that names such an action counts as written, and one
+    // that covers a listed operation, by that operation.
+    [changed(reader.id, (p) => p.actions.push("*/listSecrets/action")), /'Reader' \([^)]+\) now grants \*\/listsecrets\/action\. /],
+    [changed(reader.id, (p) => p.actions.push("*/listCredentials/action")), /'Reader' \([^)]+\) now grants \*\/listcredentials\/action\. /],
+    [changed(imageRole.id, (p) => p.actions.push("Microsoft.Compute/restorePointCollections/*")),
+      /'Compute Gallery Image Reader' \([^)]+\) now grants microsoft\.compute\/restorepointcollections\/restorepoints\/diskrestorepoints\/begingetaccess\/action, microsoft\.compute\/restorepointcollections\/restorepoints\/retrievesasuris\/action\. /],
     [BUILT_IN_DEFINITIONS.filter((d) => d.name !== reader.id), /'Reader' \(acdd72a7-3385-48ef-bd42-f606fba81ae7\) is not a built-in role definition here/],
     [changed(reader.id, () => {}).map((d) => (d.name === reader.id ? { ...d, roleType: "CustomRole" } : d)), /'Reader' \([^)]+\) is not a built-in role definition here/],
   ]) {
@@ -1898,8 +1931,20 @@ test("the built-in roles' safeguard: Azure's definitions pass, the scale set dis
   // What a role's notActions take out doesn't count.
   check(changed(reader.id, (p) => {
     p.actions.push("Microsoft.Compute/*");
-    p.notActions.push("Microsoft.Compute/*/beginGetAccess/action", "Microsoft.Compute/*/retrieveBootDiagnosticsData/action");
+    p.notActions.push("Microsoft.Compute/*/beginGetAccess/action", "Microsoft.Compute/*/retrieveSasUris/action",
+      "Microsoft.Compute/*/retrieveBootDiagnosticsData/action");
   }));
+  for (const [entry, expected] of [
+    ["*/listSecrets/action", ["*/listsecrets/action"]],
+    ["*/listCredentials/action", ["*/listcredentials/action"]],
+    ["Microsoft.Compute/restorePointCollections/*", [
+      "microsoft.compute/restorepointcollections/restorepoints/diskrestorepoints/begingetaccess/action",
+      "microsoft.compute/restorepointcollections/restorepoints/retrievesasuris/action",
+    ]],
+  ]) {
+    assert.deepEqual(step.sensitiveGrants({ permissions: [{ actions: [entry] }] }), expected, entry);
+    assert.deepEqual(step.sensitiveGrants({ permissions: [{ actions: [entry], notActions: [entry] }] }), [], `${entry}, less its notActions`);
+  }
   const failing = { runFn: () => ({ status: 1, stdout: "", stderr: "ERROR: (AuthorizationFailed) no access" }) };
   assert.throws(() => step.checkBuiltInRoles(env, roles, failing), /Could not read the built-in role definition 'Windows 365 Network User': ERROR: \(AuthorizationFailed\) no access$/);
 });
@@ -1912,20 +1957,25 @@ test("before base-infra without an image version: the chosen custom roles and th
     ["role definition list", "PilotSwarm Disk Pool Controller"],
     ["role definition list", "PilotSwarm Personal Secret Writer"],
     ["role definition list", step.BUILT_IN_ROLES.windows365NetworkUser.id],
+    ["vmss list --subscription", undefined],
   ]);
   assert.equal(env.WIN_WORKER_SCALE_SET_EXISTS, undefined);
   const other = fakeStepAz();
   assert.deepEqual(step.beforeBicep({ env: stepEnv(), modules: ["portal"] }, { runFn: other.runFn }), { secureParameters: {} });
   assert.deepEqual(other.calls, []);
 
-  // Both fallbacks: no custom role, the six built-in roles, the pool's group.
+  // Both fallbacks: no custom role, the six built-in roles, the pool's group,
+  // on the first deploy, which has recorded no scale set yet.
   const fallbacks = fakeStepAz();
-  const fallbackEnv = stepEnv({ WIN_WORKER_CONTROLLER_ACCESS: "built-in-roles", WIN_WORKER_VAULT_WRITER_ACCESS: "access-policies", WIN_WORKER_RESOURCE_GROUP: "pool-rg" });
+  const fallbackEnv = stepEnv({
+    WIN_WORKER_CONTROLLER_ACCESS: "built-in-roles", WIN_WORKER_VAULT_WRITER_ACCESS: "access-policies", WIN_WORKER_RESOURCE_GROUP: "pool-rg",
+    WIN_WORKER_SCALE_SET_ID: "",
+  });
   step.beforeBicep({ env: fallbackEnv, modules: ["base-infra"] }, { runFn: fallbacks.runFn, tmpRoot: privateTmp(t) });
   assert.deepEqual(fallbacks.calls.map((args) => [args.slice(0, 3).join(" "), option(args, "--name")]), [
     ...step.controllerBuiltInRoles({ controllerAccess: "built-in-roles" }).map((role) => ["role definition list", role.id]),
     ["group show --name", "pool-rg"],
-    ["vmss show --resource-group", "psstamp-win-workers"],
+    ["vmss list --subscription", undefined],
   ]);
   assert.ok(!fallbacks.calls.some((args) => args.includes("--custom-role-only")));
   const params = renderBaseInfra({ ...poolEnv({ WIN_WORKER_CONTROLLER_ROLE_ID: undefined, WIN_WORKER_VAULT_WRITER_ROLE_ID: undefined }), ...fallbackEnv });
@@ -1936,28 +1986,95 @@ test("before base-infra without an image version: the chosen custom roles and th
 
 test("with a resource group of the pool's own, the scale set is looked up there; a missing group, or a scale set left in the stamp's group, stops the deploy", (t) => {
   const image = { WIN_WORKER_IMAGE_VERSION: "1.0.20261104", WIN_WORKER_STANDBY_POOL_PRINCIPAL_ID: STANDBY_OID };
-  const env = stepEnv({ ...image, WIN_WORKER_RESOURCE_GROUP: "pool-rg" });
+  const env = stepEnv({ ...image, WIN_WORKER_RESOURCE_GROUP: "pool-rg", WIN_WORKER_SCALE_SET_ID: scaleSetIn("pool-rg") });
   const az = fakeStepAz({ scaleSetGroup: "pool-rg" });
   assert.deepEqual(step.beforeBicep({ env, modules: ["base-infra"] }, { runFn: az.runFn, tmpRoot: privateTmp(t) }), { secureParameters: {} });
   assert.deepEqual(az.calls.filter((args) => ["group", "vmss"].includes(args[0])).map((args) => [args.slice(0, 2).join(" "), option(args, "--name"), option(args, "--resource-group")]), [
     ["group show", "pool-rg", undefined],
-    ["vmss show", "psstamp-win-workers", "stamp-rg"],
+    ["vmss list", undefined, undefined],
     ["vmss show", "psstamp-win-workers", "pool-rg"],
   ]);
+  const list = az.calls.find((args) => args[0] === "vmss" && args[1] === "list");
+  assert.deepEqual([option(list, "--subscription"), option(list, "--query")], [SUBSCRIPTION, "[].id"]);
   assert.equal(env.WIN_WORKER_SCALE_SET_EXISTS, "true");
 
   for (const [fake, expected] of [
     [fakeStepAz({ groups: ["stamp-rg"] }), /WIN_WORKER_RESOURCE_GROUP names pool-rg, which doesn't exist\. The subscription owner creates it, with the "Allowed resource types" policy/],
-    [fakeStepAz({ scaleSetGroup: "stamp-rg" }), /Scale set psstamp-win-workers is in the stamp's resource group stamp-rg, and WIN_WORKER_RESOURCE_GROUP names pool-rg\. The deploy doesn't move a pool between resource groups/],
+    [fakeStepAz({ scaleSetGroup: "stamp-rg" }),
+      /^Error: Scale set psstamp-win-workers is in resource group stamp-rg, but the pool's resource group is pool-rg \(WIN_WORKER_RESOURCE_GROUP names pool-rg\)\. The deploy doesn't move a pool between resource groups: a second pool would start there, and the old one's VMs, drives and snapshots would stay behind\. Unset WIN_WORKER_RESOURCE_GROUP to keep the pool where it is, or delete the old pool, with its drives and snapshots, before deploying one in pool-rg\.$/],
     [{ runFn: (name, args) => (args[0] === "group" ? { status: 1, stdout: "", stderr: "ERROR: (AuthorizationFailed) no access" } : fakeStepAz().runFn(name, args)) },
       /Cannot read resource group pool-rg: ERROR: \(AuthorizationFailed\) no access/],
   ]) {
     assert.throws(() => step.beforeBicep({ env: stepEnv({ ...image, WIN_WORKER_RESOURCE_GROUP: "pool-rg" }), modules: ["base-infra"] }, { runFn: fake.runFn, tmpRoot: privateTmp(t) }), expected);
   }
-  // Without a group of its own, neither check runs.
+  // Without a group of its own, the group isn't looked up, and the move check still runs.
   const same = fakeStepAz();
   step.beforeBicep({ env: stepEnv({ WIN_WORKER_RESOURCE_GROUP: "Stamp-RG" }), modules: ["base-infra"] }, { runFn: same.runFn });
-  assert.ok(!same.calls.some((args) => ["group", "vmss"].includes(args[0])));
+  assert.deepEqual(same.calls.filter((args) => ["group", "vmss"].includes(args[0])).map((args) => args.slice(0, 2).join(" ")), ["vmss list"]);
+});
+
+test("a deploy never moves a pool: a scale set of the pool's name in any group but the pool's stops it, whichever way the setting changed", (t) => {
+  const image = { WIN_WORKER_IMAGE_VERSION: "1.0.20261104", WIN_WORKER_STANDBY_POOL_PRINCIPAL_ID: STANDBY_OID };
+  const groups = ["stamp-rg", "pool-rg", "pool-rg-a", "pool-rg-b"];
+  const deploy = (settings, fake) => step.beforeBicep({ env: stepEnv(settings), modules: ["base-infra"] }, { runFn: fake.runFn, tmpRoot: privateTmp(t) });
+  const MOVE = "The deploy doesn't move a pool between resource groups: a second pool would start there, and the old one's VMs, drives and snapshots would stay behind\\. ";
+
+  // From a group of its own back to the stamp's, with the setting unset.
+  const back = fakeStepAz({ scaleSetGroup: "pool-rg", groups });
+  assert.throws(() => deploy({ ...image, WIN_WORKER_SCALE_SET_ID: "" }, back), new RegExp(
+    "^Error: Scale set psstamp-win-workers is in resource group pool-rg, but the pool's resource group is stamp-rg \\(with WIN_WORKER_RESOURCE_GROUP " +
+      `unset, it is the stamp's group, stamp-rg\\)\\. ${MOVE}Set WIN_WORKER_RESOURCE_GROUP=pool-rg to keep the pool where it is, or delete the ` +
+      "old pool, with its drives and snapshots, before deploying one in stamp-rg\\.$"));
+  assert.ok(!back.calls.some((args) => args[0] === "keyvault" || (args[0] === "vmss" && args[1] === "show")), "nothing is made for a second pool");
+
+  // From one group of its own to another, before the image version too.
+  const across = fakeStepAz({ scaleSetGroup: "pool-rg-a", groups });
+  assert.throws(() => deploy({ WIN_WORKER_RESOURCE_GROUP: "pool-rg-b", WIN_WORKER_SCALE_SET_ID: "" }, across), new RegExp(
+    "^Error: Scale set psstamp-win-workers is in resource group pool-rg-a, but the pool's resource group is pool-rg-b \\(WIN_WORKER_RESOURCE_GROUP " +
+      `names pool-rg-b\\)\\. ${MOVE}Set WIN_WORKER_RESOURCE_GROUP=pool-rg-a to keep the pool where it is, or delete the old pool, with its ` +
+      "drives and snapshots, before deploying one in pool-rg-b\\.$"));
+
+  // Two pools already: each other group is named.
+  assert.throws(() => deploy({ ...image, WIN_WORKER_RESOURCE_GROUP: "pool-rg-b" }, fakeStepAz({ scaleSetGroups: ["pool-rg-a", "pool-rg-b", "stamp-rg"], groups })),
+    /^Error: Scale sets named psstamp-win-workers are in resource groups pool-rg-a and stamp-rg, but the pool's resource group is pool-rg-b .* Delete the pools you don't use, with their drives and snapshots, and point WIN_WORKER_RESOURCE_GROUP at the group of the one you keep, or unset it for the stamp's group\.$/);
+
+  // The pool's own group under another case, and the subscription's other
+  // scale sets, are no move.
+  const stays = fakeStepAz({ scaleSetGroup: "Pool-Rg", groups });
+  assert.deepEqual(deploy({ ...image, WIN_WORKER_RESOURCE_GROUP: "POOL-RG", WIN_WORKER_SCALE_SET_ID: scaleSetIn("pool-rg") }, stays), { secureParameters: {} });
+  assert.equal(stays.calls.filter((args) => args[0] === "vmss" && args[1] === "show").length, 1, "only the pool's own group is looked in");
+});
+
+test("the move check with a principal that may read only some groups: a shorter list, a refused one, and the scale set an earlier deploy recorded", (t) => {
+  const groups = ["stamp-rg", "pool-rg", "pool-rg-a", "pool-rg-b"];
+  const deploy = (settings, fake) => step.beforeBicep({ env: stepEnv(settings), modules: ["base-infra"] }, { runFn: fake.runFn, tmpRoot: privateTmp(t) });
+  const toB = { WIN_WORKER_RESOURCE_GROUP: "pool-rg-b", WIN_WORKER_SCALE_SET_ID: "" };
+
+  // A list of only the groups it may read doesn't stop the deploy.
+  deploy(toB, fakeStepAz({ scaleSetGroup: "pool-rg-a", groups, readableGroups: ["stamp-rg", "pool-rg-b"] }));
+  // Nor does a refused one, with no pool elsewhere: the stamp's group is looked in by name.
+  const refused = fakeStepAz({ groups, listDenied: true });
+  deploy({ WIN_WORKER_RESOURCE_GROUP: "pool-rg", WIN_WORKER_SCALE_SET_ID: "" }, refused);
+  assert.deepEqual(refused.calls.filter((args) => args[0] === "vmss").map((args) => [args[1], option(args, "--resource-group")]), [["list", undefined], ["show", "stamp-rg"]]);
+  // A refused list still finds a pool in the stamp's group, and the one an
+  // earlier deploy recorded.
+  assert.throws(() => deploy({ WIN_WORKER_RESOURCE_GROUP: "pool-rg", WIN_WORKER_SCALE_SET_ID: "" }, fakeStepAz({ scaleSetGroup: "stamp-rg", groups, listDenied: true })),
+    /^Error: Scale set psstamp-win-workers is in resource group stamp-rg, but the pool's resource group is pool-rg /);
+  assert.throws(() => deploy({ ...toB, WIN_WORKER_SCALE_SET_ID: scaleSetIn("pool-rg-a") }, fakeStepAz({ scaleSetGroup: "pool-rg-a", groups, listDenied: true })),
+    /^Error: Scale set psstamp-win-workers is in resource group pool-rg-a, but the pool's resource group is pool-rg-b /);
+  // A recorded scale set that is gone, or in another subscription, is no move.
+  deploy({ ...toB, WIN_WORKER_SCALE_SET_ID: scaleSetIn("pool-rg-a") }, fakeStepAz({ groups, listDenied: true }));
+  const elsewhere = scaleSetIn("pool-rg-a").replace(SUBSCRIPTION, "00000000-0000-0000-0000-0000000000ff");
+  const other = fakeStepAz({ scaleSetGroup: "pool-rg-a", groups, readableGroups: ["stamp-rg", "pool-rg-b"] });
+  deploy({ ...toB, WIN_WORKER_SCALE_SET_ID: elsewhere }, other);
+  assert.ok(!other.calls.some((args) => args[0] === "vmss" && args[1] === "show"));
+  // One recorded in a group it may no longer read stops the deploy: the old pool may still be there.
+  assert.throws(() => deploy({ ...toB, WIN_WORKER_SCALE_SET_ID: scaleSetIn("pool-rg-a") }, fakeStepAz({ groups, readableGroups: ["stamp-rg", "pool-rg-b"] })),
+    /^Error: Cannot check whether scale set 'psstamp-win-workers' exists: ERROR: \(AuthorizationFailed\) .* over scope '\/subscriptions\/[^/]+\/resourceGroups\/pool-rg-a' or the scope is invalid\. An earlier deploy recorded it in resource group pool-rg-a \(WIN_WORKER_SCALE_SET_ID\), .* remove WIN_WORKER_SCALE_SET_ID from the env file and from the outputs cache/);
+  // Any other failure of the list stops it too.
+  const broken = fakeStepAz({ groups });
+  const runFn = (name, args) => (args[0] === "vmss" && args[1] === "list" ? { status: 1, stdout: "", stderr: "ERROR: Connection reset" } : broken.runFn(name, args));
+  assert.throws(() => step.beforeBicep({ env: stepEnv(toB), modules: ["base-infra"] }, { runFn }), /^Error: Cannot list the subscription's scale sets: ERROR: Connection reset$/);
 });
 
 test("before base-infra creates the scale set: the administrator password is made once in the deploy-only vault and passed as a secure parameter", (t) => {
@@ -1966,7 +2083,7 @@ test("before base-infra creates the scale set: the administrator password is mad
   const env = stepEnv({ WIN_WORKER_IMAGE_VERSION: "1.0.20261104" });
   const { secureParameters } = step.beforeBicep({ env, modules: ["base-infra"] }, { runFn: az.runFn, tmpRoot });
   assert.deepEqual(az.verbs(), [
-    "role definition list", "role definition list", "role definition list",
+    "role definition list", "role definition list", "role definition list", "vmss list --subscription",
     "vmss show --resource-group", "ad sp list", "keyvault secret list", "keyvault secret show", "keyvault secret show", "keyvault secret set",
   ]);
   assert.deepEqual(az.calls.filter((args) => args[0] === "keyvault").map((args) => [args[2], option(args, "--vault-name"), option(args, "--name")]), [
@@ -2002,7 +2119,7 @@ test("before base-infra with an existing scale set: no password, and Bicep leave
   const az = fakeStepAz({ scaleSetExists: true });
   const env = stepEnv({ WIN_WORKER_IMAGE_VERSION: "1.0.20261104", WIN_WORKER_STANDBY_POOL_PRINCIPAL_ID: STANDBY_OID.toUpperCase() });
   assert.deepEqual(step.beforeBicep({ env, modules: ["base-infra"] }, { runFn: az.runFn, tmpRoot: privateTmp(t) }), { secureParameters: {} });
-  assert.deepEqual(az.verbs().slice(3), ["vmss show --resource-group", "keyvault secret list", "keyvault secret show"], "no directory lookup with the principal set");
+  assert.deepEqual(az.verbs().slice(3), ["vmss list --subscription", "vmss show --resource-group", "keyvault secret list", "keyvault secret show"], "no directory lookup with the principal set");
   assert.equal(env.WIN_WORKER_SCALE_SET_EXISTS, "true");
   assert.equal(env.WIN_WORKER_STANDBY_POOL_PRINCIPAL_ID, STANDBY_OID);
   assert.equal(renderBaseInfra({ ...poolEnv(), ...env }).winWorkerScaleSetExists.value, true);
@@ -2339,6 +2456,7 @@ if (is("deployment", "group", "create")) {
 if (is("deployment", "group", "show")) { console.log(JSON.stringify(answers.outputs)); process.exit(0); }
 if (is("keyvault", "secret", "set")) { record({ stored: fs.readFileSync(option("--file"), "utf8") }); process.exit(0); }
 record();
+if (is("vmss", "list")) { console.log("[]"); process.exit(0); }
 if (is("role", "definition", "list")) {
   const name = option("--name");
   console.log(JSON.stringify(answers.roles.filter((r) => (r.roleName === name || r.name === name) && (!args.includes("--custom-role-only") || r.roleType === "CustomRole"))));
@@ -2441,18 +2559,18 @@ test("deploy.mjs runs the Windows worker step around base-infra's Bicep only wit
   const on = deployWithFakeAz(t, { settings: { ...POOL } });
   assert.equal(on.result.status, 0, output(on.result));
   assert.deepEqual(verbsOf(on.logged), [
-    "role definition list", "role definition list", "role definition list",
+    "role definition list", "role definition list", "role definition list", "vmss list --subscription",
     "deployment group create",
     "postgres flexible-server firewall-rule show",
     "identity show --resource-group",
     "role assignment list",
   ]);
-  const [parameters] = on.logged[3].parameters;
+  const [parameters] = on.logged[4].parameters;
   assert.deepEqual(parameters.winWorkersEnabled, { value: true });
   assert.deepEqual(parameters.winWorkerAlertEmails, { value: ["ops@example.com"] });
   assert.deepEqual(parameters.diskPoolControllerRoleId, { value: ROLE_IDS.WIN_WORKER_CONTROLLER_ROLE_ID });
   assert.equal(parameters.winWorkerUserData, undefined, "no scale set without an image version");
-  assert.equal(on.logged[3].parameters.length, 1, "no secure parameter");
+  assert.equal(on.logged[4].parameters.length, 1, "no secure parameter");
 });
 
 test("deploy.mjs hands the administrator password to the deployment that creates the scale set as a secure parameter only", (t) => {
@@ -2466,14 +2584,14 @@ test("deploy.mjs hands the administrator password to the deployment that creates
     WIN_WORKER_IDENTITY_CLIENT_ID: WORKER_CLIENT, EXPECTED_WIN_WORKER_OID: WORKER_OID,
   } });
   assert.equal(result.status, 0, output(result));
-  assert.deepEqual(verbsOf(logged).slice(0, 9), [
-    "role definition list", "role definition list", "role definition list",
+  assert.deepEqual(verbsOf(logged).slice(0, 10), [
+    "role definition list", "role definition list", "role definition list", "vmss list --subscription",
     "vmss show --resource-group", "keyvault secret list", "keyvault secret show", "keyvault secret show", "keyvault secret set",
     "deployment group create",
   ]);
-  const password = logged[7].stored;
+  const password = logged[8].stored;
   assert.match(password, /^.{32}$/);
-  const [rendered, secure] = logged[8].parameters;
+  const [rendered, secure] = logged[9].parameters;
   assert.deepEqual(secure, { winWorkerAdminPassword: { value: password } });
   assert.ok(!JSON.stringify(rendered).includes(password), "the rendered file holds no password");
   assert.deepEqual(rendered.winWorkerScaleSetExists, { value: false });

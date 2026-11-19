@@ -10,8 +10,9 @@
 //                      the controller instead, and stop if one now grants a
 //                      SAS, data or subnet write action beyond those
 //                      documented; with a resource group of the pool's own
-//                      (WIN_WORKER_RESOURCE_GROUP), check that it exists and
-//                      that the stamp's group holds no scale set of the pool.
+//                      (WIN_WORKER_RESOURCE_GROUP), check that it exists; and
+//                      check that no other resource group holds the pool's
+//                      scale set, so a deploy never moves a pool.
 //                      With WIN_WORKER_IMAGE_VERSION set:
 //                      check whether the scale set exists, so Bicep sets its
 //                      capacity only when it creates it; find the standby pool
@@ -94,6 +95,8 @@ const BLOB_DATA_CONTRIBUTOR_ROLE_ID = "ba92f5b4-2d11-453d-a403-e96b0029c9fe";
 const GUID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
 const NOT_FOUND = /ResourceNotFound|ResourceGroupNotFound|ParentResourceNotFound|NotFound|was not found|could not be found/i;
 const SECRET_NOT_FOUND = /SecretNotFound|was not found|could not be found|\(NotFound\)/i;
+const AUTHORIZATION_FAILED = /AuthorizationFailed|does not have authorization/i;
+const SCALE_SET_ID = /^\/subscriptions\/([^/]+)\/resourceGroups\/([^/]+)\/providers\/Microsoft\.Compute\/virtualMachineScaleSets\/([^/]+)$/i;
 
 // The custom role definitions the subscription owner creates once, for the
 // deployments that choose them: WIN_WORKER_CONTROLLER_ACCESS and
@@ -219,13 +222,17 @@ export function controllerBuiltInRoles(settings) {
   return roles;
 }
 
-// Operations that hand out a SAS URL to a disk, a snapshot or a boot log, or
-// a storage account's keys, and a subnet's write and delete, which could take
-// the worker subnet's NSG off. A wildcard in a role counts when it covers one.
+// Operations that hand out a SAS URL to a disk, a snapshot, a restore point's
+// disks, a gallery's container image or a boot log, or a storage account's
+// keys, and a subnet's write and delete, which could take the worker subnet's
+// NSG off. A wildcard in a role counts when it covers one.
 export const SENSITIVE_OPERATIONS = Object.freeze([
   "Microsoft.Compute/disks/beginGetAccess/action",
   "Microsoft.Compute/snapshots/beginGetAccess/action",
   "Microsoft.Compute/virtualMachineScaleSets/disks/beginGetAccess/action",
+  "Microsoft.Compute/restorePointCollections/restorePoints/diskRestorePoints/beginGetAccess/action",
+  "Microsoft.Compute/restorePointCollections/restorePoints/retrieveSasUris/action",
+  "Microsoft.Compute/galleries/remoteContainerImages/beginGetAccess/action",
   "Microsoft.Compute/virtualMachines/retrieveBootDiagnosticsData/action",
   "Microsoft.Compute/virtualMachineScaleSets/virtualMachines/retrieveBootDiagnosticsData/action",
   "Microsoft.ElasticSan/elasticSans/volumeGroups/snapshots/beginGetAccess/action",
@@ -238,7 +245,7 @@ export const SENSITIVE_OPERATIONS = Object.freeze([
 ]);
 // An action of this name hands out a SAS URL, a key or a credential, on
 // whatever resource type.
-const SENSITIVE_ACTION = /\/(?:begingetaccess|retrievebootdiagnosticsdata|listkeys|listaccountsas|listservicesas|regeneratekey|listcredentials?|listsecrets)\/action$/i;
+const SENSITIVE_ACTION = /\/(?:begingetaccess|retrievesasuris|retrievebootdiagnosticsdata|listkeys|listaccountsas|listservicesas|regeneratekey|listcredentials?|listsecrets)\/action$/i;
 
 function firstLine(text) {
   return String(text ?? "").trim().split(/\r?\n/)[0].slice(0, 300);
@@ -362,9 +369,10 @@ function actionPattern(entry) {
 
 /**
  * The sensitive operations a role definition grants, in lower case: every
- * data action; every action that SENSITIVE_ACTION names; and every one of
- * SENSITIVE_OPERATIONS that an action entry covers, wildcards included, less
- * what the entry's notActions take out.
+ * data action; every action entry that SENSITIVE_ACTION matches, as written,
+ * a wildcard entry included; and every one of SENSITIVE_OPERATIONS that an
+ * action entry covers, wildcards included; each less what the entry's
+ * notActions take out.
  */
 export function sensitiveGrants(definition) {
   const found = new Set();
@@ -372,7 +380,7 @@ export function sensitiveGrants(definition) {
     const notActions = (permission?.notActions ?? []).map(actionPattern);
     const kept = (operation) => !notActions.some((pattern) => pattern.test(operation));
     for (const entry of (permission?.actions ?? []).map(String)) {
-      if (!entry.includes("*") && SENSITIVE_ACTION.test(entry) && kept(entry)) found.add(entry.toLowerCase());
+      if (SENSITIVE_ACTION.test(entry) && kept(entry)) found.add(entry.toLowerCase());
       const pattern = actionPattern(entry);
       for (const operation of SENSITIVE_OPERATIONS) {
         if (pattern.test(operation) && kept(operation)) found.add(operation.toLowerCase());
@@ -411,29 +419,100 @@ export function checkBuiltInRoles(env, roles, { runFn = run } = {}) {
   }
 }
 
-// With a resource group of the pool's own: the subscription owner creates it,
-// with its resource type policy, before the first deploy; and the deploy
-// doesn't move a pool whose scale set is in the stamp's group.
-export function checkPoolResourceGroup(names, { runFn = run } = {}) {
-  if (!names.separatePoolResourceGroup) return;
-  const group = runFn("az", ["group", "show", "--name", names.poolResourceGroup, "--query", "id", "--output", "tsv"],
+// The pool's resource group, before base-infra. With a group of the pool's
+// own, the subscription owner creates it, with its resource type policy,
+// before the first deploy. And whatever the setting, the deploy doesn't move
+// a pool: a scale set of the pool's name in any other group stops it, since
+// a second pool would start and the first one's VMs, drives and snapshots
+// would stay behind.
+export function checkPoolResourceGroup(names, { runFn = run, recordedScaleSetId = "" } = {}) {
+  if (names.separatePoolResourceGroup) {
+    const group = runFn("az", ["group", "show", "--name", names.poolResourceGroup, "--query", "id", "--output", "tsv"],
+      { capture: true, allowFail: true });
+    if (group.status !== 0) {
+      if (NOT_FOUND.test(String(group.stderr ?? ""))) {
+        throw new Error(
+          `WIN_WORKER_RESOURCE_GROUP names ${names.poolResourceGroup}, which doesn't exist. The subscription owner creates it, with ` +
+            "the \"Allowed resource types\" policy that docs/developer/deploy/windows-workers.md lists, before the deploy.",
+        );
+      }
+      throw new Error(`Cannot read resource group ${names.poolResourceGroup}: ${firstLine(group.stderr) || `exit ${group.status}`}`);
+    }
+  }
+  const elsewhere = scaleSetGroupsElsewhere(names, { runFn, recordedScaleSetId });
+  if (elsewhere.length === 0) return;
+  const setting = names.separatePoolResourceGroup ? "WIN_WORKER_RESOURCE_GROUP names" : "with WIN_WORKER_RESOURCE_GROUP unset, it is the stamp's group,";
+  const deleteOld = `or delete the old pool, with its drives and snapshots, before deploying one in ${names.poolResourceGroup}`;
+  const remedy = elsewhere.length > 1
+    ? "Delete the pools you don't use, with their drives and snapshots, and point WIN_WORKER_RESOURCE_GROUP at the group of the one " +
+      "you keep, or unset it for the stamp's group."
+    : elsewhere[0].toLowerCase() === names.resourceGroup.toLowerCase()
+      ? `Unset WIN_WORKER_RESOURCE_GROUP to keep the pool where it is, ${deleteOld}.`
+      : `Set WIN_WORKER_RESOURCE_GROUP=${elsewhere[0]} to keep the pool where it is, ${deleteOld}.`;
+  const where = elsewhere.length > 1
+    ? `Scale sets named ${names.scaleSetName} are in resource groups ${elsewhere.slice(0, -1).join(", ")} and ${elsewhere.at(-1)}`
+    : `Scale set ${names.scaleSetName} is in resource group ${elsewhere[0]}`;
+  throw new Error(
+    `${where}, but the pool's resource group is ` +
+      `${names.poolResourceGroup} (${setting} ${names.poolResourceGroup}). The deploy doesn't move a pool between resource ` +
+      `groups: a second pool would start there, and the old one's VMs, drives and snapshots would stay behind. ${remedy}`,
+  );
+}
+
+// The resource groups other than the pool's that hold a scale set of the
+// pool's name. A list across the subscription finds them in every group the
+// deploying principal can read. A principal that may read only the stamp's
+// and the pool's groups sees those alone; where Azure refuses such a
+// principal the list, the step looks in the stamp's group by name instead.
+// The scale set ID an earlier deploy recorded (WIN_WORKER_SCALE_SET_ID, from
+// the env file or the outputs cache) names one more group, which counts
+// while that scale set is still there.
+export function scaleSetGroupsElsewhere(names, { runFn = run, recordedScaleSetId = "" } = {}) {
+  const pool = names.poolResourceGroup.toLowerCase();
+  const name = names.scaleSetName.toLowerCase();
+  const found = new Map();
+  const note = (group) => {
+    if (group.toLowerCase() !== pool && !found.has(group.toLowerCase())) found.set(group.toLowerCase(), group);
+  };
+  const listed = runFn("az", ["vmss", "list", "--subscription", names.subscriptionId, "--query", "[].id", "--output", "json"],
     { capture: true, allowFail: true });
-  if (group.status !== 0) {
-    if (NOT_FOUND.test(String(group.stderr ?? ""))) {
+  if (listed.status === 0) {
+    let ids;
+    try {
+      ids = JSON.parse(listed.stdout || "[]");
+    } catch {
+      throw new Error("Cannot list the subscription's scale sets: the Azure CLI returned no JSON.");
+    }
+    for (const id of Array.isArray(ids) ? ids : []) {
+      const match = SCALE_SET_ID.exec(String(id ?? ""));
+      if (match && match[3].toLowerCase() === name) note(match[2]);
+    }
+  } else if (AUTHORIZATION_FAILED.test(String(listed.stderr ?? ""))) {
+    log("warn", "[win-workers] the deploying principal may not list the subscription's scale sets, so the check that the pool stays " +
+      "in its resource group looks only in the stamp's group and at the scale set an earlier deploy recorded.");
+    if (names.resourceGroup.toLowerCase() !== pool && scaleSetExists({ resourceGroup: names.resourceGroup, name: names.scaleSetName }, { runFn })) {
+      note(names.resourceGroup);
+    }
+  } else {
+    throw new Error(`Cannot list the subscription's scale sets: ${firstLine(listed.stderr) || `exit ${listed.status}`}`);
+  }
+  const recorded = SCALE_SET_ID.exec(String(recordedScaleSetId ?? "").trim());
+  if (recorded && recorded[1].toLowerCase() === names.subscriptionId.toLowerCase() && recorded[3].toLowerCase() === name
+    && recorded[2].toLowerCase() !== pool && !found.has(recorded[2].toLowerCase())) {
+    let exists;
+    try {
+      exists = scaleSetExists({ resourceGroup: recorded[2], name: recorded[3] }, { runFn });
+    } catch (error) {
       throw new Error(
-        `WIN_WORKER_RESOURCE_GROUP names ${names.poolResourceGroup}, which doesn't exist. The subscription owner creates it, with ` +
-          "the \"Allowed resource types\" policy that docs/developer/deploy/windows-workers.md lists, before the deploy.",
+        `${error.message.replace(/\.$/, "")}. An earlier deploy recorded it in resource group ${recorded[2]} (WIN_WORKER_SCALE_SET_ID), and the ` +
+          "deploy doesn't move a pool between resource groups. Once that pool is gone, remove WIN_WORKER_SCALE_SET_ID from the " +
+          "env file and from the outputs cache, deploy/.tmp/<env>/bicep-outputs.cache.json.",
+        { cause: error },
       );
     }
-    throw new Error(`Cannot read resource group ${names.poolResourceGroup}: ${firstLine(group.stderr) || `exit ${group.status}`}`);
+    if (exists) note(recorded[2]);
   }
-  if (scaleSetExists({ resourceGroup: names.resourceGroup, name: names.scaleSetName }, { runFn })) {
-    throw new Error(
-      `Scale set ${names.scaleSetName} is in the stamp's resource group ${names.resourceGroup}, and WIN_WORKER_RESOURCE_GROUP names ` +
-        `${names.poolResourceGroup}. The deploy doesn't move a pool between resource groups: its drives and VMs would stay behind. ` +
-        "Unset WIN_WORKER_RESOURCE_GROUP to keep the pool where it is.",
-    );
-  }
+  return [...found.values()];
 }
 
 // ─── The scale set, the standby pool's principal, the CA ───
@@ -659,7 +738,7 @@ export function beforeBicep({ env, modules }, { runFn = run, randomBytesFn = ran
   const settings = winWorkerSettings(env);
   resolveCustomRoles(env, { runFn, roles: chosenCustomRoles(settings) });
   checkBuiltInRoles(env, controllerBuiltInRoles(settings), { runFn });
-  checkPoolResourceGroup(names, { runFn });
+  checkPoolResourceGroup(names, { runFn, recordedScaleSetId: settingValue(env, "WIN_WORKER_SCALE_SET_ID") });
   if (!settings.imageVersion) {
     log("info", "[win-workers] WIN_WORKER_IMAGE_VERSION is unset: base-infra creates the gallery and its image definition, and no scale set yet.");
     return { secureParameters: {} };
