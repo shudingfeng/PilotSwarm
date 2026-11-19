@@ -5099,10 +5099,13 @@ export function selectAdminConsole(state) {
     const modelProviderState = admin.modelProviders || {};
     const providerRows = Array.isArray(modelProviderState.providers) ? modelProviderState.providers : [];
     const modelRows = Array.isArray(modelProviderState.models) ? modelProviderState.models : [];
+    const choiceModelRows = Array.isArray(modelProviderState.runtimeModels)
+        ? modelProviderState.runtimeModels
+        : modelRows;
     const ownProviderRows = providerRows.filter((provider) => provider?.class !== "shared"
         && (provider?.mine === true || provider?.usableByMe === true));
     const sharedProviderRows = providerRows.filter((provider) => provider?.class === "shared");
-    const choiceRows = (providers) => providers.flatMap((provider) => modelRows
+    const choiceRows = (providers) => providers.flatMap((provider) => choiceModelRows
         .filter((model) => model?.providerId === provider.name || model?.providerId === provider.typeId)
         .map((model) => {
             const modelName = model?.modelName || model?.name || String(model?.qualifiedName || "").split(":").pop();

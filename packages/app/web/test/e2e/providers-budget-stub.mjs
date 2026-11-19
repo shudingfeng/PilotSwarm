@@ -313,11 +313,19 @@ const TYPE_MODELS = [
     { modelName: "gpt-5.4", providerId: "azure-openai", providerType: "azure-openai" },
     { modelName: "gpt-5.4-mini", providerId: "azure-openai", providerType: "azure-openai" },
     { modelName: "claude-sonnet-5", providerId: "github-copilot", providerType: "github-copilot" },
+    { modelName: "catalog-only", providerId: "github-copilot", providerType: "github-copilot" },
 ];
-export const MODELS = PROVIDERS.flatMap((provider) => TYPE_MODELS
-    .filter((model) => model.providerId === provider.typeId)
-    .map((model) => ({ ...model, catalogKind: "runtime_provider", providerId: provider.name,
-        qualifiedName: `${provider.name}:${model.modelName}` })));
+export const MODELS = PROVIDERS.flatMap((provider) => {
+    const models = TYPE_MODELS.filter((model) => model.providerId === provider.typeId
+        && !(provider.name === "copilot-shared" && model.modelName === "catalog-only"));
+    // This model is returned by live discovery for this provider's token, but
+    // is deliberately absent from the static provider-type catalog above.
+    if (provider.name === "copilot-shared") {
+        models.push({ modelName: "gpt-6-sol", providerId: provider.typeId, providerType: "github-copilot" });
+    }
+    return models.map((model) => ({ ...model, catalogKind: "runtime_provider", providerId: provider.name,
+        qualifiedName: `${provider.name}:${model.modelName}` }));
+});
 
 // Sessions whose models name THESE providers. Their ids are the ones
 // pausedFixture stops, and their status is "waiting" — which is exactly what

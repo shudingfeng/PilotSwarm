@@ -150,13 +150,19 @@ test("Model Providers owns provider onboarding and all default routing controls"
         const cluster = page.getByRole("combobox", { name: "Cluster Session Default" });
         await expect(cluster).toHaveValue("copilot-shared:claude-sonnet-5");
         await expect(cluster.locator('option[value="my-sandbox:gpt-5.4"]')).toHaveCount(0);
+        await expect(cluster.locator('option[value="copilot-shared:gpt-6-sol"]')).toHaveCount(1);
+        await expect(cluster.locator('option[value="copilot-shared:catalog-only"]')).toHaveCount(0);
 
         const system = page.getByRole("combobox", { name: "Model", exact: true });
         await expect(system.locator('option[value="my-sandbox:gpt-5.4"]')).toHaveCount(1);
+        await expect(system.locator('option[value="copilot-shared:gpt-6-sol"]')).toHaveCount(1);
+        await expect(system.locator('option[value="copilot-shared:catalog-only"]')).toHaveCount(0);
+        const override = page.getByRole("combobox", { name: "Model override for sweeper" });
+        await expect(override.locator('option[value="copilot-shared:gpt-6-sol"]')).toHaveCount(1);
+        await expect(override.locator('option[value="copilot-shared:catalog-only"]')).toHaveCount(0);
         await expect(page.locator('.ps-budget-seg[aria-label="Existing system sessions"] button'))
             .toHaveText(["Future only", "Complete & restart", "Terminate & restart", "Hard delete & restart"]);
-        await expect(page.getByRole("combobox", { name: "Model override for sweeper" }))
-            .toHaveValue("copilot-shared:claude-sonnet-5");
+        await expect(override).toHaveValue("copilot-shared:claude-sonnet-5");
 
         // The SHARED row's button must actually open the sheet and rotate
         // through the admin op. 0.5.47 rendered the button on shared rows

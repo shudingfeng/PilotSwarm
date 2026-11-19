@@ -3784,21 +3784,28 @@ export class PilotSwarmUiController {
         }
         this.dispatch({ type: "admin/modelProviders/loading" });
         try {
-            const [providerResult, modelResult, defaults] = await Promise.all([
+            const [providerResult, modelResult, defaults, modelTypeResult] = await Promise.all([
                 this.transport.listProviders(),
+                typeof this.transport.listModels === "function"
+                    ? this.transport.listModels()
+                    : this.transport.getModelsByProvider(),
+                this.transport.getModelDefaults(),
                 typeof this.transport.getModelsByProvider === "function"
                     ? this.transport.getModelsByProvider()
-                    : this.transport.listModels(),
-                this.transport.getModelDefaults(),
+                    : null,
             ]);
-            const models = Array.isArray(modelResult)
-                && modelResult.some((entry) => Array.isArray(entry?.models))
-                ? modelResult.flatMap((group) => (group.models || []).map((model) => ({
+            const flattenModels = (result) => Array.isArray(result)
+                && result.some((entry) => Array.isArray(entry?.models))
+                ? result.flatMap((group) => (group.models || []).map((model) => ({
                     ...model,
                     providerId: group.providerId,
                     providerType: group.type || model.providerType,
                 })))
-                : modelResult;
+                : result;
+            const runtimeModels = typeof this.transport.listModels === "function"
+                ? flattenModels(modelResult)
+                : null;
+            const models = flattenModels(modelTypeResult ?? modelResult);
             const providers = Array.isArray(providerResult)
                 ? providerResult
                 : (Array.isArray(providerResult?.providers) ? providerResult.providers : []);
@@ -3806,9 +3813,10 @@ export class PilotSwarmUiController {
                 type: "admin/modelProviders/loaded",
                 providers,
                 models: Array.isArray(models) ? models : [],
+                runtimeModels: Array.isArray(runtimeModels) ? runtimeModels : null,
                 defaults,
             });
-            return { providers, models, defaults };
+            return { providers, models, runtimeModels, defaults };
         } catch (error) {
             this.dispatch({ type: "admin/modelProviders/loadFailed", error: error?.message || String(error) });
             return null;
