@@ -39,7 +39,7 @@ import {
 import { assertUnambiguousProvider, isWebOptions, type PilotSwarmWebOptions } from "./web/api-connection.js";
 import { WebPilotSwarmClient } from "./web/web-client.js";
 import { loadModelProviderTypes, type ModelProviderRegistry } from "./model-providers.js";
-import { resolveRuntimeModelSelection, type RuntimeModelSelection } from "./provider-catalog.js";
+import { applyModelDiscovery, resolveRuntimeModelSelection, type RuntimeModelSelection } from "./provider-catalog.js";
 
 // duroxide is CommonJS — use createRequire for ESM compatibility
 import { createRequire } from "node:module";
@@ -810,7 +810,7 @@ export class PilotSwarmClient {
         const systemDefaults = system
             ? [{ tuple: defaults.system, source: "system_default" as const }]
             : override;
-        return resolveRuntimeModelSelection(this._modelProviderTypes, credentials, {
+        return resolveRuntimeModelSelection(await applyModelDiscovery(this._modelProviderTypes, credentials), credentials, {
             requestedModel: config.model,
             requestedReasoning: config.reasoningEffort,
             requestedContext: config.contextTier,

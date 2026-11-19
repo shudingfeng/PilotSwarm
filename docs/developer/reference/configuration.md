@@ -1389,6 +1389,53 @@ argument, the image holds no unpacked copy.
   user's providers with the user, leaves its secret in the store.
 - A key in the store is checked only when it is saved, like any other key.
 
+### Live Model Discovery (`discoverModels`)
+
+A `github` type lists its models by hand, and that list goes stale: it can
+name models a user's Copilot plan does not include and miss new ones. Set
+`"discoverModels": true` on the type to ask each provider's own GitHub token
+which models it can use (the Copilot runtime's `listModels()`):
+
+```json
+{
+  "id": "github-copilot",
+  "type": "github",
+  "discoverModels": true,
+  "models": [
+    { "name": "claude-sonnet-5", "cost": "medium", "supportedReasoningEfforts": ["low", "medium", "high"] }
+  ]
+}
+```
+
+What each shared and personal provider of the type then offers:
+
+- A catalog model its token can use: kept, with the catalog's metadata and in
+  the catalog's order. Hand-written entries stay the place for curated
+  descriptions, cost, reasoning efforts and context tiers.
+- A model its token can use that the catalog does not name: added after the
+  catalog models, with the display name, reasoning efforts and cost tier the
+  Copilot runtime reports. `auto` and models disabled by organization policy
+  are left out.
+- A catalog model its token cannot use: not offered by that provider. A
+  request for it fails instead of being routed to a model the token cannot
+  run.
+
+Each token is listed separately, so two users with different Copilot plans see
+different lists. Listings are cached per token for 10 minutes (a stale list is
+served while it refreshes). If a listing fails, for example with no network
+or a revoked token, that provider offers the catalog list, as it would without
+the flag, and listing is retried a minute later.
+
+A token kept in an [external secret store](#personal-keys-in-an-external-secret-store)
+is not listed, so its provider offers the catalog list. With
+`PILOTSWARM_PERSONAL_SECRETS=external`, a personal key still saved in its row
+is not listed either, because that key is not used.
+
+Only `github` types accept the field, and only as a boolean; anything else
+fails the catalog load. It is off by default. The model picker, session
+create, model switch, defaults and the worker's registry refresh all apply it,
+so the TUI and portal show the same list.
+
 ### Request Format (`wireApi`)
 
 `wireApi` picks the request format for an OpenAI-shaped endpoint:

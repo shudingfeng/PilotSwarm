@@ -346,13 +346,15 @@ test("review D6, OF7-R6: the worker's check resolves as the spawn does (never th
 
 test("review D6, OF7-R6: the management check resolves as the spawn does and wants listed settings; no catalog, no check", async () => {
     const { types, providers } = catalogFixture();
-    const check = (choice, owner, fake = { _catalog: { providers }, _modelProviders: types }) =>
+    // A client-shaped `this`: the check refreshes live model discovery first.
+    const client = (state) => Object.assign(Object.create(PilotSwarmManagementClient.prototype), state);
+    const check = (choice, owner, fake = client({ _catalog: { providers }, _modelProviders: types })) =>
         PilotSwarmManagementClient.prototype._checkWorkflowAgentModel.call(fake, choice, owner);
     const SYSTEM = { provider: "system", subject: "workflows" };
     assert.equal(await check({ model: "team:listed", contextTier: "default" }, SYSTEM), null);
     assert.match(await check({ model: "sysonly:listed" }, SYSTEM), /No usable provider serves model|cannot run model|sysonly/);
     assert.match(await check({ model: "team:listed", contextTier: "huge" }, SYSTEM), /does not offer context tier 'huge'/);
-    assert.equal(await check({ model: "team:listed" }, SYSTEM, { _catalog: { providers }, _modelProviders: null }),
+    assert.equal(await check({ model: "team:listed" }, SYSTEM, client({ _catalog: { providers }, _modelProviders: null })),
         "this deployment has no model catalog to check it against.");
 });
 

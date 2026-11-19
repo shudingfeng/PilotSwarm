@@ -156,7 +156,9 @@ import { getDuroxideStorageProvider, getRuntimeStorageProvider } from "./storage
 import { SessionDumper } from "./session-dumper.js";
 import { computeSessionFootprint, FootprintCache, type SessionFootprint } from "./footprint.js";
 import { catalogModelNames, loadModelProviders, loadModelProviderTypes, providerTypeUsesWorkloadIdentity, type ModelProviderRegistry, type ModelDescriptor, type ReasoningEffort, type ContextTier } from "./model-providers.js";
-import { bootstrapProviders, resolveProviderCredential, resolveRuntimeModelSelection } from "./provider-catalog.js";
+import {
+    applyModelDiscovery, bootstrapProviders, providerOffersModel, resolveProviderCredential, resolveRuntimeModelSelection,
+} from "./provider-catalog.js";
 import {
     resolvePendingQuestion, deriveStatusFromCmsAndRuntime, shouldRecordWorkflowControllerFailed, shouldSyncCompletedStatus, shouldSyncFailedStatus,
     resolveStaleRunningRowRecovery,
@@ -919,6 +921,8 @@ export class PilotSwarmManagementClient {
     private _graphStore: GraphStore | null = null;
     private _duroxideClient: any = null;
     private _modelProviders: ModelProviderRegistry | null = null;
+    /** The file's type catalog; `_modelProviders` is this with the latest live model discovery applied. */
+    private _modelProviderTypeCatalog: ModelProviderRegistry | null = null;
     private _systemAgents: AgentConfig[] = [];
     private _artifactStore: ArtifactStore | null = null;
     /** canvas-ws declarations by "sessionId:slot", for the canvas revision they were read from. */
@@ -1011,7 +1015,8 @@ export class PilotSwarmManagementClient {
         }
 
         // Load model providers
-        this._modelProviders = loadModelProviderTypes(this.config.modelProvidersPath);
+        this._modelProviderTypeCatalog = loadModelProviderTypes(this.config.modelProvidersPath);
+        this._modelProviders = this._modelProviderTypeCatalog;
                 const legacyProviders = loadModelProviders(this.config.modelProvidersPath);
                 if (this._catalog.providers && legacyProviders) {
                     await bootstrapProviders(this._catalog.providers, {
@@ -1026,6 +1031,22 @@ export class PilotSwarmManagementClient {
         });
 
         this._started = true;
+        // Warm live model discovery so the synchronous model lists include it.
+        const warmStore = this._catalog?.providers;
+        if (warmStore && this._modelProviderTypeCatalog?.allProviders.some((type) => type.discoverModels)) {
+            void warmStore.allCredentials()
+                .then((credentials) => this._refreshModelDiscovery(credentials))
+                .catch(() => {});
+        }
+    }
+
+    /**
+     * Re-apply live model discovery (cached per token) for these provider
+     * credentials. A no-op when no provider type opts in.
+     */
+    private async _refreshModelDiscovery(credentials: ProviderCredential[]): Promise<void> {
+        if (!this._modelProviderTypeCatalog) return;
+        this._modelProviders = await applyModelDiscovery(this._modelProviderTypeCatalog, credentials);
     }
 
     async stop(): Promise<void> {
@@ -2063,6 +2084,7 @@ export class PilotSwarmManagementClient {
             ? await store.lookupUserId(session.owner)
             : null;
         const credentials = await store.allCredentials();
+        await this._refreshModelDiscovery(credentials);
         let selection;
         try {
             selection = resolveRuntimeModelSelection(this._modelProviders, credentials, {
@@ -2418,6 +2440,7 @@ export class PilotSwarmManagementClient {
             // Review D6: as the node's spawn resolves its session (createSession: the owner's eligible providers, never the system's).
             const actor = await store.lookupUserId(owner ?? null);
             const credentials = await store.allCredentials();
+            await this._refreshModelDiscovery(credentials);
             resolveRuntimeModelSelection(this._modelProviders, credentials, {
                 requestedModel: choice.model, requestedReasoning: choice.reasoningEffort ?? null, requestedContext: choice.contextTier ?? null,
                 eligible: (provider) => provider.class === "shared" || (actor !== null && provider.ownerUserId === actor),
@@ -3328,6 +3351,7 @@ export class PilotSwarmManagementClient {
         if (!this._modelProviders) throw new Error("Provider type catalog is unavailable");
         const actor = session.owner ? await store.lookupUserId(session.owner) : null;
         const credentials = await store.allCredentials();
+        await this._refreshModelDiscovery(credentials);
         const eligible = (provider: ProviderCredential) =>
             provider.class === "shared" || (actor !== null && provider.ownerUserId === actor);
         const resolveRequested = (
@@ -3706,6 +3730,7 @@ export class PilotSwarmManagementClient {
                 providerStore.listSystemAgentModels(),
                 providerStore.allCredentials(),
             ]);
+            await this._refreshModelDiscovery(credentials);
             const override = overrides.find((candidate) => candidate.agentId === plan.agent.id);
             if (override) {
                 persistedRoute = override;
@@ -3740,6 +3765,7 @@ export class PilotSwarmManagementClient {
                 throw new Error("Cannot restart system session without a provider type catalog");
             }
             const credentials = await providerStore.allCredentials();
+            await this._refreshModelDiscovery(credentials);
             const validated = resolveRuntimeModelSelection(this._modelProviders, credentials, {
                 requestedModel: defaultModel,
                 requestedReasoning: restartReasoning,
@@ -5236,6 +5262,7 @@ export class PilotSwarmManagementClient {
         scope: "user" | "cluster" | "system",
     ): Promise<DefaultTuple> {
         if (!tuple.provider) return normalizeDefaultTuple(null);
+        await this._refreshModelDiscovery(await store.allCredentials());
         const rows = await store.listProviders(actor, isAdmin);
         const row = rows.find((candidate) => candidate.name === tuple.provider);
         if (!row) throw new ProviderError("PROVIDER_NOT_FOUND", `There is no provider named "${tuple.provider}".`);
@@ -5267,9 +5294,10 @@ export class PilotSwarmManagementClient {
         if (!this._modelProviders) return null;
         for (const credential of credentials) {
             if (!eligible(credential)) continue;
-            const first = this._providerTypeModels(credential.typeId)[0];
+            // With live discovery the type's first model may be one this token cannot use.
+            const first = this._providerTypeModels(credential.typeId).find((model) =>
+                Boolean(resolveProviderCredential(this._modelProviders!, credential, model.modelName)));
             if (!first) continue;
-            if (!resolveProviderCredential(this._modelProviders, credential, first.modelName)) continue;
             return {
                 provider: credential.name,
                 model: `${credential.name}:${first.modelName}`,
@@ -5717,10 +5745,11 @@ export class PilotSwarmManagementClient {
             if (!row || row.class !== "personal" || !row.usableByMe) {
                 throw new ProviderError("PROVIDER_NOT_FOUND", `There is no provider named "${provider}".`);
             }
-            const first = row ? this._providerTypeModels(row.typeId)[0] : null;
             const credential = await store.getCredential(provider, actor);
-            if (!row || !first || !credential || !this._modelProviders
-                || !resolveProviderCredential(this._modelProviders, credential, first.modelName)) {
+            if (credential) await this._refreshModelDiscovery(await store.allCredentials());
+            const usable = credential && this._providerTypeModels(row.typeId).some((model) =>
+                Boolean(this._modelProviders && resolveProviderCredential(this._modelProviders, credential, model.modelName)));
+            if (!usable) {
                 throw new ProviderError("PROVIDER_INVALID", `Provider "${provider}" does not have a usable credential and endpoint.`);
             }
         }
@@ -5761,6 +5790,7 @@ export class PilotSwarmManagementClient {
             store.allCredentials(),
             store.listSystemAgentModels(),
         ]);
+        await this._refreshModelDiscovery(credentials);
         const clusterFallback = this._firstAvailableTuple(credentials, (credential) => credential.class === "shared");
         const userFallback = this._firstAvailableTuple(
             credentials,
@@ -6514,17 +6544,21 @@ export class PilotSwarmManagementClient {
     }
 
     async listRuntimeModels(viewer: ProviderViewer): Promise<ModelSummary[]> {
-        const typeModels = this.listModels();
         const { store, actor, isAdmin } = await this._providerActor(viewer);
         const [providers, credentials] = await Promise.all([
             store.listProviders(actor, isAdmin),
             store.allCredentials(),
         ]);
+        await this._refreshModelDiscovery(credentials);
+        const typeModels = this.listModels();
         const credentialByName = new Map(credentials.map((credential) => [credential.name, credential]));
         const out: ModelSummary[] = [];
         for (const provider of providers.filter((candidate) => candidate.usableByMe)) {
             const credential = credentialByName.get(provider.name);
             for (const model of typeModels.filter((candidate) => candidate.providerId === provider.typeId)) {
+                // Live discovery: leave out what this provider's own token cannot use.
+                if (credential && this._modelProviders
+                    && !providerOffersModel(this._modelProviders, credential, model.modelName)) continue;
                 const credentialAvailable = Boolean(
                     credential && this._modelProviders
                     && resolveProviderCredential(this._modelProviders, credential, model.modelName),
