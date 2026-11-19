@@ -736,6 +736,32 @@ test("the pool refuses unreadable settings and reserved WIN_WORKER_EXTRA_ENV nam
   assert.deepEqual(poolErrors("afd", "letsencrypt", { WIN_WORKER_EXTRA_ENV: "EXAMPLE_URL=https://api.example.com;EXAMPLE_MODE=on" }), []);
 });
 
+test("the disk controller's built-in roles need a resource group of the pool's own; its custom role and the vault's fallback don't", () => {
+  const stamp = { RESOURCE_GROUP: "stamp-rg", WIN_WORKER_CONTROLLER_ACCESS: "built-in-roles" };
+  for (const group of [undefined, "", "__PS_UNSET__", "stamp-rg", "STAMP-RG"]) {
+    const errors = poolErrors("afd", "letsencrypt", { ...stamp, WIN_WORKER_RESOURCE_GROUP: group });
+    assert.deepEqual(codes(errors), ["win-workers-built-in-roles-require-pool-group"], `WIN_WORKER_RESOURCE_GROUP=${group}`);
+    assert.match(errors[0].message, /needs WIN_WORKER_RESOURCE_GROUP, a resource group of the pool's own other than the stamp's/);
+  }
+  assert.deepEqual(poolErrors("afd", "letsencrypt", { ...stamp, WIN_WORKER_RESOURCE_GROUP: "stamp-pool-rg" }), []);
+  assert.deepEqual(poolErrors("afd", "letsencrypt", { ...stamp, WIN_WORKER_CONTROLLER_ACCESS: " Built-In-Roles ", WIN_WORKER_RESOURCE_GROUP: "stamp-pool-rg" }), []);
+  for (const access of [undefined, "custom-role", "Custom-Role"]) {
+    assert.deepEqual(poolErrors("afd", "letsencrypt", { ...stamp, WIN_WORKER_CONTROLLER_ACCESS: access }), [], `WIN_WORKER_CONTROLLER_ACCESS=${access}`);
+  }
+  assert.deepEqual(poolErrors("afd", "letsencrypt", { RESOURCE_GROUP: "stamp-rg", WIN_WORKER_VAULT_WRITER_ACCESS: "access-policies" }), []);
+  // Without the pool nothing reads them.
+  assert.deepEqual(validateWinWorkersCombo({ edgeMode: "afd", tlsSource: "letsencrypt", env: { RESOURCE_GROUP: "stamp-rg", WIN_WORKER_CONTROLLER_ACCESS: "built-in-roles" } }), []);
+  for (const [key, value, message] of [
+    ["WIN_WORKER_CONTROLLER_ACCESS", "built-in", /WIN_WORKER_CONTROLLER_ACCESS must be custom-role or built-in-roles, not 'built-in'/],
+    ["WIN_WORKER_VAULT_WRITER_ACCESS", "rbac", /WIN_WORKER_VAULT_WRITER_ACCESS must be custom-role or access-policies, not 'rbac'/],
+    ["WIN_WORKER_RESOURCE_GROUP", "pool group", /WIN_WORKER_RESOURCE_GROUP must be a resource group's name, not 'pool group'/],
+    ["WIN_WORKER_RESOURCE_GROUP", "pool-rg.", /WIN_WORKER_RESOURCE_GROUP must be a resource group's name/],
+  ]) {
+    const errors = poolErrors("afd", "letsencrypt", { RESOURCE_GROUP: "stamp-rg", [key]: value });
+    assert.ok(errors.some((e) => e.code === "win-workers-settings" && message.test(e.message)), `${key}=${value}: ${JSON.stringify(errors)}`);
+  }
+});
+
 const POOL_STAMP = Object.freeze({
   SUBSCRIPTION_ID: "00000000-0000-0000-0000-000000000003",
   PILOTSWARM_USE_MANAGED_IDENTITY: "1",

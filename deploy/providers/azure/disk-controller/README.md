@@ -153,7 +153,7 @@ lists every setting. Unset, empty and `__PS_UNSET__` all mean unset.
 | `EXPECTED_WIN_WORKER_OID` | required | The object ID of the workers' shared identity |
 | `DISPATCHER_SP_OBJECT_ID` | unset | The dispatcher's object ID; without it, every dispatcher route answers `403` |
 | `PILOTSWARM_PERSONAL_SECRET_VAULT_URI` | unset | The personal vault; without it, `/v1/credentials/model` answers `unavailable` |
-| `WIN_WORKER_SCALE_SET_ID` | unset | The scale set's resource ID; without it, the worker routes answer `503 NOT_READY` and claims `busy NOT_READY` |
+| `WIN_WORKER_SCALE_SET_ID` | unset | The scale set's resource ID, whose resource group holds every VM, disk, NIC and snapshot the controller makes; without it, the worker routes answer `503 NOT_READY` and claims `busy NOT_READY` |
 | `WIN_WORKER_DCR_ID` | unset | The workers' data collection rule, associated with each VM before its first `active` |
 | `WIN_WORKER_STANDBY_POOL_ID`, `WIN_WORKER_GALLERY_IMAGE_ID` | unset | The standby pool and the gallery image definition, for operators and tools; the controller reads neither (a VM's standby state comes from its instance view, and new VMs take the scale set model's image) |
 | `WIN_WORKER_IMAGE_VERSION`, `WIN_WORKER_CONFIG_VERSION` | unset | The current image and configuration; an older VM is drained and replaced (a rollout) |
@@ -163,7 +163,7 @@ lists every setting. Unset, empty and `__PS_UNSET__` all mean unset.
 | `WIN_WORKER_IDLE_RECYCLE_MINUTES` | `30` | How long a bound VM stays idle before a scale-in step may take it, and how long recent demand keeps one unbound VM ready |
 | `WIN_WORKER_SCALE_IN_BATCH`, `WIN_WORKER_SCALE_IN_INTERVAL_MINUTES` | `1`, `5` | The size of a scale-in step and the pause between steps |
 | `WIN_WORKER_COORDINATION_HOST` | `false` | `true` when the Windows workers are owner-only and the coordination host runs everything else, as the repository's deployment always sets it with the pool: a system session's admission on a VM answers `busy` (`SYSTEM_SESSION`), and binding a VM opens no restart window. `false` is for workers that aren't owner-only: they run system sessions, and a VM bound after its worker started gets 3 minutes for its restart with the owner's tag |
-| `WIN_DEV_DRIVE_GOLDEN_SNAPSHOT_ID` | unset | The first golden snapshot; the weekly refresh replaces it |
+| `WIN_DEV_DRIVE_GOLDEN_SNAPSHOT_ID` | unset | The first golden snapshot, in the scale set's resource group; the weekly refresh replaces it |
 | `WIN_DEV_DRIVE_POOL_COUNT` | `10` | M, the most drives |
 | `WIN_DEV_DRIVE_SPARE_COUNT` | `2` | Hydrated spares kept ready |
 | `WIN_DEV_DRIVE_MAX_PER_USER` | `3` | N, the most leases per owner, parked ones included |
@@ -204,24 +204,45 @@ are deleted, never the live run's, which is never on it.
 ## Permissions
 
 The controller signs in with `DefaultAzureCredential`, which in the pod is
-its own user-assigned identity through workload identity. It needs:
+its own user-assigned identity through workload identity. Every VM, disk, NIC
+and snapshot it reads or writes is in the scale set's resource group, which it
+takes from `WIN_WORKER_SCALE_SET_ID`: the pool's own group
+(`WIN_WORKER_RESOURCE_GROUP`) or the stamp's. It needs:
 
-- on the stamp's resource group, a custom role with
-  `Microsoft.Compute/virtualMachines/read`, `write`, `delete`,
+- on that group, `Microsoft.Compute/virtualMachines/read`, `write`, `delete`,
   `attachDetachDataDisks/action`, `instanceView/read` and
   `runCommands/read`, `write`, `delete` (no `runCommand/action`);
   `virtualMachineScaleSets/read`, `write` and
   `virtualMachineScaleSets/virtualMachines/read`, `write`; `disks/read`,
   `write`, `delete`; `snapshots/read`, `write`, `delete` (no
-  `beginGetAccess/action`); `galleries/images/versions/read`;
-  `Microsoft.Network/networkInterfaces/read`, `write`, `delete`,
-  `join/action`; `Microsoft.Insights/dataCollectionRuleAssociations/read`,
-  `write`, `delete` and `dataCollectionRules/read`;
-- `Microsoft.Network/virtualNetworks/subnets/join/action` on the worker subnet
-  only, and Managed Identity Operator on the workers' identity only;
+  `beginGetAccess/action`); `Microsoft.Network/networkInterfaces/read`,
+  `write`, `delete`, `join/action`; and
+  `Microsoft.Insights/dataCollectionRuleAssociations/read`, `write`, `delete`;
+- `Microsoft.Compute/galleries/images/versions/read` on the image definition,
+  and `Microsoft.Insights/dataCollectionRules/read` on the workers' data
+  collection rule;
+- `Microsoft.Network/virtualNetworks/subnets/join/action` on the worker
+  subnet only, and Managed Identity Operator on the workers' identity only;
 - Storage Blob Data Contributor on the state container;
-- Key Vault Secrets User on the personal vault, and on the secret
-  `disk-controller-tls` of the stamp vault (the TLS step grants it).
+- Key Vault Secrets User on the personal vault, or secrets `get` and `list`
+  in its access policies, and on the secret `disk-controller-tls` of the
+  stamp vault (the TLS step grants it).
+
+Base-infra grants the first two items with the custom role "PilotSwarm Disk
+Pool Controller", which holds exactly those actions, on the group and, with a
+group of the pool's own, on the image definition and the rule. With
+`WIN_WORKER_CONTROLLER_ACCESS=built-in-roles`, it grants built-in roles
+instead: Virtual Machine Contributor, Elastic SAN Snapshot Exporter and Azure
+Connected Machine Onboarding on the pool's own group, Reader on the rule and
+Compute Gallery Image Reader on the image definition. Those grant more than
+the controller needs, and the deploy stops if one of them gains a SAS, data
+or subnet write action beyond those
+[the Windows workers guide](../../../../docs/developer/deploy/windows-workers.md#custom-roles-and-built-in-fallbacks)
+accepts. The subnet join is the built-in Windows 365 Network User on the
+subnet either way.
+
+The controller refuses a golden snapshot (`WIN_DEV_DRIVE_GOLDEN_SNAPSHOT_ID`)
+outside the scale set's resource group, which its roles don't reach.
 
 It associates each VM with the workers' data collection rule before the VM's
 first `active`, and removes the association whenever it deletes a VM, drained

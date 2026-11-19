@@ -12,7 +12,7 @@ export const COORDINATION_PORT = 3005;
 
 const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SCALE_SET_ID = /^\/subscriptions\/([0-9a-f-]{36})\/resourceGroups\/([^/]+)\/providers\/Microsoft\.Compute\/virtualMachineScaleSets\/([^/]+)$/i;
-const SNAPSHOT_ID = /^\/subscriptions\/[0-9a-f-]{36}\/resourceGroups\/[^/]+\/providers\/Microsoft\.Compute\/snapshots\/[^/]+$/i;
+const SNAPSHOT_ID = /^\/subscriptions\/([0-9a-f-]{36})\/resourceGroups\/([^/]+)\/providers\/Microsoft\.Compute\/snapshots\/[^/]+$/i;
 const DCR_ID = /^\/subscriptions\/[0-9a-f-]{36}\/resourceGroups\/[^/]+\/providers\/Microsoft\.Insights\/dataCollectionRules\/[^/]+$/i;
 const VERSION = /^[0-9A-Za-z._-]{1,128}$/;
 const WINDOWS_FOLDER = /^[A-Za-z]:\\[^"'`$;&|<>\r\n]*$/;
@@ -88,6 +88,15 @@ export function loadConfig(env = process.env) {
   const scaleSetId = optional("WIN_WORKER_SCALE_SET_ID", (text) => SCALE_SET_ID.test(text), "a virtual machine scale set's resource ID");
   const dcrId = optional("WIN_WORKER_DCR_ID", (text) => DCR_ID.test(text), "a data collection rule's resource ID");
   const goldenSnapshotId = optional("WIN_DEV_DRIVE_GOLDEN_SNAPSHOT_ID", (text) => SNAPSHOT_ID.test(text), "a snapshot's resource ID");
+  // Every disk, VM, NIC and snapshot the controller reads or writes is in the
+  // scale set's resource group, the only group its role covers.
+  if (scaleSetId && goldenSnapshotId) {
+    const [, snapshotSubscription, snapshotGroup] = SNAPSHOT_ID.exec(goldenSnapshotId);
+    const [, subscription, group] = SCALE_SET_ID.exec(scaleSetId);
+    if (snapshotSubscription.toLowerCase() !== subscription.toLowerCase() || snapshotGroup.toLowerCase() !== group.toLowerCase()) {
+      problems.push(`WIN_DEV_DRIVE_GOLDEN_SNAPSHOT_ID must be in the scale set's resource group, ${group}: the controller's role covers only that group.`);
+    }
+  }
   const imageVersion = optional("WIN_WORKER_IMAGE_VERSION", (text) => VERSION.test(text), "an image version such as 1.0.20261104");
   const configVersion = optional("WIN_WORKER_CONFIG_VERSION", (text) => VERSION.test(text), "letters, digits, dots, hyphens or underscores");
 

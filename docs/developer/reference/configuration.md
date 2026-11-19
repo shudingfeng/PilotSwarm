@@ -773,6 +773,9 @@ what it did before.
 | `WIN_WORKER_EXTRA_ENV` | unset | Non-secret `NAME=VALUE` pairs for every VM, separated by semicolons, each value at most 4,096 characters. Reserved names are refused at deploy time and again on the VM |
 | `WIN_WORKER_FEED_ENDPOINTS` | unset | Comma-separated `https` package feed URLs that the workers' NuGet credential provider signs in to with the workers' identity (`ARTIFACTS_CREDENTIALPROVIDER_FEED_ENDPOINTS` on the VMs) |
 | `WIN_WORKER_STANDBY_POOL_PRINCIPAL_ID` | unset | The object ID of the Standby Pool Resource Provider's service principal in the tenant. Unset, the deploy step looks it up by name, which needs directory read access |
+| `WIN_WORKER_RESOURCE_GROUP` | unset | A resource group of the pool's own, in the stamp's subscription, for the scale set, the standby pool and every VM, disk, NIC and snapshot of the pool. The subscription owner creates it with an "Allowed resource types" policy of the pool's types ([The pool's resource group](../deploy/windows-workers.md#the-pools-resource-group)). Unset, the stamp's group. A deploy doesn't move an existing pool to it |
+| `WIN_WORKER_CONTROLLER_ACCESS` | `custom-role` | The disk controller's rights in the pool: `custom-role`, the custom role "PilotSwarm Disk Pool Controller"; or `built-in-roles`, which needs `WIN_WORKER_RESOURCE_GROUP`: Virtual Machine Contributor, Elastic SAN Snapshot Exporter and Azure Connected Machine Onboarding on the pool's group, Reader on the workers' data collection rule and Compute Gallery Image Reader on the image ([Custom roles and built-in fallbacks](../deploy/windows-workers.md#custom-roles-and-built-in-fallbacks)) |
+| `WIN_WORKER_VAULT_WRITER_ACCESS` | `custom-role` | How the personal vault admits the Portal's writes and the controller's reads: `custom-role`, RBAC with the custom role "PilotSwarm Personal Secret Writer"; or `access-policies`, access policies and two more alerts |
 | `WIN_DEV_DRIVE_POOL_COUNT` | `10` | `M`: the most drives at once, leased, spare and hydrating |
 | `WIN_DEV_DRIVE_SPARE_COUNT` | `2` | Drives kept hydrated or hydrating as spares; a returned drive above it is deleted, not reset |
 | `WIN_DEV_DRIVE_MAX_PER_USER` | `3` | `N`: the most leases per owner, parked ones included |
@@ -783,7 +786,7 @@ what it did before.
 | `WIN_DEV_DRIVE_MAX_GB` | `2048` | No growth beyond this |
 | `WIN_DEV_DRIVE_IOPS` | `6000` | A drive's provisioned IOPS (Premium SSD v2) |
 | `WIN_DEV_DRIVE_MBPS` | `250` | A drive's provisioned throughput, MB/s |
-| `WIN_DEV_DRIVE_GOLDEN_SNAPSHOT_ID` | unset | The first golden snapshot's resource ID; the controller's weekly refresh replaces it. Unset, no claim succeeds |
+| `WIN_DEV_DRIVE_GOLDEN_SNAPSHOT_ID` | unset | The first golden snapshot's resource ID, in the pool's resource group; the controller's weekly refresh replaces it. Unset, no claim succeeds |
 | `PS_DISK_CONTROLLER_STARTUP_GRACE_SECONDS` | `60` | How long a new controller waits for heartbeats before it treats a silent VM as crashed |
 | `PS_DISK_CONTROLLER_SNAPSHOT_REFRESH_DAYS` | `7` | The golden snapshot's refresh interval; `0` turns the refresh off |
 | `PS_DISK_CONTROLLER_VM_SCRIPTS_DIR` | unset (`C:\pilotswarm\scripts`) | Where the image keeps the scripts the controller runs as Run Commands |

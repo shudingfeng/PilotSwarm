@@ -201,14 +201,20 @@ param winWorkerConfigVersion string = ''
 @description('Windows worker pool: email receivers of the pool\'s alerts (WIN_WORKER_ALERT_EMAILS).')
 param winWorkerAlertEmails array = []
 
-@description('Windows worker pool: name (GUID) of the custom role definition "PilotSwarm Disk Pool Controller", which the subscription owner creates.')
+@description('Windows worker pool: name (GUID) of the custom role definition "PilotSwarm Disk Pool Controller", which the subscription owner creates. Empty with winWorkerControllerBuiltInRoles.')
 param diskPoolControllerRoleId string = ''
 
-@description('Windows worker pool: name (GUID) of the custom role definition "PilotSwarm Worker Subnet Join".')
-param workerSubnetJoinRoleId string = ''
-
-@description('Windows worker pool: name (GUID) of the custom role definition "PilotSwarm Personal Secret Writer".')
+@description('Windows worker pool: name (GUID) of the custom role definition "PilotSwarm Personal Secret Writer". Empty with winWorkerPersonalVaultAccessPolicies.')
 param personalVaultWriterRoleId string = ''
+
+@description('Windows worker pool: the pool\'s own resource group (WIN_WORKER_RESOURCE_GROUP), which the subscription owner creates, for the scale set, the standby pool and every VM, disk, NIC and snapshot of the pool. Empty: this resource group.')
+param winWorkerResourceGroup string = ''
+
+@description('Windows worker pool: the disk controller gets built-in roles instead of the custom role "PilotSwarm Disk Pool Controller" (WIN_WORKER_CONTROLLER_ACCESS=built-in-roles), with winWorkerResourceGroup.')
+param winWorkerControllerBuiltInRoles bool = false
+
+@description('Windows worker pool: the personal vault admits the portal\'s writes and the controller\'s reads by access policies instead of RBAC and the custom role "PilotSwarm Personal Secret Writer" (WIN_WORKER_VAULT_WRITER_ACCESS=access-policies).')
+param winWorkerPersonalVaultAccessPolicies bool = false
 
 @description('Windows worker pool: object ID of the standby pool resource provider\'s service principal.')
 param standbyPoolPrincipalId string = ''
@@ -771,6 +777,7 @@ module PersonalKeyVault './personal-keyvault.bicep' = if (winWorkersEnabled) {
     controllerPrincipalId: Uami.outputs.diskControllerIdentityPrincipalId
     portalPrincipalId: Uami.outputs.csiIdentityPrincipalId
     personalVaultWriterRoleId: personalVaultWriterRoleId
+    useAccessPolicies: winWorkerPersonalVaultAccessPolicies
   }
 }
 
@@ -960,8 +967,10 @@ module WinWorkers './win-workers.bicep' = if (winWorkersEnabled) {
     controllerPrincipalId: Uami.outputs.diskControllerIdentityPrincipalId
     vnetName: Vnet!.outputs.vnetName
     workerSubnetName: Vnet!.outputs.winWorkersSubnetName
+    poolResourceGroupName: winWorkerResourceGroup
     diskPoolControllerRoleId: diskPoolControllerRoleId
-    workerSubnetJoinRoleId: workerSubnetJoinRoleId
+    controllerBuiltInRoles: winWorkerControllerBuiltInRoles
+    dataCollectionRuleId: WinWorkerDcr!.outputs.dataCollectionRuleId
     standbyPoolPrincipalId: standbyPoolPrincipalId
     foundryAccountName: foundryEnabled ? Foundry!.outputs.accountName : ''
     coordinationHostPrincipalId: Uami.outputs.coordinationIdentityPrincipalId
@@ -985,15 +994,16 @@ module WinWorkerAlerts './win-worker-alerts.bicep' = if (winWorkersEnabled) {
     deployKeyVaultName: DeployKeyVault!.outputs.keyVaultName
     personalKeyVaultName: PersonalKeyVault!.outputs.keyVaultName
     controllerPrincipalId: Uami.outputs.diskControllerIdentityPrincipalId
-    // The controller's and the portal's grants on the scopes the role
-    // assignment rules watch; the rules exempt exactly these.
+    // The controller's, the portal's and the standby pool provider's grants on
+    // the scopes the role assignment rules watch; the rules exempt exactly these.
     ownRoleGrants: concat(PersonalKeyVault!.outputs.roleGrants, ControllerStorage!.outputs.roleGrants, WinWorkers!.outputs.roleGrants)
     deployPrincipalId: localDeploymentPrincipalId
-    customRoleIds: [
+    customRoleIds: filter([
       diskPoolControllerRoleId
-      workerSubnetJoinRoleId
       personalVaultWriterRoleId
-    ]
+    ], id => !empty(id))
+    poolResourceGroupName: winWorkerResourceGroup
+    personalVaultAccessPolicies: winWorkerPersonalVaultAccessPolicies
     coordinationHost: winWorkerCoordinationHost
   }
 }

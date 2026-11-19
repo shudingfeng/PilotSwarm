@@ -633,10 +633,12 @@ with the VM's managed identity; without it, a minimal one is written.
    `Initialize-WinWorkerDisk.ps1` (ReFS Dev Drive `Q:`, root access lists).
 2. Run `Seed-WorkerReposDisk.ps1` as an administrator, with
    `-SnapshotResourceGroup`, `-SnapshotName` and `-DiskResourceId` to take the
-   incremental snapshot (the Azure CLI must be signed in). Like the controller's
-   weekly refresh, it waits until Azure reports the snapshot `Succeeded` and its
-   background copy at 100% (or reports no percentage), and stops when
-   provisioning fails.
+   incremental snapshot (the Azure CLI must be signed in). Name the pool's
+   resource group there, the only one where the disk controller's roles reach
+   snapshots; the controller refuses a golden snapshot in another group. Like
+   the controller's weekly refresh, it waits until Azure reports the snapshot
+   `Succeeded` and its background copy at 100% (or reports no percentage), and
+   stops when provisioning fails.
 
 ### The seed manifest
 

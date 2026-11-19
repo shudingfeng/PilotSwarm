@@ -50,6 +50,17 @@ test("the deploy tool's unset sentinel and empty values mean unset; set values m
   assert.throws(() => loadConfig({ ...BASE_ENV, WIN_WORKER_MIN_RUNNING: "4", WIN_WORKER_COUNT: "3" }), /MIN_RUNNING must not be above/);
 });
 
+test("the golden snapshot must be in the scale set's resource group, the only one the controller's role covers", () => {
+  const group = /\/resourceGroups\/([^/]+)\//.exec(BASE_ENV.WIN_WORKER_SCALE_SET_ID)[1];
+  assert.equal(loadConfig(BASE_ENV).goldenSnapshotId, BASE_ENV.WIN_DEV_DRIVE_GOLDEN_SNAPSHOT_ID);
+  const elsewhere = BASE_ENV.WIN_DEV_DRIVE_GOLDEN_SNAPSHOT_ID.replace(`/resourceGroups/${group}/`, "/resourceGroups/another-rg/");
+  assert.throws(() => loadConfig({ ...BASE_ENV, WIN_DEV_DRIVE_GOLDEN_SNAPSHOT_ID: elsewhere }),
+    (err) => err instanceof ConfigError && err.message.includes(`WIN_DEV_DRIVE_GOLDEN_SNAPSHOT_ID must be in the scale set's resource group, ${group}`));
+  // Compared without case, and only with both set.
+  assert.ok(loadConfig({ ...BASE_ENV, WIN_DEV_DRIVE_GOLDEN_SNAPSHOT_ID: BASE_ENV.WIN_DEV_DRIVE_GOLDEN_SNAPSHOT_ID.replace(group, group.toUpperCase()) }));
+  assert.equal(loadConfig({ ...BASE_ENV, WIN_WORKER_SCALE_SET_ID: "", WIN_DEV_DRIVE_GOLDEN_SNAPSHOT_ID: elsewhere }).goldenSnapshotId, elsewhere);
+});
+
 test("the token audience is the app's client ID, with or without api://", () => {
   assert.equal(tokenAudience(`${APP}/.default`), APP);
   assert.equal(tokenAudience(`api://${APP}/.default`), APP);
