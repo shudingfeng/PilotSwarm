@@ -80,6 +80,15 @@ What you get in a clone:
   sandbox copy of the repo: pushes never reach the real upstream, and
   pushes to `main`, `master` and `release/*` are refused.
 
+**A repo the deployment does not serve yet.** When the deployment allows it,
+give the agent the repo's URL ("clone https://github.com/acme/tool and …").
+It calls `add_repo({ url })`, which mirrors the repo with the deployment's
+own git credentials and serves it like the others, then clones it as above.
+`list_repos` shows the served repos and the URL prefixes adding is allowed
+from. An added repo always pushes to a sandbox, and its agents, skills and
+instructions are never loaded. The reference deployment's local launcher
+allows GitHub and Azure DevOps URLs; the Azure deployment leaves adding off.
+
 A sub-agent can work in the same clone or in its own:
 `spawn_agent({ task, workspace })`. A deployment can give sub-agents no
 workspace at all (`PILOTSWARM_DISABLE_CHILD_WORKSPACE_INHERITANCE=1`); they

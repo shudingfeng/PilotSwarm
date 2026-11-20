@@ -26,7 +26,7 @@ import { TurnControlHub } from "./turn-control.js";
 import { loadAgentFiles, validateAgentDefinition } from "./agent-loader.js";
 import { composeDeclaredSkillsPrompt, loadSkillsSync, type Skill } from "./skills.js";
 import { resolveSystemAgentSessionPlans, startSystemAgents } from "./system-agents.js";
-import { firstRuntimeModel } from "./provider-catalog.js";
+import { applyModelDiscovery, firstRuntimeModel } from "./provider-catalog.js";
 import { loadMcpConfig, mcpAllowlistAdmits, type McpAllowlistAgent } from "./mcp-loader.js";
 
 import { createModelProvidersReloader, type ModelProviderRegistry } from "./model-providers.js";
@@ -614,14 +614,16 @@ export class PilotSwarmWorker {
             if (this._modelProviders) this.sessionManager.setModelProviders(this._modelProviders);
             return;
         }
-        const { buildRuntimeRegistry } = await import("./provider-catalog.js");
+        const { applyModelDiscovery, buildRuntimeRegistry } = await import("./provider-catalog.js");
         try {
             const [credentials, defaults] = await Promise.all([
                 store.allCredentials(),
                 store.getDefaults(null),
             ]);
+            const types = await applyModelDiscovery(
+                this._modelProviderTypes, credentials, { personalSecrets: this._personalSecrets });
             this._modelProviders = buildRuntimeRegistry(
-                this._modelProviderTypes, credentials, defaults.cluster.model, { personalSecrets: this._personalSecrets });
+                types, credentials, defaults.cluster.model, { personalSecrets: this._personalSecrets });
             this.sessionManager.setModelProviders(this._modelProviders);
         } catch (err) {
             // Provider identity and credentials are authoritative in CMS.
@@ -2903,7 +2905,7 @@ export class PilotSwarmWorker {
             providerStore.allCredentials(),
         ]);
         const fallback = firstRuntimeModel(
-            this._modelProviderTypes,
+            await applyModelDiscovery(this._modelProviderTypes, credentials),
             credentials,
             (provider) => provider.class === "shared" || provider.systemUseEnabled === true,
         );

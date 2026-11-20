@@ -10,11 +10,13 @@ import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { createRepoService } from "../../examples/repo-workspaces/repo-service.mjs";
 import { SANDBOX_PRE_RECEIVE_MESSAGES } from "../../examples/repo-workspaces/sandbox-remote.mjs";
 import { callAttacher, createAttacher, DEFAULT_MOUNT_OPTIONS, isMountedAt, mountAtStart, parseAttacherRoots } from "../../examples/repo-workspaces/attacher.mjs";
 import { createPlainRootProvider } from "../../examples/repo-workspaces/provider.mjs";
 import { createWorkspaceProvider } from "../../examples/repo-workspaces/index.mjs";
+import { createRepoTools } from "../../examples/repo-workspaces/tools.mjs";
 import { createGitFixture, git, tryGit } from "../helpers/git-fixture.mjs";
 
 const REQ = { sessionId: "s1", rootSessionId: "s1", revision: 1, workerNodeId: "worker-a", turnIndex: 1 };
@@ -114,6 +116,171 @@ describe("a repo mirrored from an upstream, with a sandbox remote", () => {
         fs.writeFileSync(hook, "#!/bin/sh\nexit 0\n");
         await service.prepare();
         assert.match(fs.readFileSync(hook, "utf8"), /sandbox-pre-receive/);
+    });
+});
+
+describe("adding a repo at run time (POST /v1/repos)", () => {
+    let fixture;
+    let root;
+    let stateDir;
+    let prefixDir;
+    let prefix;
+    let service;
+    let base;
+    // A fetch of a mirror whose path names `slow.git` waits for this gate.
+    let gate = null;
+    let onEvent = null;
+    const runGit = async (args) => {
+        if (gate && args.includes("fetch") && args.some((arg) => String(arg).includes("slow.git"))) await gate.promise;
+        return git(args);
+    };
+    const start = async (registerPrefixes, registerWaitMs = 60_000) => {
+        const port = await freePort();
+        base = `http://127.0.0.1:${port}`;
+        service = createRepoService({
+            root,
+            rootName: "a",
+            publicUrl: base,
+            stateFile: path.join(stateDir, "state.json"),
+            registerPrefixes,
+            registerWaitMs,
+            runGit,
+            log: (entry) => onEvent?.(entry),
+        });
+        await service.prepare();
+        await service.listen(port);
+    };
+    const call = async (method, pathname, body) => {
+        const response = await fetch(new URL(pathname, base), { method, headers: { "content-type": "application/json" }, body: body && JSON.stringify(body) });
+        return { status: response.status, body: await response.json() };
+    };
+    const upstream = (name) => pathToFileURL(path.join(prefixDir, `${name}.git`)).href;
+
+    before(async () => {
+        fixture = await createGitFixture();
+        root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ps-register-root-")));
+        stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "ps-register-state-"));
+        prefixDir = path.dirname(fixture.remote);
+        prefix = `${pathToFileURL(prefixDir).href}/`;
+        for (const name of ["other", "slow"]) await git(["clone", "-q", "--bare", fixture.remote, path.join(prefixDir, `${name}.git`)]);
+        await start(undefined);
+    });
+    after(async () => {
+        gate?.resolve();
+        await service?.close();
+        await fixture?.cleanup();
+        fs.rmSync(root, { recursive: true, force: true });
+        fs.rmSync(stateDir, { recursive: true, force: true });
+    });
+
+    it("is off unless the deployment lists the URL prefixes repos may come from", async () => {
+        const refused = await call("POST", "/v1/repos", { upstream: upstream("app") });
+        assert.equal(refused.status, 403);
+        assert.equal(refused.body.error.code, "REGISTER_DISABLED");
+        assert.deepEqual((await call("GET", "/v1/repos")).body.add, { allowed: false });
+        await service.close();
+        await start(prefix);
+    });
+
+    it("refuses a URL outside the prefixes, and a URL that carries a password", async () => {
+        const outside = await call("POST", "/v1/repos", { upstream: pathToFileURL(path.join(os.tmpdir(), "elsewhere.git")).href });
+        assert.equal(outside.status, 403);
+        assert.equal(outside.body.error.code, "REGISTER_NOT_ALLOWED");
+        const secret = await call("POST", "/v1/repos", { upstream: "https://user:secret@github.com/acme/app.git" });
+        assert.equal(secret.status, 400);
+        assert.equal(fs.existsSync(path.join(root, "repos", "elsewhere.git")), false);
+    });
+
+    it("mirrors an added repo and serves it with a sandbox: its clones push to the sandbox, never to the URL", async () => {
+        const added = await call("POST", "/v1/repos", { upstream: upstream("app") });
+        assert.equal(added.status, 200, JSON.stringify(added.body));
+        assert.equal(added.body.status, "added");
+        assert.equal(added.body.repo, "app");
+        const listed = (await call("GET", "/v1/repos")).body;
+        assert.deepEqual(listed.repos.map((repo) => [repo.repo, repo.added, repo.sandbox]), [["app", true, true]]);
+
+        const made = (await call("POST", "/v1/clones", { rootSessionId: "tree-1", repo: "app" })).body;
+        assert.equal(await git(["-C", made.path, "remote", "get-url", "origin"]), `${base}/git/app.git`);
+        assert.equal(await git(["-C", made.path, "rev-parse", "HEAD"]), await git(["-C", fixture.remote, "rev-parse", "refs/heads/main"]));
+
+        await git(["-C", made.path, "switch", "-q", "-c", "agent/fix-1"]);
+        fs.writeFileSync(path.join(made.path, "fix.txt"), "fix\n");
+        await git(["-C", made.path, "add", "fix.txt"]);
+        await git(["-C", made.path, "-c", "user.name=agent", "-c", "user.email=agent@example.invalid", "commit", "-q", "-m", "fix"]);
+        const url = new URL(`${base}/git/app.git`);
+        const token = (await call("POST", "/v1/token", { protocol: "http", host: url.host, path: url.pathname.slice(1) })).body;
+        url.username = token.username;
+        url.password = token.password;
+        const pushed = await tryGit(["-C", made.path, "push", "-q", url.toString(), "HEAD:refs/heads/agent/fix-1"]);
+        assert.equal(pushed.ok, true, pushed.stderr);
+        assert.ok(await git(["-C", path.join(root, "remotes", "app.git"), "rev-parse", "--verify", "refs/heads/agent/fix-1"]));
+        assert.equal((await tryGit(["-C", fixture.remote, "rev-parse", "--verify", "refs/heads/agent/fix-1"])).ok, false, "the URL never sees the push");
+    });
+
+    it("adding the same URL again answers with the served repo; another URL under a served name is refused", async () => {
+        const again = await call("POST", "/v1/repos", { upstream: `${upstream("app")}/`, name: "app-copy" });
+        assert.equal(again.body.status, "served");
+        assert.equal(again.body.repo, "app");
+        const clash = await call("POST", "/v1/repos", { upstream: upstream("other"), name: "app" });
+        assert.equal(clash.status, 409);
+        assert.equal(clash.body.error.code, "REPO_EXISTS");
+    });
+
+    it("the agent tools list the repos and add one by URL, which the tree can then clone", async () => {
+        const tools = Object.fromEntries(createRepoTools({ serviceUrl: base }).map((tool) => [tool.name, tool]));
+        const listed = JSON.parse(await tools.list_repos.handler({}));
+        assert.deepEqual(listed.add, { allowed: true, prefixes: [prefix], max: 50 });
+        const added = JSON.parse(await tools.add_repo.handler({ url: upstream("other"), name: "tooled" }));
+        assert.deepEqual([added.repo, added.status], ["tooled", "added"]);
+        const made = JSON.parse(await tools.create_session_clone.handler({ repo: "tooled" }, { durableSessionId: "tree-tools" }));
+        assert.deepEqual(made.workspace, { root: "a", folder: "sessions/tree-tools/tooled" });
+        await assert.rejects(tools.add_repo.handler({ url: "https://example.invalid/acme/app.git" }), /REGISTER_NOT_ALLOWED/);
+    });
+
+    it("a failed first mirror leaves no mirror or sandbox behind, and is reported", async () => {
+        const failed = await call("POST", "/v1/repos", { upstream: upstream("missing") });
+        assert.equal(failed.status, 502);
+        assert.equal(failed.body.error.code, "REPO_FETCH_FAILED");
+        assert.equal(fs.existsSync(path.join(root, "repos", "missing.git")), false);
+        assert.equal(fs.existsSync(path.join(root, "remotes", "missing.git")), false);
+        const listed = (await call("GET", "/v1/repos")).body;
+        assert.deepEqual(listed.failed.map((entry) => [entry.repo, entry.code]), [["missing", "REPO_FETCH_FAILED"]]);
+        assert.equal(listed.repos.some((repo) => repo.repo === "missing"), false);
+    });
+
+    it("answers \"mirroring\" when the first mirror is slow; clones wait for it, and asking again joins it", async () => {
+        await service.close();
+        await start(prefix, 200);
+        let release;
+        gate = { promise: new Promise((resolve) => { release = resolve; }), resolve: () => release() };
+        const first = await call("POST", "/v1/repos", { upstream: upstream("slow") });
+        assert.equal(first.body.status, "mirroring");
+        assert.deepEqual((await call("GET", "/v1/repos")).body.adding.map((entry) => entry.repo), ["slow"]);
+        const early = await call("POST", "/v1/clones", { rootSessionId: "tree-2", repo: "slow" });
+        assert.equal(early.status, 409);
+        assert.equal(early.body.error.code, "REPO_PREPARING");
+        const joined = await call("POST", "/v1/repos", { upstream: upstream("slow") });
+        assert.equal(joined.body.status, "mirroring", "the same add again joins the running one");
+        assert.deepEqual((await call("GET", "/v1/repos")).body.adding.map((entry) => entry.repo), ["slow"], "one add, not two");
+
+        const added = new Promise((resolve) => { onEvent = (entry) => { if (entry.event === "repo.added" && entry.repo === "slow") resolve(); }; });
+        gate.resolve();
+        await added;
+        gate = null;
+        onEvent = null;
+        const served = await call("POST", "/v1/repos", { upstream: upstream("slow") });
+        assert.deepEqual([served.body.repo, served.body.status], ["slow", "served"]);
+        assert.equal((await call("POST", "/v1/clones", { rootSessionId: "tree-2", repo: "slow" })).status, 200);
+    });
+
+    it("a restarted service serves the added repos again from its state file, even with adding off", async () => {
+        await service.close();
+        await start(undefined);
+        const listed = (await call("GET", "/v1/repos")).body;
+        assert.deepEqual(listed.repos.map((repo) => repo.repo).sort(), ["app", "slow", "tooled"]);
+        const made = await call("POST", "/v1/clones", { rootSessionId: "tree-3", repo: "app" });
+        assert.equal(made.status, 200, JSON.stringify(made.body));
+        assert.equal(await git(["-C", made.body.path, "remote", "get-url", "origin"]), `${base}/git/app.git`);
     });
 });
 

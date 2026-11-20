@@ -145,6 +145,44 @@ test("Admin Console controller uses canonical provider/default APIs without reta
     assert.equal(JSON.stringify(store.getState()).includes("secret-token"), false);
 });
 
+test("Admin default dropdown choices use viewer-scoped runtime models, not the static provider catalog", async () => {
+    const catalogModels = [
+        { providerId: "github-copilot", providerType: "github", modelName: "catalog-only", qualifiedName: "github-copilot:catalog-only" },
+    ];
+    const runtimeModels = [
+        { providerId: "copilot-shared", providerType: "github", modelName: "claude-sonnet-5.5", qualifiedName: "copilot-shared:claude-sonnet-5.5" },
+    ];
+    const transport = {
+        listProviders: async () => ({ providers: [
+            { name: "copilot-shared", typeId: "github-copilot", class: "shared", usableByMe: true, systemEligible: true },
+        ] }),
+        getModelsByProvider: async () => [{
+            providerId: "github-copilot", type: "github", models: catalogModels,
+        }],
+        listModels: async () => runtimeModels,
+        getModelDefaults: async () => ({
+            userSession: { configured: null, effective: null },
+            clusterSession: { configured: null, effective: null },
+            system: { configured: null, effective: null },
+            systemOverrides: [],
+        }),
+    };
+    const store = createStore(appReducer, loadedAdminState());
+    const controller = new PilotSwarmUiController({ store, transport });
+
+    await controller.refreshAdminModelProviders();
+
+    const choices = selectAdminConsole(store.getState()).modelProviders;
+    assert.deepEqual(choices.clusterChoices.map((choice) => choice.qualifiedName), [
+        "copilot-shared:claude-sonnet-5.5",
+    ]);
+    assert.deepEqual(choices.systemChoices.map((choice) => choice.qualifiedName), [
+        "copilot-shared:claude-sonnet-5.5",
+    ]);
+    assert.equal(choices.providerTypes.some((type) => type.id === "github-copilot"), true,
+        "the static catalog still supplies provider types for onboarding");
+});
+
 test("Admin Console switches between separate My and Shared provider pages", () => {
     const store = createStore(appReducer, loadedAdminState());
     const controller = new PilotSwarmUiController({ store, transport: {} });

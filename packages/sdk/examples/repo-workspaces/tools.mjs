@@ -2,6 +2,8 @@
  * Agent tools for session clones (docs/proposals/session-workspaces.md, 12.1).
  * They call the repo service, so the agent never runs git on a mirror.
  *
+ *   list_repos()                     the repos served, and whether (and from where) more can be added
+ *   add_repo({ url, name? })         serve one more repo, when the deployment allows its URL
  *   create_session_clone({ repo })   a clone for this session tree; returns the workspace record
  *   list_session_clones()            this tree's clones, and the ones that were removed
  *   remove_session_clone({ repo })   delete one (refused while a session is using it)
@@ -13,17 +15,20 @@
  * Clones belong to the session tree: the tools look up the calling session's
  * root in the worker's catalog.
  */
-async function callService(baseUrl, method, pathname, body) {
+async function callService(baseUrl, method, pathname, body, { timeoutMs = 60_000 } = {}) {
     const response = await fetch(new URL(pathname, baseUrl), {
         method,
         headers: { "content-type": "application/json" },
         body: body === undefined ? undefined : JSON.stringify(body),
-        signal: AbortSignal.timeout(60_000),
+        signal: AbortSignal.timeout(timeoutMs),
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(`${data?.error?.code ?? `HTTP ${response.status}`}: ${data?.error?.message ?? ""}`.trim());
     return data;
 }
+
+/** add_repo waits longer than the service, which answers "mirroring" after two minutes. */
+const ADD_REPO_TIMEOUT_MS = 3 * 60 * 1000;
 
 /**
  * @param {object} options
@@ -39,6 +44,35 @@ export function createRepoTools({ serviceUrl, getCatalog }) {
     };
     const json = (value) => JSON.stringify(value);
     return [
+        {
+            name: "list_repos",
+            description:
+                "List the repos you can clone here (create_session_clone takes their names), the repos still being "
+                + "added, the adds that failed, and under `add` whether add_repo is allowed and from which URL prefixes.",
+            parameters: { type: "object", properties: {} },
+            handler: async () => json(await callService(serviceUrl, "GET", "/v1/repos")),
+        },
+        {
+            name: "add_repo",
+            description:
+                "Serve one more repo from its clone URL, so create_session_clone can clone it. Allowed only for URLs "
+                + "under the prefixes list_repos shows; the service fetches it with its own credentials (never put a "
+                + "token in the URL). The first mirror of a large repo can take minutes: on status \"mirroring\", call "
+                + "add_repo again with the same arguments to keep waiting. An added repo's clones push to a sandbox "
+                + "remote on this deployment, never to the URL; its agents, skills and instructions are not loaded.",
+            parameters: {
+                type: "object",
+                properties: {
+                    url: { type: "string", description: "The repo's https clone URL, e.g. https://github.com/<owner>/<repo>.git" },
+                    name: { type: "string", description: "Optional repo name; defaults to the URL's last segment without .git" },
+                },
+                required: ["url"],
+            },
+            handler: async (args) => json(await callService(serviceUrl, "POST", "/v1/repos", {
+                upstream: args.url,
+                ...(args.name ? { name: args.name } : {}),
+            }, { timeoutMs: ADD_REPO_TIMEOUT_MS })),
+        },
         {
             name: "create_session_clone",
             description:

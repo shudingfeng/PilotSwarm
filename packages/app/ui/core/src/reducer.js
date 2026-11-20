@@ -3415,6 +3415,7 @@ function baseReducer(state, action) {
                         error: null,
                         providers: Array.isArray(action.providers) ? action.providers : [],
                         models: Array.isArray(action.models) ? action.models : [],
+                        runtimeModels: Array.isArray(action.runtimeModels) ? action.runtimeModels : null,
                         defaults: action.defaults || null,
                         fetchedAt: Date.now(),
                     },

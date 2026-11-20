@@ -3,6 +3,7 @@
         {
             "id": "github-copilot",
             "type": "github",
+            "discoverModels": false,
             "models": [
                 {
                     "name": "claude-opus-5",

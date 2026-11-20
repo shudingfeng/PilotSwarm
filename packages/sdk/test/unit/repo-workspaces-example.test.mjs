@@ -375,7 +375,7 @@ describe("provider, tools and register()", () => {
         const worker = { provider: null, tools: [], catalog: null, setWorkspaceProvider(p) { this.provider = p; }, registerTools(t) { this.tools.push(...t); } };
         await register(worker, { env: { PS_WORKSPACE_ROOTS: "a=/ws/a", REPO_SERVICE_URL: "http://repo:8080" } });
         assert.deepEqual(await worker.provider.listRoots(), [{ name: "a", path: "/ws/a" }]);
-        assert.deepEqual(worker.tools.map((t) => t.name), ["create_session_clone", "list_session_clones", "remove_session_clone"]);
+        assert.deepEqual(worker.tools.map((t) => t.name), ["list_repos", "add_repo", "create_session_clone", "list_session_clones", "remove_session_clone"]);
         await assert.rejects(register(worker, { env: {} }), /REPO_SERVICE_URL is required/);
     });
 });

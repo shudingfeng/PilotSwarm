@@ -213,6 +213,15 @@ export interface ModelProviderConfig {
      * providers: the native Copilot transport takes no provider config.
      */
     headers?: Record<string, string>;
+    /**
+     * Ask GitHub Copilot which models each provider of this type can use
+     * (type=github only; default false). Each provider then offers the
+     * models its own token can use: catalog models keep their metadata,
+     * models the catalog does not name are added, and catalog models the
+     * token cannot use are hidden. If the listing fails, `models` is used
+     * unchanged. See model-discovery.ts.
+     */
+    discoverModels?: boolean;
     /** Available models. Can be plain strings (legacy) or ModelEntry objects with descriptions. */
     models: (string | ModelEntry)[];
 }
@@ -436,14 +445,37 @@ export class ModelProviderRegistry {
     private bareToQualified = new Map<string, string>();
     private _defaultModel: string | undefined;
     private _allDescriptors: ModelDescriptor[] = [];
+    private _offeredModels: ReadonlyMap<string, ReadonlySet<string>>;
 
-    constructor(config: ModelProvidersFile, opts: { keepUncredentialed?: boolean; externalSecrets?: boolean } = {}) {
+    constructor(
+        config: ModelProvidersFile,
+        opts: {
+            keepUncredentialed?: boolean;
+            externalSecrets?: boolean;
+            /**
+             * Models each discovered GitHub token can use, keyed by
+             * `modelDiscoveryKey(token)`. Set by `applyModelDiscovery`.
+             */
+            offeredModels?: ReadonlyMap<string, ReadonlySet<string>>;
+        } = {},
+    ) {
         const configuredDefaultModel = config.defaultModel;
         this._defaultModel = configuredDefaultModel;
+        this._offeredModels = opts.offeredModels ?? new Map();
 
         // Checked before the credential filter below, so a bad entry fails
         // the load whether or not its key happens to be set.
-        for (const p of config.providers) validateProviderHeaders(p);
+        for (const p of config.providers) {
+            validateProviderHeaders(p);
+            if (p.discoverModels !== undefined && typeof p.discoverModels !== "boolean") {
+                throw new Error(`Invalid discoverModels on provider ${JSON.stringify(p.id)}: expected true or false.`);
+            }
+            if (p.discoverModels && p.type !== "github") {
+                throw new Error(
+                    `Invalid discoverModels on provider ${JSON.stringify(p.id)}: only github providers can discover models.`,
+                );
+            }
+        }
         // A secret-store reference belongs to a provider row. Only the
         // runtime registry, built from those rows, may carry one.
         if (!opts.externalSecrets) {
@@ -558,6 +590,14 @@ export class ModelProviderRegistry {
     /** All provider configs. */
     get allProviders(): ModelProviderConfig[] {
         return [...this.providers];
+    }
+
+    /**
+     * The models a discovered GitHub token can use, or undefined when that
+     * token was not listed (the catalog list then applies).
+     */
+    offeredModelsFor(discoveryKey: string): ReadonlySet<string> | undefined {
+        return this._offeredModels.get(discoveryKey);
     }
 
     /**

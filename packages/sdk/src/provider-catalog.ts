@@ -16,11 +16,12 @@
  * the file has never heard of — anything an administrator or a user created
  * at runtime.
  */
-import type { ModelProviderConfig, ModelProvidersFile, ResolvedProvider } from "./model-providers.js";
+import type { ModelEntry, ModelProviderConfig, ModelProvidersFile, ResolvedProvider } from "./model-providers.js";
 import {
     effectiveWireApi, ModelProviderRegistry, providerHeaders, providerTypeUsesWorkloadIdentity, resolveEnvValue,
     toSdkProviderType,
 } from "./model-providers.js";
+import { discoverCopilotModels, mergeDiscoveredModels, modelDiscoveryKey, type DiscoveredModel } from "./model-discovery.js";
 import type { DefaultTuple, ProviderCredential, ProviderStore } from "./provider-store.js";
 import { WORKLOAD_IDENTITY_KIND } from "./provider-store.js";
 import { externalSecretRef, personalSecretsMode, type PersonalSecretsMode } from "./personal-secret-store.js";
@@ -173,6 +174,112 @@ export async function bootstrapProviders(
     return store.bootstrap(instances, defaults);
 }
 
+function isDiscoveringType(type: ModelProviderConfig | undefined): boolean {
+    return type?.type === "github" && type.discoverModels === true;
+}
+
+function modelEntryName(entry: string | ModelEntry): string {
+    return typeof entry === "string" ? entry : entry.name;
+}
+
+/**
+ * The type catalog with live discovery applied, for these providers.
+ *
+ * For every `github` type with `discoverModels: true`, each provider's token
+ * is listed (cached; see model-discovery.ts). The returned registry adds the
+ * models any of those tokens can use to the type, and records per token what
+ * it can use, so `resolveProviderCredential` refuses — and
+ * `buildRuntimeRegistry` leaves out — a model the provider's own token cannot
+ * run. A token whose listing failed keeps the catalog list. When no type
+ * opts in, `types` is returned unchanged.
+ *
+ * A token held in the secret store is not listed: the provider keeps the
+ * catalog list. Nor is a personal token still in its row when
+ * PILOTSWARM_PERSONAL_SECRETS=external, because that token is not used.
+ */
+export async function applyModelDiscovery(
+    types: ModelProviderRegistry,
+    instances: ProviderCredential[],
+    options: {
+        discover?: (token: string) => Promise<DiscoveredModel[] | null>;
+        personalSecrets?: PersonalSecretsMode;
+    } = {},
+): Promise<ModelProviderRegistry> {
+    const discovering = new Map(types.allProviders.filter(isDiscoveringType).map((type) => [type.id, type]));
+    if (discovering.size === 0) return types;
+    let externalMode = options.personalSecrets === undefined ? undefined : options.personalSecrets === "external";
+    const tokensByType = new Map<string, string[]>();
+    for (const instance of instances) {
+        if (!discovering.has(instance.typeId)) continue;
+        const token = secretValue(instance.secretRef);
+        if (!token) continue;
+        if (instance.class === "personal" && (externalMode ??= personalSecretsMode() === "external")) continue;
+        const tokens = tokensByType.get(instance.typeId) ?? [];
+        if (!tokens.includes(token)) tokens.push(token);
+        tokensByType.set(instance.typeId, tokens);
+    }
+    if (tokensByType.size === 0) return types;
+
+    const discover = options.discover ?? ((token: string) => discoverCopilotModels(token));
+    const uniqueTokens = [...new Set([...tokensByType.values()].flat())];
+    const listings = new Map<string, DiscoveredModel[] | null>(await Promise.all(uniqueTokens.map(
+        async (token) => [token, await discover(token).catch(() => null)] as const,
+    )));
+    const offeredModels = new Map<string, ReadonlySet<string>>();
+    for (const [token, models] of listings) {
+        if (models?.length) offeredModels.set(modelDiscoveryKey(token), new Set(models.map((model) => model.id)));
+    }
+    if (offeredModels.size === 0) return types;
+    // A token that could not be listed offers its type's catalog list only,
+    // not what other providers' tokens were found to offer. So does one that
+    // was not listed at all, such as a token held in the secret store.
+    for (const [typeId, type] of discovering) {
+        offeredModels.set(catalogOfferKey(typeId), new Set(type.models.map(modelEntryName)));
+    }
+    for (const [typeId, tokens] of tokensByType) {
+        const catalogNames = discovering.get(typeId)!.models.map(modelEntryName);
+        for (const token of tokens) {
+            if (listings.get(token)?.length) continue;
+            const key = modelDiscoveryKey(token);
+            offeredModels.set(key, new Set([...(offeredModels.get(key) ?? []), ...catalogNames]));
+        }
+    }
+
+    const providers = types.allProviders.map((type) => {
+        const found = (tokensByType.get(type.id) ?? [])
+            .map((token) => listings.get(token))
+            .filter((models): models is DiscoveredModel[] => Boolean(models?.length));
+        return found.length > 0 ? { ...type, models: mergeDiscoveredModels(type.models, found) } : type;
+    });
+    return new ModelProviderRegistry(
+        { providers, ...(types.defaultModel ? { defaultModel: types.defaultModel } : {}) },
+        { keepUncredentialed: true, offeredModels },
+    );
+}
+
+/** The offered-models key for a type's catalog list. Never a token's key, which is hex. */
+function catalogOfferKey(typeId: string): string {
+    return `catalog:${typeId}`;
+}
+
+/**
+ * Whether live discovery allows this provider to offer the model. True for
+ * every type that does not discover. A token that was not listed, or a
+ * credential with no token to list, offers the type's catalog list.
+ */
+export function providerOffersModel(
+    types: ModelProviderRegistry,
+    credential: ProviderCredential,
+    modelName: string,
+): boolean {
+    const type = types.allProviders.find((candidate) => candidate.id === credential.typeId);
+    if (!isDiscoveringType(type)) return true;
+    const token = secretValue(credential.secretRef);
+    const offered = (token ? types.offeredModelsFor(modelDiscoveryKey(token)) : undefined)
+        ?? types.offeredModelsFor(catalogOfferKey(credential.typeId));
+    return !offered || offered.has(modelName);
+}
+
 /**
  * The catalog a worker actually runs against: one entry per PROVIDER, built
  * from the types in the file and the instances in the database.
@@ -234,14 +341,15 @@ export function buildRuntimeRegistry(
         // provider, so this is refused here as well as at the management
         // layer: a row written by any other path still does not run.
         if (workloadIdentity && inst.class === "personal") continue;
-        const hasResolvableModel = type.models.some((entry) => {
-            const modelName = typeof entry === "string" ? entry : entry.name;
-            return Boolean(resolveProviderCredential(types, inst, modelName));
-        });
+        const models = type.models.filter((entry) => providerOffersModel(types, inst, modelEntryName(entry)));
+        const hasResolvableModel = models.some((entry) =>
+            Boolean(resolveProviderCredential(types, inst, modelEntryName(entry))));
         if (!hasResolvableModel) continue;
         providers.push({
             ...type,
             id: inst.name,
+            // Live discovery may narrow or extend the type's list per token.
+            models,
             // A workload-identity provider is PINNED to the endpoint its type
             // declares; a per-instance override is ignored.
             //
@@ -263,9 +371,11 @@ export function buildRuntimeRegistry(
         });
     }
     // An invalid default would throw out of the constructor and take the
-    // worker with it; a missing one is only a missing convenience.
+    // worker with it; a missing one is only a missing convenience. With live
+    // discovery a provider may exist while not offering the default's model,
+    // so the model itself must be on that provider's list.
     const hasDefault = defaultModel
-        && providers.some((p) => defaultModel.startsWith(`${p.id}:`));
+        && providers.some((p) => p.models.some((entry) => `${p.id}:${modelEntryName(entry)}` === defaultModel));
     const effectiveDefault = hasDefault
         ? defaultModel!
         : firstRuntimeModel(types, instances, (instance) => instance.class === "shared")?.model;
@@ -283,9 +393,12 @@ export function firstRuntimeModel(
         if (!eligible(instance)) continue;
         const type = types.allProviders.find((candidate) => candidate.id === instance.typeId);
         if (!type || type.models.length === 0) continue;
-        const first = type.models[0];
-        const modelName = typeof first === "string" ? first : first.name;
-        if (!resolveProviderCredential(types, instance, modelName)) continue;
+        // The first model this provider can run: with live discovery the
+        // type's first entry may be one its token cannot use.
+        const first = type.models.find((entry) =>
+            Boolean(resolveProviderCredential(types, instance, modelEntryName(entry))));
+        if (!first) continue;
+        const modelName = modelEntryName(first);
         const descriptor = types.getDescriptor(`${type.id}:${modelName}`);
         return {
             provider: instance.name,
@@ -331,7 +444,8 @@ export function resolveRuntimeModelSelection(
             modelName = requested.slice(colon + 1);
         } else {
             const matches = eligibleInstances.filter((candidate) =>
-                types.getDescriptor(`${candidate.typeId}:${requested}`));
+                types.getDescriptor(`${candidate.typeId}:${requested}`)
+                && providerOffersModel(types, candidate, requested));
             if (matches.length > 1) {
                 throw new ModelAmbiguousError(
                     requested,
@@ -424,6 +538,7 @@ export function resolveProviderCredential(
     if (type.type === "github") {
         // The token stays in the secret store: the provider is usable, and
         // the turn that runs on it fetches the token (see SessionManager).
+        if (!providerOffersModel(types, credential, modelName)) return null;
         const externalSecret = externalSecretRef(credential.secretRef);
         if (externalSecret) {
             return { providerId: credential.name, type: "github", modelName, externalSecret };

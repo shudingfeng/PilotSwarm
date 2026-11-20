@@ -511,6 +511,11 @@ and holds in CMS. Do not put live keys in the checked-in catalog.
 > picker and `list_available_models` show only shared/personal runtime provider
 > instances the viewer can use.
 
+> **Live model lists:** Add `"discoverModels": true` to a `github` type to
+> offer what each provider's own token can use: catalog models it cannot use
+> are hidden and models the catalog does not name are added. See
+> [Live Model Discovery](../reference/configuration.md#live-model-discovery-discovermodels).
+
 ### Provider Types
 
 | Type | Auth | Endpoint |

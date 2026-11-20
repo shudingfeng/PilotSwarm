@@ -901,6 +901,7 @@ export function createInitialState({ mode = "local", branding = null, docs = nul
                 page: "mine",
                 providers: [],
                 models: [],
+                runtimeModels: null,
                 defaults: null,
                 fetchedAt: 0,
                 mutation: { pending: null, error: null },
