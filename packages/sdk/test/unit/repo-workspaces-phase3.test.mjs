@@ -192,12 +192,19 @@ describe("adding a repo at run time (POST /v1/repos)", () => {
     });
 
     it("mirrors an added repo and serves it with a sandbox: its clones push to the sandbox, never to the URL", async () => {
-        const added = await call("POST", "/v1/repos", { upstream: upstream("app") });
+        const added = await call("POST", "/v1/repos", {
+            upstream: upstream("app"), remote: "https://example.test/team/app.git",
+            sandbox: false, credentialKey: "credential-one", adopt: { agents: true, skills: true, instructions: true },
+        });
         assert.equal(added.status, 200, JSON.stringify(added.body));
         assert.equal(added.body.status, "added");
         assert.equal(added.body.repo, "app");
         const listed = (await call("GET", "/v1/repos")).body;
         assert.deepEqual(listed.repos.map((repo) => [repo.repo, repo.added, repo.sandbox]), [["app", true, true]]);
+        assert.equal(listed.repos[0].defaultBranch, "main");
+        assert.deepEqual(service.getRepositoryConfig("app").adopt, { agents: false, skills: false, instructions: false });
+        assert.equal(service.getRepositoryConfig("app").credentialKey, undefined, "worker input cannot choose credentials");
+        assert.equal(service.getRepositoryConfig("app").sandbox, true, "worker input cannot select a direct remote");
 
         const made = (await call("POST", "/v1/clones", { rootSessionId: "tree-1", repo: "app" })).body;
         assert.equal(await git(["-C", made.path, "remote", "get-url", "origin"]), `${base}/git/app.git`);
@@ -259,6 +266,9 @@ describe("adding a repo at run time (POST /v1/repos)", () => {
         const early = await call("POST", "/v1/clones", { rootSessionId: "tree-2", repo: "slow" });
         assert.equal(early.status, 409);
         assert.equal(early.body.error.code, "REPO_PREPARING");
+        await assert.rejects(service.adoptPreparedRepository("slow", {
+            remote: "https://example.test/team/slow.git", sandbox: false, credentialKey: "credential-one",
+        }), { code: "REPO_EXISTS" }, "a worker registration cannot be replaced while its mirror is pending");
         const joined = await call("POST", "/v1/repos", { upstream: upstream("slow") });
         assert.equal(joined.body.status, "mirroring", "the same add again joins the running one");
         assert.deepEqual((await call("GET", "/v1/repos")).body.adding.map((entry) => entry.repo), ["slow"], "one add, not two");
@@ -281,6 +291,298 @@ describe("adding a repo at run time (POST /v1/repos)", () => {
         const made = await call("POST", "/v1/clones", { rootSessionId: "tree-3", repo: "app" });
         assert.equal(made.status, 200, JSON.stringify(made.body));
         assert.equal(await git(["-C", made.body.path, "remote", "get-url", "origin"]), `${base}/git/app.git`);
+    });
+});
+
+describe("programmatic adoption of prepared repositories", () => {
+    let fixture;
+    before(async () => { fixture = await createGitFixture(); });
+    after(async () => { await fixture?.cleanup(); });
+
+    const definition = (name = "app") => ({
+        remote: `https://example.test/team/${name}.git`,
+        sandbox: false,
+        credentialKey: "credential-one",
+    });
+    const gate = () => {
+        let resolve;
+        const promise = new Promise((done) => { resolve = done; });
+        return { promise, resolve };
+    };
+    async function setup(t, overrides = {}) {
+        const dir = fs.mkdtempSync(path.join(process.cwd(), ".repo-adoption-"));
+        const root = path.join(dir, "root");
+        const stateFile = path.join(dir, "state.json");
+        const services = [];
+        const start = (extra = {}) => {
+            const service = createRepoService({ root, stateFile, runGit: git, log: () => {}, ...overrides, ...extra });
+            services.push(service);
+            return service;
+        };
+        t.after(async () => {
+            for (const service of services) await service.close();
+            fs.rmSync(dir, { recursive: true, force: true });
+        });
+        const mirror = async (name, config = definition(name)) => {
+            const target = path.join(root, "repos", `${name}.git`);
+            const preparer = createRepoService({ root, repos: { [name]: { remote: fixture.remote } }, runGit: (args) => git(args), log: () => {} });
+            try { await preparer.prepare(); } finally { await preparer.close(); }
+            await git(["-C", target, "remote", "set-url", "origin", config.upstream ?? config.remote]);
+            await git(["-C", target, "branch", "-m", "main", "trunk"]);
+            await git(["-C", target, "symbolic-ref", "HEAD", "refs/heads/trunk"]);
+            return target;
+        };
+        const call = (base) => async (method, route, body) => {
+            const response = await fetch(new URL(route, base), {
+                method, headers: { "content-type": "application/json" }, body: body && JSON.stringify(body),
+            });
+            return { status: response.status, body: await response.json() };
+        };
+        return { dir, root, stateFile, start, mirror, call };
+    }
+
+    it("publishes live defensive configuration, actual HEAD, clones, adoption and live token resolution", async (t) => {
+        const h = await setup(t);
+        const config = { ...definition(), upstream: "https://example.test/fetch/app.git", adopt: { skills: true } };
+        await h.mirror("app", config);
+        const credentials = new Map([["credential-one", "first-token"]]);
+        const calls = [];
+        const service = h.start({
+            mintToken: ({ repo, url, config: current }) => {
+                calls.push([repo, url, current]);
+                return credentials.get(current.credentialKey);
+            },
+        });
+        const call = h.call(await service.listen(0));
+        const receipt = await service.adoptPreparedRepository("app", config);
+        assert.deepEqual(receipt, { repo: "app", defaultBranch: "trunk" });
+        const expected = { ...config, adopt: { agents: false, skills: true, instructions: false } };
+        assert.deepEqual(service.getRepositoryCatalog(), { app: expected });
+        assert.deepEqual(service.getRepositoryConfig("app"), expected);
+        assert.equal(service.getRepositoryConfig("missing"), null);
+        const copy = service.getRepositoryCatalog();
+        copy.app.adopt.skills = false;
+        copy.app.credentialKey = "other";
+        delete copy.app;
+        service.getRepositoryConfig("app").adopt.skills = false;
+        config.adopt.skills = false;
+        assert.equal(service.getRepositoryConfig("app").adopt.skills, true);
+        assert.equal((await call("GET", "/v1/repos")).body.repos[0].defaultBranch, "trunk");
+        const made = await call("POST", "/v1/clones", { rootSessionId: "tree", repo: "app" });
+        assert.equal(made.status, 200, JSON.stringify(made));
+        assert.equal(await git(["-C", made.body.path, "remote", "get-url", "origin"]), expected.remote);
+        const leased = await call("POST", "/v1/leases", {
+            checkout: "sessions/tree/app", rootSessionId: "tree", sessionId: "child", workerNodeId: "worker", turnIndex: 1,
+        });
+        assert.deepEqual(leased.body.adopt, expected.adopt);
+        const ask = () => call("POST", "/v1/token", { protocol: "https", host: "example.test", path: "team/app.git" });
+        assert.equal((await ask()).body.password, "first-token");
+        credentials.set("credential-one", "second-token");
+        assert.equal((await ask()).body.password, "second-token");
+        assert.deepEqual(calls.map(([repo, url, current]) => [repo, url, current.credentialKey]), [
+            ["app", expected.remote, "credential-one"], ["app", expected.remote, "credential-one"],
+        ]);
+        assert.equal((await call("POST", "/v1/token", { protocol: "https", host: "elsewhere.test", path: "team/app.git" })).body.password, undefined);
+        const saved = fs.readFileSync(h.stateFile, "utf8");
+        assert.doesNotMatch(saved, /first-token|second-token/);
+        assert.deepEqual(await service.adoptPreparedRepository("app", expected), receipt);
+        assert.equal(fs.readFileSync(h.stateFile, "utf8"), saved, "an exact retry does not rewrite state");
+    });
+
+    it("rejects malformed or conflicting definitions, missing state and catalog overflow", async (t) => {
+        const h = await setup(t);
+        const service = h.start({ registerMax: 1 });
+        await assert.rejects(h.start({ stateFile: undefined }).adoptPreparedRepository("app", definition()), { code: "STATE_REQUIRED" });
+        for (const name of ["../app", "__proto__", "constructor", "toString", "CON", "nul.git", "app.", "", 42]) {
+            await assert.rejects(service.adoptPreparedRepository(name, definition()), { code: "BAD_REQUEST" });
+        }
+        const invalid = [
+            null, [], Object.create({ remote: definition().remote }),
+            { ...definition(), extra: true },
+            { ...definition(), sandbox: true },
+            { ...definition(), sandbox: undefined },
+            { ...definition(), credentialKey: "" },
+            { ...definition(), credentialKey: "contains whitespace" },
+            { ...definition(), credentialKey: undefined },
+            ...["http://example.test/app", "file:///app", "https://user@example.test/app",
+                "https://user:password@example.test/app", "https://example.test/app?key=value",
+                "https://example.test/app#branch", "https://example.test\\app"].map((remote) => ({ ...definition(), remote })),
+            { ...definition(), upstream: "https://user@example.test/app" },
+            { ...definition(), adopt: null },
+            { ...definition(), adopt: { agents: "true" } },
+            { ...definition(), adopt: { agents: 1 } },
+            { ...definition(), adopt: { hooks: false } },
+            { ...definition(), adopt: Object.create({ agents: true }) },
+            { ...definition(), [Symbol("unknown")]: false },
+            { ...definition(), get credentialKey() { throw new Error("accessors must not run"); } },
+            { ...definition(), adopt: { get agents() { throw new Error("accessors must not run"); } } },
+        ];
+        for (const candidate of invalid) await assert.rejects(service.adoptPreparedRepository("app", candidate), { code: "BAD_REQUEST" });
+        await h.mirror("app");
+        await service.adoptPreparedRepository("app", definition());
+        for (const changed of [
+            { ...definition(), remote: "https://example.test/other/app.git" },
+            { ...definition(), upstream: "https://example.test/fetch/app.git" },
+            { ...definition(), credentialKey: "credential-two" },
+            { ...definition(), adopt: { instructions: true } },
+        ]) await assert.rejects(service.adoptPreparedRepository("app", changed), { code: "REPO_EXISTS" });
+        await assert.rejects(service.adoptPreparedRepository("alias", definition()), { code: "REPO_EXISTS" });
+        await assert.rejects(service.adoptPreparedRepository("APP", definition("other")), { code: "REPO_EXISTS" });
+        await assert.rejects(service.adoptPreparedRepository("other", definition("other")), { code: "REGISTER_FULL" });
+    });
+
+    it("only inspects an existing bare mirror with the exact origin and a commit-bearing symbolic HEAD", async (t) => {
+        const h = await setup(t);
+        const calls = [];
+        const service = h.start({ runGit: (args) => { calls.push(args); return git(args); } });
+        await assert.rejects(service.adoptPreparedRepository("missing", definition("missing")), { code: "REPO_NOT_PREPARED" });
+        const mirror = await h.mirror("app");
+        await git(["-C", mirror, "remote", "set-url", "origin", `${definition().remote}/`]);
+        await assert.rejects(service.adoptPreparedRepository("app", definition()), { code: "REPO_NOT_PREPARED" });
+        await git(["-C", mirror, "remote", "set-url", "origin", definition().remote]);
+        await git(["-C", mirror, "config", "--add", "remote.origin.url", "https://example.test/other.git"]);
+        await assert.rejects(service.adoptPreparedRepository("app", definition()), { code: "REPO_NOT_PREPARED" });
+        await git(["-C", mirror, "config", "--unset-all", "remote.origin.url"]);
+        await git(["-C", mirror, "config", "remote.origin.url", definition().remote]);
+        await git(["-C", mirror, "symbolic-ref", "HEAD", "refs/heads/unborn"]);
+        await assert.rejects(service.adoptPreparedRepository("app", definition()), { code: "REPO_NOT_PREPARED" });
+        await git(["-C", mirror, "symbolic-ref", "HEAD", "refs/heads/trunk"]);
+        const commit = await git(["-C", mirror, "rev-parse", "HEAD"]);
+        await git(["-C", mirror, "update-ref", "--no-deref", "HEAD", commit]);
+        await assert.rejects(service.adoptPreparedRepository("app", definition()), { code: "REPO_NOT_PREPARED" });
+        await git(["-C", mirror, "symbolic-ref", "HEAD", "refs/heads/trunk"]);
+        await git(["-C", mirror, "config", "core.bare", "false"]);
+        await assert.rejects(service.adoptPreparedRepository("app", definition()), { code: "REPO_NOT_PREPARED" });
+        await git(["-C", mirror, "config", "core.bare", "true"]);
+        const ordinaryRefs = ["+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*"];
+        assert.deepEqual((await git(["-C", mirror, "config", "--get-all", "remote.origin.fetch"])).split("\n"), ordinaryRefs);
+        for (const refs of [
+            [], ["+refs/*:refs/*"], [ordinaryRefs[0]],
+            [...ordinaryRefs, "^refs/heads/excluded/*"],
+            [...ordinaryRefs, "+refs/notes/*:refs/notes/*"],
+            ["+refs/heads/*:refs/remotes/origin/*", ordinaryRefs[1]],
+            [` ${ordinaryRefs[0]}`, ordinaryRefs[1]],
+        ]) {
+            const unset = await tryGit(["-C", mirror, "config", "--unset-all", "remote.origin.fetch"]);
+            assert.ok(unset.ok || unset.code === 5, unset.stderr);
+            for (const ref of refs) await git(["-C", mirror, "config", "--add", "remote.origin.fetch", ref]);
+            const before = fs.readFileSync(path.join(mirror, "config"), "utf8");
+            await assert.rejects(service.adoptPreparedRepository("app", definition()), { code: "REPO_NOT_PREPARED" });
+            assert.deepEqual(service.getRepositoryCatalog(), {});
+            assert.equal(fs.existsSync(h.stateFile), false, "an invalid refspec is never persisted");
+            assert.equal(fs.readFileSync(path.join(mirror, "config"), "utf8"), before, "verification never changes the mirror config");
+        }
+        await git(["-C", mirror, "config", "--unset-all", "remote.origin.fetch"]);
+        for (const ref of [...ordinaryRefs].reverse()) await git(["-C", mirror, "config", "--add", "remote.origin.fetch", ref]);
+        await service.adoptPreparedRepository("app", definition());
+        await service.prepare();
+        assert.ok(calls.every((args) => !args.some((arg) => ["init", "clone", "fetch", "ls-remote", "set-url"].includes(arg))));
+        assert.equal(fs.existsSync(path.join(h.root, "remotes")), false);
+        const call = h.call(await service.listen(0));
+        await git(["-C", mirror, "symbolic-ref", "HEAD", "refs/heads/unborn"]);
+        assert.equal((await call("GET", "/v1/repos")).body.repos[0].defaultBranch, null);
+        assert.deepEqual(await service.adoptPreparedRepository("app", definition()), { repo: "app", defaultBranch: "trunk" }, "retry receipt is stable");
+        await fs.promises.rm(mirror, { recursive: true, force: true });
+        await assert.rejects(service.prepare(), { code: "REPO_NOT_PREPARED" });
+        assert.equal(fs.existsSync(mirror), false, "trusted missing mirrors are never rebuilt");
+    });
+
+    it("commits concurrent aliases against the latest clone and lease state and joins exact in-flight retries", async (t) => {
+        const h = await setup(t);
+        const blocked = gate();
+        const entered = gate();
+        const service = h.start({
+            registerMax: 2,
+            publicUrl: "http://example.test",
+            registerPrefixes: ["https://example.test/"],
+            repos: { original: { remote: fixture.remote } },
+            runGit: async (args) => {
+                if (args.includes("--is-bare-repository")) { entered.resolve(); await blocked.promise; }
+                return git(args);
+            },
+        });
+        t.after(() => blocked.resolve());
+        await h.mirror("app");
+        await h.mirror("other");
+        const call = h.call(await service.listen(0));
+        assert.equal((await call("POST", "/v1/clones", { rootSessionId: "old", repo: "original" })).status, 200);
+        assert.equal((await call("DELETE", "/v1/clones", { rootSessionId: "old", repo: "original" })).status, 200);
+        const first = service.adoptPreparedRepository("app", definition());
+        const joined = service.adoptPreparedRepository("app", { ...definition(), adopt: { agents: false, skills: false, instructions: false } });
+        assert.equal(first, joined);
+        await entered.promise;
+        const workerAttempt = await call("POST", "/v1/repos", { upstream: "https://example.test/other/app.git", name: "app" });
+        assert.equal(workerAttempt.body.error.code, "REPO_EXISTS", "a worker registration cannot replace an in-flight prepared definition");
+        await assert.rejects(service.adoptPreparedRepository("app", { ...definition(), credentialKey: "different" }), { code: "REPO_EXISTS" });
+        await assert.rejects(service.adoptPreparedRepository("alias", definition()), { code: "REPO_EXISTS" });
+        const second = service.adoptPreparedRepository("other", definition("other"));
+        await assert.rejects(service.adoptPreparedRepository("overflow", definition("overflow")), { code: "REGISTER_FULL" });
+        assert.deepEqual(Object.keys(service.getRepositoryCatalog()), ["original"], "pending entries are not advertised");
+        assert.equal((await call("POST", "/v1/clones", { rootSessionId: "tree", repo: "original" })).status, 200);
+        const lease = { checkout: "sessions/tree/original", rootSessionId: "tree", sessionId: "child", workerNodeId: "worker", turnIndex: 3 };
+        assert.equal((await call("POST", "/v1/leases", lease)).body.ok, true);
+        const before = service.state();
+        blocked.resolve();
+        await Promise.all([first, joined, second]);
+        const saved = JSON.parse(fs.readFileSync(h.stateFile, "utf8"));
+        assert.deepEqual(saved.clones, before.clones);
+        assert.deepEqual(saved.leases, before.leases);
+        assert.deepEqual(saved.removals, before.removals);
+        assert.deepEqual(Object.keys(saved.trustedRepositories).sort(), ["app", "other"]);
+        const restarted = h.start({ repos: { original: { remote: fixture.remote } } });
+        assert.deepEqual(restarted.state(), before);
+        assert.deepEqual(restarted.getRepositoryCatalog(), service.getRepositoryCatalog());
+        const restartedCall = h.call(await restarted.listen(0));
+        assert.equal((await restartedCall("POST", "/v1/clones", { rootSessionId: "tree", repo: "original" })).body.created, false);
+        assert.equal((await restartedCall("DELETE", "/v1/clones", { rootSessionId: "tree", repo: "original" })).body.error.code, "CHECKOUT_IN_USE");
+        assert.throws(() => h.start({ repos: { app: { ...definition(), credentialKey: "different" } } }), { code: "REPO_EXISTS" });
+    });
+
+    it("normalizes configured retries without changing adoption or credentials on restart", async (t) => {
+        const h = await setup(t);
+        await h.mirror("app");
+        const service = h.start({ repos: { app: definition() } });
+        const receipt = await service.adoptPreparedRepository("app", { ...definition(), adopt: { agents: false } });
+        const saved = fs.readFileSync(h.stateFile, "utf8");
+        const restarted = h.start({ repos: { app: { ...definition(), adopt: { skills: false, instructions: false } } } });
+        assert.deepEqual(await restarted.adoptPreparedRepository("app", definition()), receipt);
+        assert.equal(fs.readFileSync(h.stateFile, "utf8"), saved);
+        assert.deepEqual(restarted.getRepositoryConfig("app"), service.getRepositoryConfig("app"));
+    });
+
+    it("does not advertise failed writes and fences stale writers and malformed trusted state", async (t) => {
+        const h = await setup(t);
+        await h.mirror("app");
+        await h.mirror("other");
+        const service = h.start();
+        const stale = h.start();
+        fs.mkdirSync(h.stateFile);
+        await assert.rejects(service.adoptPreparedRepository("app", definition()));
+        assert.deepEqual(service.getRepositoryCatalog(), {});
+        fs.rmdirSync(h.stateFile);
+        assert.deepEqual(fs.readdirSync(h.dir), ["root"], "failed writes leave no lock or temporary snapshot");
+        const rename = t.mock.method(fs, "renameSync", () => { throw Object.assign(new Error("write denied"), { code: "EACCES" }); });
+        try {
+            await assert.rejects(service.adoptPreparedRepository("app", definition()), { code: "EACCES" });
+        } finally { rename.mock.restore(); }
+        assert.deepEqual(service.getRepositoryCatalog(), {});
+        assert.deepEqual(fs.readdirSync(h.dir), ["root"], "a failed atomic rename cleans up its unique temporary file");
+        await service.adoptPreparedRepository("app", definition());
+        const saved = fs.readFileSync(h.stateFile, "utf8");
+        await assert.rejects(stale.adoptPreparedRepository("other", definition("other")), { code: "STATE_CONFLICT" });
+        assert.deepEqual(stale.getRepositoryCatalog(), {});
+        assert.equal(fs.readFileSync(h.stateFile, "utf8"), saved);
+        fs.writeFileSync(`${h.stateFile}.lock`, "");
+        await assert.rejects(service.adoptPreparedRepository("other", definition("other")), { code: "STATE_CONFLICT" });
+        assert.equal(service.getRepositoryConfig("other"), null);
+        fs.unlinkSync(`${h.stateFile}.lock`);
+        for (const invalid of ["{", "null", '{"trustedRepositories":[]}', JSON.stringify({
+            trustedRepositories: { broken: { definition: { ...definition(), credentialKey: "" }, defaultBranch: "trunk" } },
+        })]) {
+            fs.writeFileSync(h.stateFile, invalid);
+            assert.throws(() => h.start());
+            assert.equal(fs.readFileSync(h.stateFile, "utf8"), invalid);
+        }
     });
 });
 
