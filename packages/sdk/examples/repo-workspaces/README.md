@@ -105,6 +105,93 @@ A repo with `remote` instead of `sandbox` uses its real remote, and the
 deployment then passes its own token minter (`mintToken`) to
 `createRepoService()`.
 
+### Adopting an already prepared repository
+
+An embedding application can call
+`await service.adoptPreparedRepository(name, definition)` without restarting
+the service. This is a trusted **programmatic** seam, not an HTTP endpoint or
+an agent tool. The embedding application owns authorization, credential
+resolution and mirror preparation; do not expose this call to worker input.
+
+```js
+const receipt = await service.adoptPreparedRepository("app", {
+    remote: "https://example.test/team/app.git",
+    // upstream defaults to remote; set it when the mirror fetches elsewhere.
+    sandbox: false,
+    credentialKey: "repository-credential",
+    adopt: { agents: false, skills: true, instructions: false },
+});
+// { repo: "app", defaultBranch: "trunk" } (the prepared mirror's actual HEAD)
+```
+
+- Only `remote`, optional `upstream`, `sandbox`, `credentialKey` and optional
+  `adopt` are accepted. URLs must be credential-free HTTPS, without a query
+  or fragment. `sandbox` must be exactly `false`. `credentialKey` is an
+  opaque, non-secret lookup reference (1–128 letters, digits, `.`, `_`, `:`
+  or `-`, starting with a letter or digit), never a token or provider config.
+  `adopt` permits only boolean `agents`, `skills` and `instructions`;
+  omitted flags normalize to `false`.
+- The existing `repos/<name>.git` must be a plain directory, a bare
+  repository, have exactly one `remote.origin.url` equal to the normalized
+  `upstream`, and a symbolic HEAD naming a branch with an actual commit.
+  Adoption only inspects it: no network call, fetch, deletion or rebuilding,
+  and no sandbox is made. Its origin fetch refspec set must be exactly
+  `+refs/heads/*:refs/heads/*` and `+refs/tags/*:refs/tags/*`, as created by
+  ordinary service setup. Missing, broad, extra, negative or misdirected
+  refspecs are refused; order does not matter. Verification changes no refs
+  or configuration.
+- Names must be safe single path segments; prototype names, reserved device
+  names, trailing dots and case-only alias collisions are refused. A used
+  remote or upstream cannot be adopted under another alias. A conflicting
+  definition, including credentials or adoption flags, is refused even
+  while the first call is running. Exact normalized concurrent retries join
+  that call; later retries return its original `{ repo, defaultBranch }`
+  receipt without rewriting state. Matching startup-configured repositories
+  can also be adopted; omitted and explicit false adoption flags are equivalent.
+- `stateFile` is required. Trusted definitions and stable receipts live in
+  `trustedRepositories`, separate from legacy sandbox `registeredRepos`,
+  in the **same** full snapshot as clones, leases and removal history.
+  After mirror inspection the service synchronously snapshots current
+  state, writes and flushes a unique temporary file, and atomically renames
+  it before publishing the entry to the live catalog. Concurrent adds do
+  not replace the catalog, clone maps or in-memory sandbox tokens.
+  `registerMax` bounds all runtime additions together, including pending
+  calls through either addition path.
+- Restart restores trusted definitions even when startup configuration
+  omits them. An overlapping startup definition must match exactly after
+  normalization; it cannot overwrite a trusted definition. Malformed
+  trusted state fails startup rather than dropping records. Startup
+  preparation revalidates trusted mirrors without rebuilding missing ones.
+  Normal later refresh still fetches them.
+- Deployment remains **single writer**. Snapshot writes use a short-lived
+  exclusive `<stateFile>.lock` and compare the on-disk contents with the
+  last loaded/written snapshot. An unexpected writer is fenced, not merged.
+  A crash can leave that lock behind: stop/verify all writers before an
+  operator removes it and restarts. This is not a distributed lock or
+  permission to run multiple service instances against the same state file.
+
+Programmatic callers get errors with `status`, `code` and `message`:
+`BAD_REQUEST` (400) for invalid input; `STATE_REQUIRED`, `REPO_EXISTS`,
+`REPO_NOT_PREPARED`, `REGISTER_FULL` or `STATE_CONFLICT` (409) for a missing
+state file setting, conflict, invalid mirror, full catalog or stale/locked
+snapshot respectively. Filesystem failures also reject; a failed adoption
+is never advertised. Corrupt snapshot JSON or trusted definitions fail startup
+with `STATE_INVALID` (500). Correct the cause and retry the exact definition.
+
+`service.getRepositoryConfig(name)` returns a defensive normalized config
+or `null`. `service.getRepositoryCatalog()` returns a plain object keyed by
+alias containing defensive configs: `remote`, `upstream`, `sandbox`,
+`adopt` and `credentialKey` when configured. These are embedding APIs;
+the HTTP list does not expose credential references. Existing configured
+repos need not have a credential reference.
+
+A token callback receives `{ repo, url, config }`, with a defensive current
+config, so it can resolve a credential reference at request time instead of
+capturing a startup-only catalog. Existing callbacks taking just `repo`
+and `url` still work. Tokens are never put in service state.
+`GET /v1/repos` includes `defaultBranch` read from each actual mirror HEAD,
+or `null` when unavailable; it never guesses `main` or `master`.
+
 ### Adding repos at run time
 
 With `REPO_SERVICE_REGISTER_PREFIXES` set, an agent (or anyone who reaches the

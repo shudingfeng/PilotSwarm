@@ -78,6 +78,68 @@ export const DEFAULT_REGISTER_WAIT_MS = 120 * 1000;
 /** The longest one git network call of an added repo's first mirror may take. */
 export const DEFAULT_REGISTER_TIMEOUT_MS = 30 * 60 * 1000;
 const REGISTER_PROTOCOLS = new Set(["https:", "http:", "file:"]);
+const MIRROR_FETCH_REFS = ["+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*"];
+const ADOPT_FIELDS = ["agents", "skills", "instructions"];
+const DEFINITION_FIELDS = ["remote", "upstream", "sandbox", "credentialKey", "adopt"];
+const RESERVED_REPO = /^(?:__proto__|prototype|constructor|con|prn|aux|nul|com[0-9]|lpt[0-9])(?:\.|$)/i;
+
+function plainRecord(value) {
+    return value !== null && typeof value === "object" && !Array.isArray(value)
+        && [Object.prototype, null].includes(Object.getPrototypeOf(value));
+}
+
+function dataFields(value, fields) {
+    return plainRecord(value) && Reflect.ownKeys(value).every((key) => fields.includes(key)
+        && Object.hasOwn(Object.getOwnPropertyDescriptor(value, key), "value"));
+}
+
+function repositoryName(name) {
+    if (typeof name !== "string" || !SEGMENT.test(name) || RESERVED_REPO.test(name) || name.endsWith(".")
+        || Object.getOwnPropertyNames(Object.prototype).some((key) => key.toLowerCase() === name.toLowerCase())) {
+        throw new ServiceError(400, "BAD_REQUEST", "invalid repository name");
+    }
+}
+
+function normalizedConfig(config) {
+    return {
+        remote: config.remote,
+        upstream: config.upstream ?? config.remote,
+        sandbox: config.sandbox === true,
+        ...(config.credentialKey !== undefined ? { credentialKey: config.credentialKey } : {}),
+        adopt: Object.fromEntries(ADOPT_FIELDS.map((key) => [key, config.adopt?.[key] === true])),
+    };
+}
+
+function preparedDefinition(definition) {
+    const bad = (message) => { throw new ServiceError(400, "BAD_REQUEST", message); };
+    if (!dataFields(definition, DEFINITION_FIELDS)) {
+        bad("repository definition contains unknown fields or is not a plain object");
+    }
+    const remoteUrl = (value) => {
+        if (typeof value !== "string" || !value.startsWith("https://") || /[\s\\]/.test(value)) bad("repository URLs must be credential-free HTTPS URLs");
+        let url;
+        try { url = new URL(value); } catch { bad("invalid repository URL"); }
+        if (url.protocol !== "https:" || !url.hostname || url.username || url.password || url.search || url.hash) {
+            bad("repository URLs must be credential-free HTTPS URLs without query or fragment");
+        }
+        return url.href;
+    };
+    const remote = remoteUrl(definition.remote);
+    const upstream = definition.upstream === undefined ? remote : remoteUrl(definition.upstream);
+    if (definition.sandbox !== false) bad("prepared repositories require sandbox: false");
+    if (typeof definition.credentialKey !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(definition.credentialKey)) {
+        bad("credentialKey must be an opaque credential reference, not a credential");
+    }
+    if (definition.adopt !== undefined && (!dataFields(definition.adopt, ADOPT_FIELDS)
+        || Reflect.ownKeys(definition.adopt).some((key) => !ADOPT_FIELDS.includes(key) || typeof definition.adopt[key] !== "boolean"))) {
+        bad("adopt may contain only boolean agents, skills and instructions");
+    }
+    return normalizedConfig({ ...definition, remote, upstream });
+}
+
+function sameConfig(left, right) {
+    return JSON.stringify(normalizedConfig(left)) === JSON.stringify(normalizedConfig(right));
+}
 
 /**
  * The URL prefixes repos may be added from: a comma list or an array. Each
@@ -235,7 +297,7 @@ export function removeStaleGitLocks(clonePath) {
  * @param {object} options
  * @param {string} options.root            the export root on this pod
  * @param {string} [options.rootName]      the root's name in workspace records (default "a")
- * @param {Record<string, { remote?: string, upstream?: string, sandbox?: boolean, adopt?: { agents?: boolean, skills?: boolean, instructions?: boolean } }>} options.repos
+ * @param {Record<string, { remote?: string, upstream?: string, sandbox?: boolean, credentialKey?: string, adopt?: { agents?: boolean, skills?: boolean, instructions?: boolean } }>} options.repos
  *        `remote` is the clones' origin. `upstream`, when given, is where the
  *        mirror fetches from instead. `sandbox: true` makes this service host
  *        the remote itself (sandbox-remote.mjs), at `${publicUrl}/git/<repo>.git`.
@@ -243,7 +305,7 @@ export function removeStaleGitLocks(clonePath) {
  * @param {(workerNodeId: string) => (boolean|Promise<boolean>)} [options.isWorkerAlive]
  *        the worker registry; without it, only an entry's age decides
  * @param {number} [options.entryTtlMs]    hold window plus eviction margin
- * @param {(req: { repo: string, url: string }) => (string|null|Promise<string|null>)} [options.mintToken]
+ * @param {(req: { repo: string, url: string, config: object }) => (string|null|Promise<string|null>)} [options.mintToken]
  *        a short-lived token for the repo's remote, minted with the deployment identity
  * @param {string} [options.credentialHelper]  the helper each clone sets after clearing others
  * @param {number} [options.cloneUid]      the session uid clone creation runs as (a deployment sets 1000)
@@ -270,9 +332,9 @@ export function createRepoService(options) {
     const publicBase = options.publicUrl ? String(options.publicUrl).replace(/\/+$/, "") : null;
     // A sandbox repo's remote is this service; fill it in from publicUrl.
     const repos = Object.fromEntries(Object.entries(options.repos ?? {}).map(([name, config]) => {
-        if (!config?.sandbox) return [name, config];
+        if (!config?.sandbox) return [name, normalizedConfig(config)];
         if (!publicBase) throw new Error(`repo "${name}" has a sandbox remote, which needs publicUrl`);
-        return [name, { ...config, remote: `${publicBase}/git/${name}.git` }];
+        return [name, normalizedConfig({ ...config, remote: `${publicBase}/git/${name}.git` })];
     }));
     const registerPrefixes = parseRegisterPrefixes(options.registerPrefixes ?? []);
     if (registerPrefixes.length > 0 && !publicBase) throw new Error("adding repos (registerPrefixes) needs publicUrl: an added repo gets a sandbox remote");
@@ -282,6 +344,8 @@ export function createRepoService(options) {
     const registerTimeoutMs = options.registerTimeoutMs ?? DEFAULT_REGISTER_TIMEOUT_MS;
     // Repos being added: name -> { upstream, startedAt, done }. Failed adds: name -> { upstream, message, failedAt }.
     const registering = new Map();
+    const adopting = new Map();
+    const trustedRepositories = new Map();
     const registerFailures = new Map();
     const entryTtlMs = options.entryTtlMs ?? DEFAULT_ENTRY_TTL_MS;
     const now = options.now ?? (() => Date.now());
@@ -328,8 +392,41 @@ export function createRepoService(options) {
     // Checkouts being made, made again or removed: one operation at a time each.
     const busy = new Map();
 
+    let stateVersion = null;
     if (stateFile && fs.existsSync(stateFile)) {
-        const saved = JSON.parse(fs.readFileSync(stateFile, "utf8"));
+        stateVersion = fs.readFileSync(stateFile, "utf8");
+        let saved;
+        try { saved = JSON.parse(stateVersion); } catch {
+            throw new ServiceError(500, "STATE_INVALID", "repository service state is not valid JSON");
+        }
+        if (!plainRecord(saved)
+            || ["clones", "leases", "registeredRepos", "trustedRepositories"].some((key) => saved[key] !== undefined && !plainRecord(saved[key]))
+            || (saved.removals !== undefined && !Array.isArray(saved.removals))) {
+            throw new ServiceError(500, "STATE_INVALID", "invalid repository service state");
+        }
+        for (const [name, record] of Object.entries(saved.trustedRepositories ?? {})) {
+            repositoryName(name);
+            if (!plainRecord(record) || Reflect.ownKeys(record).some((key) => !["definition", "defaultBranch"].includes(key))
+                || typeof record.defaultBranch !== "string" || !record.defaultBranch) {
+                throw new ServiceError(500, "STATE_INVALID", "invalid trusted repository record");
+            }
+            let config;
+            try { config = preparedDefinition(record.definition); } catch {
+                throw new ServiceError(500, "STATE_INVALID", "invalid trusted repository definition");
+            }
+            if (Object.hasOwn(saved.registeredRepos ?? {}, name) || (Object.hasOwn(repos, name) && !sameConfig(repos[name], config))) {
+                throw new ServiceError(409, "REPO_EXISTS", `trusted repository "${name}" conflicts with startup configuration`);
+            }
+            if ([...trustedRepositories.values()].some((entry) => entry.definition.remote === config.remote || entry.definition.upstream === config.upstream)) {
+                throw new ServiceError(500, "STATE_INVALID", "duplicate trusted repository identity");
+            }
+            if (Object.entries(repos).some(([alias, entry]) => alias !== name
+                && (alias.toLowerCase() === name.toLowerCase() || entry.remote === config.remote || entry.upstream === config.upstream))) {
+                throw new ServiceError(409, "REPO_EXISTS", `trusted repository "${name}" conflicts with another configured alias`);
+            }
+            trustedRepositories.set(name, { definition: config, defaultBranch: record.defaultBranch });
+            repos[name] = config;
+        }
         for (const [checkout, record] of Object.entries(saved.clones ?? {})) {
             // A clone recorded before idle cleanup existed starts its idle
             // time now: nothing says when a session last used it.
@@ -350,19 +447,45 @@ export function createRepoService(options) {
         }
     }
     if (Object.values(repos).some((config) => config?.sandbox)) sandboxRemotes();
-    const persist = () => {
+    const persist = ({ trusted = trustedRepositories, registered } = {}) => {
         if (!stateFile) return;
         const data = {
             clones: Object.fromEntries(clones),
             leases: Object.fromEntries([...leases].map(([checkout, entries]) => [checkout, [...entries.values()]])),
             removals,
-            registeredRepos: Object.fromEntries(Object.entries(repos)
+            trustedRepositories: Object.fromEntries(trusted),
+            registeredRepos: Object.fromEntries([...Object.entries(repos), ...(registered ? [registered] : [])]
                 .filter(([, config]) => config?.registeredAt !== undefined)
                 .map(([name, config]) => [name, { upstream: config.upstream, registeredAt: config.registeredAt }])),
         };
         fs.mkdirSync(path.dirname(stateFile), { recursive: true });
-        fs.writeFileSync(`${stateFile}.tmp`, JSON.stringify(data));
-        fs.renameSync(`${stateFile}.tmp`, stateFile);
+        // Synchronous commits snapshot the current clone/lease maps after any
+        // awaited git work. A short lock plus content fence rejects a second
+        // writer rather than letting it overwrite a newer service snapshot.
+        const temporary = `${stateFile}.${randomBytes(12).toString("hex")}.tmp`;
+        let lock;
+        try {
+            try { lock = fs.openSync(`${stateFile}.lock`, "wx"); } catch (error) {
+                if (error.code === "EEXIST") throw new ServiceError(409, "STATE_CONFLICT", "repository state is being written by another writer");
+                throw error;
+            }
+            const current = fs.existsSync(stateFile) ? fs.readFileSync(stateFile, "utf8") : null;
+            if (current !== stateVersion) throw new ServiceError(409, "STATE_CONFLICT", "repository state changed outside this service; restart with the current state");
+            const text = JSON.stringify(data);
+            const fd = fs.openSync(temporary, "wx", 0o600);
+            try {
+                fs.writeFileSync(fd, text);
+                fs.fsyncSync(fd);
+            } finally { fs.closeSync(fd); }
+            fs.renameSync(temporary, stateFile);
+            stateVersion = text;
+        } finally {
+            if (fs.existsSync(temporary)) fs.unlinkSync(temporary);
+            if (lock !== undefined) {
+                fs.closeSync(lock);
+                fs.unlinkSync(`${stateFile}.lock`);
+            }
+        }
     };
     /** A removal record as the API shows it: times as ISO strings, without the session list. */
     const publicRemoval = (removal) => {
@@ -416,17 +539,21 @@ export function createRepoService(options) {
 
     async function ensureMirror(repo, config = repoConfig(repo), { timeoutMs } = {}) {
         const mirror = mirrorPath(repo);
+        if (trustedRepositories.has(repo)) {
+            await verifyPreparedMirror(repo, config);
+            return mirror;
+        }
         if (fs.existsSync(mirror)) return mirror;
         fs.mkdirSync(path.dirname(mirror), { recursive: true });
         await runGit(["init", "-q", "--bare", mirror]);
         for (const [key, value] of [
             ["remote.origin.url", config.upstream ?? config.remote],
-            ["remote.origin.fetch", "+refs/heads/*:refs/heads/*"],
+            ["remote.origin.fetch", MIRROR_FETCH_REFS[0]],
             ["gc.auto", "0"],
             ["maintenance.auto", "false"],
             ["gc.pruneExpire", "never"],
         ]) await runGit(["-C", mirror, "config", key, value]);
-        await runGit(["-C", mirror, "config", "--add", "remote.origin.fetch", "+refs/tags/*:refs/tags/*"]);
+        await runGit(["-C", mirror, "config", "--add", "remote.origin.fetch", MIRROR_FETCH_REFS[1]]);
         await runGit(["-C", mirror, "fetch", "-q", "--prune", "origin"], { env: networkGitEnv(), timeoutMs });
         await followUpstreamHead(mirror, { timeoutMs });
         return mirror;
@@ -441,6 +568,82 @@ export function createRepoService(options) {
         const symref = await runGit(["-C", mirror, "ls-remote", "--symref", "origin", "HEAD"], { env: networkGitEnv(), timeoutMs }).catch(() => "");
         const match = /^ref:\s+(refs\/heads\/\S+)\s+HEAD/m.exec(symref);
         if (match) await runGit(["-C", mirror, "symbolic-ref", "HEAD", match[1]]);
+    }
+
+    async function defaultBranch(repo) {
+        const mirror = mirrorPath(repo);
+        const ref = await runGit(["-C", mirror, "symbolic-ref", "-q", "HEAD"], { timeoutMs: INSPECT_TIMEOUT_MS });
+        if (!ref.startsWith("refs/heads/")) throw new Error("mirror HEAD is not a branch");
+        const commit = await runGit(["-C", mirror, "rev-parse", "--verify", `${ref}^{commit}`], { timeoutMs: INSPECT_TIMEOUT_MS });
+        if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(commit)) throw new Error("mirror HEAD has no commit");
+        return ref.slice("refs/heads/".length);
+    }
+
+    async function verifyPreparedMirror(repo, config) {
+        if (!segmentsAreReal(root, `repos/${repo}.git`, { withGit: false })) {
+            throw new ServiceError(409, "REPO_NOT_PREPARED", "prepared mirror must exist as a plain directory");
+        }
+        try {
+            const mirror = mirrorPath(repo);
+            const git = (args) => runGit(["-C", mirror, ...args], { timeoutMs: INSPECT_TIMEOUT_MS });
+            if (await git(["rev-parse", "--is-bare-repository"]) !== "true") throw new Error("not bare");
+            if (await git(["config", "--get-all", "remote.origin.url"]) !== config.upstream) throw new Error("origin mismatch");
+            // Including the key keeps a runner's stdout.trim() from hiding
+            // leading whitespace in the first refspec.
+            const fetchValues = await git(["config", "--null", "--get-regexp", "^remote\\.origin\\.fetch$"]);
+            const fetchRefs = new Set(fetchValues.split("\0").slice(0, -1)
+                .map((entry) => entry.startsWith("remote.origin.fetch\n") ? entry.slice("remote.origin.fetch\n".length) : ""));
+            if (!fetchValues.endsWith("\0") || fetchRefs.size !== MIRROR_FETCH_REFS.length
+                || MIRROR_FETCH_REFS.some((ref) => !fetchRefs.has(ref))) throw new Error("fetch refspec mismatch");
+            return await defaultBranch(repo);
+        } catch {
+            throw new ServiceError(409, "REPO_NOT_PREPARED", "mirror must be bare, have the exact upstream origin, ordinary heads/tags fetch refspecs and a symbolic HEAD resolving to a commit");
+        }
+    }
+
+    const runtimeRepoCount = () => new Set([
+        ...Object.entries(repos).filter(([, config]) => config.registeredAt !== undefined).map(([name]) => name),
+        ...trustedRepositories.keys(), ...registering.keys(), ...adopting.keys(),
+    ]).size;
+
+    function adoptPreparedRepository(name, definition) {
+        try {
+            repositoryName(name);
+            const config = preparedDefinition(definition);
+            if (!stateFile) throw new ServiceError(409, "STATE_REQUIRED", "prepared repository adoption requires stateFile");
+            const conflict = () => new ServiceError(409, "REPO_EXISTS", `repository "${name}" conflicts with an existing or pending definition`);
+            const pending = adopting.get(name);
+            if (pending) {
+                if (!sameConfig(pending.config, config)) throw conflict();
+                return pending.done;
+            }
+            const existing = repos[name];
+            if (registering.has(name) || (Object.hasOwn(repos, name) && !sameConfig(existing, config))) throw conflict();
+            const identities = [
+                ...Object.entries(repos),
+                ...[...adopting].map(([alias, entry]) => [alias, entry.config]),
+                ...[...registering].map(([alias, entry]) => [alias, { upstream: entry.upstream }]),
+            ];
+            if (identities.some(([alias, entry]) => alias !== name
+                && (alias.toLowerCase() === name.toLowerCase() || entry.remote === config.remote
+                    || (entry.upstream ?? entry.remote) === config.upstream))) throw conflict();
+            const saved = trustedRepositories.get(name);
+            if (saved) return Promise.resolve({ repo: name, defaultBranch: saved.defaultBranch });
+            if (runtimeRepoCount() >= registerMax) throw new ServiceError(409, "REGISTER_FULL", "runtime repository catalog is full");
+            const done = Promise.resolve().then(async () => {
+                const branch = await verifyPreparedMirror(name, config);
+                const next = new Map(trustedRepositories);
+                next.set(name, { definition: config, defaultBranch: branch });
+                persist({ trusted: next });
+                trustedRepositories.set(name, next.get(name));
+                repos[name] = config;
+                return { repo: name, defaultBranch: branch };
+            }).finally(() => adopting.delete(name));
+            adopting.set(name, { config, done });
+            return done;
+        } catch (error) {
+            return Promise.reject(error);
+        }
     }
 
     /**
@@ -652,6 +855,7 @@ export function createRepoService(options) {
         repo: name,
         upstream: config?.upstream ?? config?.remote ?? null,
         sandbox: Boolean(config?.sandbox),
+        defaultBranch: null,
         added: config?.registeredAt !== undefined,
         ...(config?.registeredAt !== undefined ? { addedAt: iso(config.registeredAt) } : {}),
     });
@@ -678,13 +882,16 @@ export function createRepoService(options) {
             throw new ServiceError(403, "REGISTER_NOT_ALLOWED", `repos can be added only from ${registerPrefixes.join(", ")}`);
         }
         const repo = name === undefined || name === null || name === "" ? repoNameFromUrl(href) : String(name);
-        if (!SEGMENT.test(repo)) {
+        if (!SEGMENT.test(repo) || RESERVED_REPO.test(repo) || repo.endsWith(".")) {
             throw new ServiceError(400, "BAD_REQUEST", `"${repo}" cannot be a repo name: use letters, digits, ".", "_" and "-"; pass name`);
         }
         const served = Object.entries(repos).find(([, config]) => repoUrlKey(config?.upstream ?? config?.remote) === repoUrlKey(href));
         if (served) return { answer: { ...describeRepo(...served), status: "served" } };
         if (Object.hasOwn(repos, repo)) {
             throw new ServiceError(409, "REPO_EXISTS", `repo "${repo}" is already served from ${describeRepo(repo, repos[repo]).upstream}; pass another name`);
+        }
+        if (adopting.has(repo) || [...adopting.values()].some((entry) => entry.config.upstream === href || entry.config.remote === href)) {
+            throw new ServiceError(409, "REPO_EXISTS", "repository conflicts with a pending prepared repository");
         }
         const pending = registering.get(repo);
         if (pending) {
@@ -693,8 +900,7 @@ export function createRepoService(options) {
             }
             return { repo, upstream: pending.upstream, done: pending.done };
         }
-        const added = Object.values(repos).filter((config) => config?.registeredAt !== undefined).length;
-        if (added + registering.size >= registerMax) {
+        if (runtimeRepoCount() >= registerMax) {
             throw new ServiceError(409, "REGISTER_FULL", `${registerMax} repos have been added already; an operator must remove one first`);
         }
         const config = { upstream: href, sandbox: true, remote: `${publicBase}/git/${repo}.git`, registeredAt: now() };
@@ -726,8 +932,8 @@ export function createRepoService(options) {
                 if (error instanceof ServiceError) throw error;
                 throw new ServiceError(502, "REPO_FETCH_FAILED", `could not mirror ${href}: ${String(error?.message ?? error)}`);
             }
+            persist({ registered: [repo, config] });
             repos[repo] = config;
-            persist();
             return describeRepo(repo, config);
         })();
         registering.set(repo, { upstream: href, startedAt: now(), done });
@@ -746,7 +952,10 @@ export function createRepoService(options) {
     const handlers = {
         async "GET /v1/repos"() {
             return {
-                repos: Object.entries(repos).map(([name, config]) => describeRepo(name, config)),
+                repos: await Promise.all(Object.entries(repos).map(async ([name, config]) => ({
+                    ...describeRepo(name, config),
+                    defaultBranch: await defaultBranch(name).catch(() => null),
+                }))),
                 adding: [...registering].map(([name, entry]) => ({ repo: name, upstream: entry.upstream, startedAt: iso(entry.startedAt) })),
                 failed: [...registerFailures].map(([name, entry]) => ({ repo: name, upstream: entry.upstream, code: entry.code, message: entry.message, failedAt: iso(entry.failedAt) })),
                 add: registerPrefixes.length > 0
@@ -954,7 +1163,7 @@ export function createRepoService(options) {
             if (!match) return {};
             if (match[1].sandbox) return { username: "x-token", password: mintSandboxToken() };
             if (!options.mintToken) return {};
-            const token = await options.mintToken({ repo: match[0], url: match[1].remote });
+            const token = await options.mintToken({ repo: match[0], url: match[1].remote, config: normalizedConfig(match[1]) });
             return token ? { username: "x-token", password: token } : {};
         },
     };
@@ -980,7 +1189,7 @@ export function createRepoService(options) {
         await eachRepo("prepare", async (repo, config) => {
             const existed = fs.existsSync(mirrorPath(repo));
             const mirror = await ensureMirror(repo);
-            if (existed) await followUpstreamHead(mirror);
+            if (existed && !trustedRepositories.has(repo)) await followUpstreamHead(mirror);
             if (config?.sandbox) {
                 await sandboxRemotes().ensure(repo, mirror);
                 await sandboxRemotes().syncFromMirror(repo, mirror);
@@ -1025,6 +1234,13 @@ export function createRepoService(options) {
         server,
         prepare,
         refresh,
+        adoptPreparedRepository,
+        getRepositoryConfig(name) {
+            return Object.hasOwn(repos, name) ? normalizedConfig(repos[name]) : null;
+        },
+        getRepositoryCatalog() {
+            return Object.fromEntries(Object.entries(repos).map(([name, config]) => [name, normalizedConfig(config)]));
+        },
         removeIdleClones,
         /** Refreshes every `intervalMs` in the background; errors are logged, not thrown. */
         startRefresh(intervalMs, log = console.error) {
