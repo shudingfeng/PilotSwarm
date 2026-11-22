@@ -281,6 +281,8 @@ test("PUT /model-defaults cluster_decision: non-admin 403, invalid tuples 4xx, a
     const store = {
         lookupUserId: async () => 7,
         listProviders: async () => rows,
+        // Live model discovery reads every credential before a default is validated.
+        allCredentials: async () => rows,
         getCredential: async name => rows.find(item => item.name === name) ?? null,
         setClusterDecisionDefault: async (tuple, isAdmin) => { writes.push({ tuple, isAdmin }); },
     };
