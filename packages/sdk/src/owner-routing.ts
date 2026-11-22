@@ -6,7 +6,7 @@
  * the portal records it, with PILOTSWARM_OWNER_ROUTING=1, for a session the
  * deployment's dispatcher creates for a user, and a session created during a
  * tagged turn takes its turn's. Whichever client starts the session copies
- * the stored tag into its orchestration input. Orchestration 1.0.86 then
+ * the stored tag into its orchestration input. Orchestration 1.0.1000 then
  * tags every session-scoped activity with it, and a worker with the same
  * `PilotSwarmWorkerOptions.ownerTag` runs them. Before each turn the
  * orchestration asks for capacity (`requestOwnerCapacity`); a worker with a

@@ -3,7 +3,7 @@
  * the probe orchestrations every runtime registers, and a runtime in a child
  * process that a test can kill outright.
  *
- * The orchestrations schedule what orchestration 1.0.86 schedules for an
+ * The orchestrations schedule what orchestration 1.0.1000 schedules for an
  * owner-tagged session, through PilotSwarm's own session proxies. A runtime
  * in the test process and one in a child process replay each other's
  * histories, so both load the proxies from the built dist/ code, and the
@@ -75,7 +75,7 @@ export function registerOwnerProbes(runtime, { createSessionProxy, createSession
         return "ok";
     });
 
-    // The capped destroy of 1.0.86, with the cap from the input.
+    // The capped destroy of 1.0.1000, with the cap from the input.
     runtime.registerOrchestration("owner-destroy-race", function* (ctx, input) {
         const destroy = session(ctx, input, `affinity-${input.sessionId}`).destroy();
         return raceIndex(yield ctx.race(destroy, ctx.scheduleTimer(input.capMs)));

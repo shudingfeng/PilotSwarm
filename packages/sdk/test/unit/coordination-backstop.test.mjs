@@ -56,7 +56,7 @@ function workerWith({
     registerActivities({ registerActivity: (name, handler) => handlers.set(name, handler) },
         sessionManager, null, undefined, catalog, undefined, undefined, undefined, undefined,
         [], null, [], [], null, "host-1");
-    const ctx = { traceInfo() {}, orchestrationVersion: "1.0.86", isCancelled: () => false };
+    const ctx = { traceInfo() {}, orchestrationVersion: "1.0.1000", isCancelled: () => false };
     const turn = (sessionId, extra = {}, activity = WORKFLOW_INTAKE_TURN_ACTIVITY_NAMES.runTurn) =>
         handlers.get(activity)(ctx, { sessionId, prompt: "hello", config: {}, turnIndex: 1, ...extra });
     return { turn, ran, reads, asked };

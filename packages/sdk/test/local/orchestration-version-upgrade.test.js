@@ -164,8 +164,10 @@ describe("orchestration version upgrades", () => {
     });
 
     // 1.0.79 is the version frozen when session workspaces opened 1.0.80
-    // (test C4): its sessions carry no config.workspace into 1.0.80.
-    for (const sourceVersion of ["1.0.40", "1.0.41", "1.0.42", "1.0.79", "1.0.80", "1.0.81", "1.0.82", "1.0.83", "1.0.84", "1.0.85"]) {
+    // (test C4): its sessions carry no config.workspace into 1.0.80. 1.0.86, the
+    // highest upstream version still registered, is the base of this fork's
+    // latest, 1.0.1000 (FORK_ORCHESTRATION_BASES).
+    for (const sourceVersion of ["1.0.40", "1.0.41", "1.0.42", "1.0.79", "1.0.80", "1.0.81", "1.0.82", "1.0.83", "1.0.84", "1.0.85", "1.0.86"]) {
         it(`upgrades ${sourceVersion} snapshots into the latest orchestration`, async () => {
             const values = new Map();
             const { DURABLE_SESSION_LATEST_VERSION } = await import("../../src/orchestration-version.ts");
@@ -271,16 +273,16 @@ describe("orchestration version upgrades", () => {
         expect(readFifo(values).filter((item) => item.kind === "prompt").map((item) => item.prompt)).toEqual(["P2"]);
     });
 
-    // 1.0.83 to 1.0.86 keep the 1.0.82 queue; all of them drain the inherited FIFO the same way. 1.0.82 to 1.0.85 are
+    // 1.0.83 to 1.0.1000 keep the 1.0.82 queue; all of them drain the inherited FIFO the same way. 1.0.82 to 1.0.86 are
     // frozen; their sessions still drain this way until their continue-as-new.
-    for (const version of ["1.0.82", "1.0.83", "1.0.84", "1.0.85", "1.0.86"]) {
+    for (const version of ["1.0.82", "1.0.83", "1.0.84", "1.0.85", "1.0.86", "1.0.1000"]) {
         it(`R9: ${version} drains an inherited 1.0.81 FIFO [timer, timer, P1, P2] in two turns, then waits on the cron`, async () => {
             const values = new Map();
             inheritedFifo(values);
             const turns = [];
             const ctx = createCtx(values, [], turns);
             const { DURABLE_SESSION_LATEST_VERSION } = await import("../../src/orchestration-version.ts");
-            expect(DURABLE_SESSION_LATEST_VERSION).toBe("1.0.86");
+            expect(DURABLE_SESSION_LATEST_VERSION).toBe("1.0.1000");
             const handler = await loadHandler(version);
             const result = driveUntilParked(handler(ctx, inheritedInput(`fifo-${version}`)), ctx);
             expect(turns).toHaveLength(2);
@@ -290,13 +292,14 @@ describe("orchestration version upgrades", () => {
             expect(result.parkedOnTimerMs).toBe(3_600_000);
         });
     }
-    // 1.0.83 opened (owner decision 2026-11-08T15:30Z), then 1.0.84 (tool composition), 1.0.85 (durable titles) and 1.0.86
-    // (owner routing): a live session of an earlier release continues as new into the latest, which accepts everything it
-    // carries (the compatibility floor). Its queued prompts (KV FIFO), its pending child digest, its rehydration notice and a
-    // set_model all arrive: the new model's turn says the notice once, the queued prompts run once, in order, and the
-    // child's update is delivered once. A 1.0.82 session moves straight to 1.0.86, and so do a 1.0.83 session of v0.8.11 and
-    // the 1.0.84 and 1.0.85 sessions of v0.8.12.
-    for (const sourceVersion of ["1.0.82", "1.0.83", "1.0.84", "1.0.85"]) {
+    // 1.0.83 opened (owner decision 2026-11-08T15:30Z), then 1.0.84 (tool composition), 1.0.85 (durable titles), 1.0.86
+    // (a spawned child's workspace selection) and this fork's 1.0.1000 (owner routing, on 1.0.86): a live session of an
+    // earlier release continues as new into the latest, which accepts everything it carries (the compatibility floor). Its
+    // queued prompts (KV FIFO), its pending child digest, its rehydration notice and a set_model all arrive: the new model's
+    // turn says the notice once, the queued prompts run once, in order, and the child's update is delivered once. A 1.0.82
+    // session moves straight to 1.0.1000, and so do a 1.0.83 session of v0.8.11, the 1.0.84 and 1.0.85 sessions of v0.8.12
+    // and a 1.0.86 session of v0.8.13, the highest upstream version still registered.
+    for (const sourceVersion of ["1.0.82", "1.0.83", "1.0.84", "1.0.85", "1.0.86"]) {
         it(`a ${sourceVersion} session with queued prompts, a pending child digest, a rehydration notice and a set_model continues as new into the latest and keeps them all`, async () => {
             const values = new Map();
             values.set("fifo.0", JSON.stringify([
@@ -304,7 +307,7 @@ describe("orchestration version upgrades", () => {
                 { kind: "prompt", prompt: "QUEUED-P2", bootstrap: false, clientMessageIds: ["p2"] },
             ]));
             const { DURABLE_SESSION_LATEST_VERSION } = await import("../../src/orchestration-version.ts");
-            expect(DURABLE_SESSION_LATEST_VERSION).toBe("1.0.86");
+            expect(DURABLE_SESSION_LATEST_VERSION).toBe("1.0.1000");
             const sourceCtx = createCtx(values, [
                 JSON.stringify({ type: "cmd", cmd: "set_model", id: `set-model-${sourceVersion}`, args: { model: "github-copilot:gpt-5.4-mini" } }),
             ]);
@@ -353,10 +356,10 @@ describe("orchestration version upgrades", () => {
         });
     }
     // Formal audit R2: a 1.0.82 turn that threw continues as new with its retry as its prompt and its thrown attempt's key
-    // (1.0.81's contract), stamped with its own literal source version "1.0.82"; a 1.0.83 turn (and a 1.0.84 or 1.0.85 one)
-    // carries it as its owed retry. The latest converts either into its owed retry (state.ts ownedRetryOfInput): the retry
-    // runs once, with the thrown attempt's key and its count, never twice.
-    for (const sourceVersion of ["1.0.82", "1.0.83", "1.0.84", "1.0.85"]) {
+    // (1.0.81's contract), stamped with its own literal source version "1.0.82"; a 1.0.83 turn (and a 1.0.84, 1.0.85 or
+    // 1.0.86 one) carries it as its owed retry. The latest converts either into its owed retry (state.ts ownedRetryOfInput):
+    // the retry runs once, with the thrown attempt's key and its count, never twice.
+    for (const sourceVersion of ["1.0.82", "1.0.83", "1.0.84", "1.0.85", "1.0.86"]) {
         it(`a ${sourceVersion} turn that threw continues into the latest and its retry runs once, with the thrown attempt's key`, async () => {
             const values = new Map();
             let guid = 0;

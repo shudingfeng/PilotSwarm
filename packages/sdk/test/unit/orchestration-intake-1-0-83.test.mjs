@@ -6,11 +6,12 @@
  * - 1.0.83 was the latest version (owner decision 2026-11-08T15:30Z) and is
  *   frozen in orchestration_1_0_83/, as v0.8.11 released it; its tree is the
  *   frozen 1.0.82 plus the intake files. The tests read that frozen tree. The
- *   later versions keep the intake whole: 1.0.84 (tool composition) and
- *   1.0.85 (durable titles) are frozen, and the latest, 1.0.86 (the live tree,
- *   which only the registry and the orchestration.ts shim import), is 1.0.85
- *   plus owner routing (docs/proposals/windows-worker-pool.md, U18); the tests
- *   below that read the live tree cover it.
+ *   later versions keep the intake whole: 1.0.84 (tool composition), 1.0.85
+ *   (durable titles) and 1.0.86 (a spawned child's workspace selection) are
+ *   frozen, and the latest, this fork's 1.0.1000 (the live tree, which only the
+ *   registry and the orchestration.ts shim import), is 1.0.86 plus owner routing
+ *   (docs/proposals/windows-worker-pool.md, U18); the tests below that read the
+ *   live tree cover it.
  * - Every continue-as-new of 1.0.83 goes through versionedContinueAsNew:
  *   each call site is listed below, and nothing else calls the context's
  *   continue-as-new. Driven with a fake context, it carries the intake state
@@ -136,7 +137,7 @@ const VALID = carried({ queue: [unclaimed(1), held(2, TEXT_A)], invocation: boun
 // ─── Inactive ────────────────────────────────────────────────
 
 test("1.0.83 has its frozen replay tree; only the registry and the orchestration.ts shim import the live tree", () => {
-    // The latest version is pinned by its own freeze test (orchestration-freeze-1-0-85.test.mjs: 1.0.86).
+    // The latest version is pinned by its own freeze test (orchestration-freeze-1-0-86.test.mjs: 1.0.1000).
     assert.notEqual(DURABLE_SESSION_LATEST_VERSION, "1.0.83");
     const latest = DURABLE_SESSION_ORCHESTRATION_REGISTRY.at(-1);
     assert.deepEqual([latest.version, latest.handler.name],
@@ -457,13 +458,14 @@ test("1.0.83 (orchestration_1_0_83/) is the frozen 1.0.82 plus the intake: the f
 });
 
 /**
- * The lines of the frozen 1.0.85 that the latest, 1.0.86, does not keep, by file: owner routing's (U18). Each session proxy
- * now takes the session's routing (and, in the live tree, names the turns' contract by its constant, proxy-contract.ts, where
- * the frozen copy has the literal); the destroys are capped for an owner-tagged session; a set-workspace check is raced
- * against its cap; a child's spawn passes its routing; the workspace retry takes the fast busy schedule, and a hold that is
- * no failure keeps its step; and the version and its handler's name.
+ * The lines of the frozen 1.0.86 that the latest, 1.0.1000, does not keep, by file: owner routing's (U18). Each session
+ * proxy now takes the session's routing (and, in the live tree, names the turns' contract by its constant, proxy-contract.ts,
+ * where the frozen copy has the literal); the destroys are capped for an owner-tagged session; a set-workspace check is
+ * raced against its cap; a child's spawn passes its routing; the workspace retry takes the fast busy schedule, and a hold
+ * that is no failure keeps its step; and the version and its handler's name. Upstream's 1.0.86 spawn (a child's workspace
+ * selection) is in both trees.
  */
-const DROPPED_FROM_85 = {
+const DROPPED_FROM_86 = {
     "agents.ts": [
         "        yield runtime.session.destroy();",
         "    try {",
@@ -481,7 +483,7 @@ const DROPPED_FROM_85 = {
         '    runtime.session = createSessionProxy(ctx, runtime.input.sessionId, state.affinityKey, state.config, "tool-composition-v1");',
     ],
     "runtime.ts": [
-        'export const CURRENT_ORCHESTRATION_VERSION = "1.0.85";',
+        'export const CURRENT_ORCHESTRATION_VERSION = "1.0.86";',
         '        runtime.session = createSessionProxy(runtime.ctx, input.sessionId, state.affinityKey, state.config, "tool-composition-v1");',
         '    const manager = createSessionManagerProxy(ctx, "tool-composition-v1", { childResultProvenance: true });',
         '    const session = createSessionProxy(ctx, input.sessionId, state.affinityKey, state.config, "tool-composition-v1");',
@@ -508,23 +510,23 @@ const DROPPED_FROM_85 = {
     ],
 };
 
-test("1.0.86 keeps 1.0.83's intake whole: 1.0.85's files plus the contract module, the intake's and queue.ts unchanged, no turn-control-v1", () => {
-    const V85 = "orchestration_1_0_85";
-    assert.deepEqual(tsFilesLive("orchestration"), [...tsFilesLive(V85), "proxy-contract.ts"].sort());
+test("1.0.1000 keeps 1.0.83's intake whole: 1.0.86's files plus the contract module, the intake's and queue.ts unchanged, no turn-control-v1", () => {
+    const V86 = "orchestration_1_0_86";
+    assert.deepEqual(tsFilesLive("orchestration"), [...tsFilesLive(V86), "proxy-contract.ts"].sort());
     assert.equal(readLive("orchestration/proxy-contract.ts"), 'export const LIVE_SESSION_PROXY_CONTRACT = "tool-composition-v1";\n');
     for (const name of ["intake-machine.ts", "intake-state.ts", "intake-wiring.ts", "workflow-turn-failure.ts", "queue.ts", "utils.ts"]) {
         assert.equal(readLive(`orchestration/${name}`), readLive(`${V83}/${name}`), name);
-        assert.equal(readLive(`${V85}/${name}`), readLive(`${V83}/${name}`), name);
+        assert.equal(readLive(`${V86}/${name}`), readLive(`${V83}/${name}`), name);
     }
-    for (const name of tsFilesLive(V85)) {
+    for (const name of tsFilesLive(V86)) {
         assert.ok(!readLive(`orchestration/${name}`).includes('"turn-control-v1"'), `${name} names the turn-control contract`);
-        const dropped = linesOnly(readLive(`${V85}/${name}`), readLive(`orchestration/${name}`));
+        const dropped = linesOnly(readLive(`${V86}/${name}`), readLive(`orchestration/${name}`));
         if (name === "index.ts") {
             // Its comment and the handler's name only.
-            assert.ok(dropped.every(line => /^ \* |^export function\* durableSessionOrchestration_1_0_85\($/.test(line)), dropped.join("\n"));
+            assert.ok(dropped.every(line => /^ \* |^export function\* durableSessionOrchestration_1_0_86\($/.test(line)), dropped.join("\n"));
             continue;
         }
-        assert.deepEqual(dropped, DROPPED_FROM_85[name] ?? [], name);
+        assert.deepEqual(dropped, DROPPED_FROM_86[name] ?? [], name);
     }
     // The intake's continue-as-new guard, its due-write race and the failed-turn report stay in the live loop.
     const runtime = readLive("orchestration/runtime.ts");

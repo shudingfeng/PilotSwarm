@@ -228,7 +228,7 @@ export function* releaseAffinity(
 }
 
 /**
- * 1.0.86: ask for capacity for an owner-tagged session's owner. Its
+ * 1.0.1000: ask for capacity for an owner-tagged session's owner. Its
  * activities wait for a worker that declares the owner's tag; the answer
  * tells whether to run them now (`ok`), to end the turn (`deny`), or to wait
  * on the busy timer (`busy`). An activity that fails counts as no answer.
@@ -713,7 +713,7 @@ export function buildContinueInput(
         ...(state.multiWriter ? { multiWriter: true } : {}),
         ...(state.sharedPreambleSent ? { sharedPreambleSent: true } : {}),
         ...(state.ownerDisplay ? { ownerDisplay: state.ownerDisplay } : {}),
-        // 1.0.86: owner routing, only when set.
+        // 1.0.1000: owner routing, only when set.
         ...(options.ownerTag ? { ownerTag: options.ownerTag } : {}),
         ...(options.workspaceBusyFastRelease ? { workspaceBusyFastRelease: true } : {}),
         ...restOverrides,
@@ -1155,7 +1155,7 @@ function* handleSetWorkspaceCommand(runtime: DurableSessionRuntime, cmdMsg: Comm
     let path: string | null = null;
     let extraPaths: Record<string, string> | null = null;
     if (next) {
-        // 1.0.86: an owner-tagged session's check waits for a worker of its
+        // 1.0.1000: an owner-tagged session's check waits for a worker of its
         // owner. The command asks for one first, and the check is capped, so
         // a command never holds the session's later commands for good. A
         // refusal or the cap answers the command and keeps the workspace.
@@ -1394,7 +1394,7 @@ export function* advanceRegenPipeline(
                 ...(regen.distillerModel ? { distillerModel: regen.distillerModel } : {}),
                 ...((regen as any).distillerReasoningEffort ? { distillerReasoningEffort: (regen as any).distillerReasoningEffort } : {}),
                 ...((regen as any).distillerContextTier ? { distillerContextTier: (regen as any).distillerContextTier } : {}),
-                // 1.0.86: the distiller session takes this session's tag and busy policy.
+                // 1.0.1000: the distiller session takes this session's tag and busy policy.
                 ...createdSessionRouting(runtime.options),
             });
             if (!spawn?.distillerSessionId) {

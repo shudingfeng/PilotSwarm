@@ -1,4 +1,5 @@
 import { formatSessionTimestamp } from "../session-list-timestamps.js";
+import { applySessionWorkspaceSelection } from "../workspace.js";
 import type {
     CommandMessage,
     CommandResponse,
@@ -163,6 +164,7 @@ export function buildSubAgentSystemMessage(options: {
     agentTask: string;
     agentIsSystem: boolean;
     parentSystemMessage: string;
+    sharedWorkflowWorkspace?: boolean;
 }): string {
     const {
         parentSessionId,
@@ -171,6 +173,7 @@ export function buildSubAgentSystemMessage(options: {
         agentTask,
         agentIsSystem,
         parentSystemMessage,
+        sharedWorkflowWorkspace,
     } = options;
     const canSpawnMore = childNestingLevel < maxNestingLevel;
     const timingInstruction = agentIsSystem
@@ -201,7 +204,9 @@ export function buildSubAgentSystemMessage(options: {
         `- After you finish a task you stay ALIVE and idle, ready for the parent to send you a follow-up via \`message_agent\`. You are NOT auto-terminated when you produce a final answer.\n` +
         `- Only the parent decides when you are no longer needed. The parent will close you with \`complete_agent\`, \`cancel_agent\`, or \`delete_agent\`. Do not assume you have been shut down just because you produced a final reply.\n` +
         `- Prefer using \`store_fact\` for larger structured context handoffs across your spawn tree. Put the durable details in facts, then pass fact keys or \`read_facts\` pointers in messages/prompts instead of pasting large context blobs. Sibling and cousin agents under the same root can read your session-scoped facts directly via \`read_facts\` — you do NOT need to mark them \`shared=true\` just to share with peers.\n` +
-        `- FILESYSTEM ISOLATION: your parent, siblings, and sub-agents each run on their own worker pod — they can NEVER see your local files, and yours may vanish on the next turn, after a durable wait, or on worker restart. The artifact store is the ONLY shared byte channel. To hand off any file (especially binaries/archives): \`write_artifact({fromFile: "<path>"})\` on the producing side, \`read_artifact({toFile: "<path>"})\` on the consuming side. Bytes move server-side with a SHA-256 in every result — never read a file just to re-type its bytes as inline content, and never base64 payloads through messages.\n` +
+        (sharedWorkflowWorkspace
+            ? `- FILESYSTEM ISOLATION: worker-local scratch files do NOT share a filesystem across pods; they may vanish after a wait or worker restart. Attached durable workspace folders are shared: follow the Workflow's inherited workspace, coordinate edits, and allow only one writer when Git HEAD, index or stash can overlap. Use artifacts to hand off worker-local files.\n`
+            : `- FILESYSTEM ISOLATION: your parent, siblings, and sub-agents each run on their own worker pod — they can NEVER see your local files, and yours may vanish on the next turn, after a durable wait, or on worker restart. The artifact store is the ONLY shared byte channel. To hand off any file (especially binaries/archives): \`write_artifact({fromFile: "<path>"})\` on the producing side, \`read_artifact({toFile: "<path>"})\` on the consuming side. Bytes move server-side with a SHA-256 in every result — never read a file just to re-type its bytes as inline content, and never base64 payloads through messages.\n`) +
         `- \`write_artifact\` returns the artifact:// link — include it in your response whenever the user or your parent should see the file. Use \`store_fact\` for structured state, artifacts for files.\n` +
         `- If you override a sub-agent model, you MUST first call list_available_models in this session and use only an exact provider:model value returned there. ` +
         `NEVER invent, guess, shorten, or reuse a stale model name.\n` +
@@ -490,7 +495,7 @@ export function* refreshTrackedSubAgents(
 // ─── Graceful shutdown cascade ──────────────────────────────
 
 /**
- * Free the session on the worker that holds it. 1.0.86: an owner-tagged
+ * Free the session on the worker that holds it. 1.0.1000: an owner-tagged
  * session's destroy waits for a worker of its owner, so it is raced against
  * WORKSPACE_RELEASE_CAP_MS. With no such worker nothing is held in memory,
  * the session ends anyway, and duroxide drops the destroy no worker took.
@@ -950,7 +955,7 @@ export function* handleSubAgentAction(
                 toolGrant: _parentToolGrant,
                 ...parentConfig
             } = state.config;
-            const childConfig: SerializableSessionConfig = {
+            let childConfig: SerializableSessionConfig = {
                 ...parentConfig,
                 // Pass the assignment and sub-agent context to named children,
                 // not the parent's custom persona competing with their own.
@@ -967,10 +972,7 @@ export function* handleSubAgentAction(
                 ...(agentToolNames ? { toolNames: agentToolNames } : {}),
                 ...(result.contract ? { childContract: result.contract } : {}),
             };
-            // Session workspaces: omitted inherits the parent's workspace
-            // (already in the spread), a record replaces it, null gives none.
-            if (result.workspace) childConfig.workspace = result.workspace;
-            else if (result.workspace === null) delete childConfig.workspace;
+            childConfig = applySessionWorkspaceSelection(childConfig, result.workspace, result.workspaceInherited === true);
 
             const parentSystemMsg = typeof childConfig.systemMessage === "string"
                 ? childConfig.systemMessage
@@ -982,10 +984,11 @@ export function* handleSubAgentAction(
                 agentTask,
                 agentIsSystem,
                 parentSystemMessage: parentSystemMsg,
+                sharedWorkflowWorkspace: (state.config as import("../types.js").ManagedSessionConfig).workflowInsideWorkflow === true,
             });
 
             let childSessionId: string;
-            // 1.0.86: the child takes the tag and busy policy; a system child neither.
+            // 1.0.1000: the child takes the tag and busy policy; a system child neither.
             const childRouting = agentIsSystem ? undefined : createdSessionRouting(runtime.options);
             try {
                 const composition = yield runtime.session.captureSpawnTools(childConfig, result.grant, result.tools, agentDef,

@@ -812,7 +812,7 @@ back or the dispatcher returns it.
   the dispatcher creates for an owner (`onBehalfOfOwner`) is owner-routed: the
   Portal records `owner.<ownerOid>` in its creation config, and whichever
   client starts the session copies that tag into its orchestration input,
-  whatever that client's own settings. Orchestration `1.0.86` tags every
+  whatever that client's own settings. Orchestration `1.0.1000` tags every
   session-scoped activity with it. A sub-agent created during a turn takes
   that turn's tag. Sessions that people start in the Portal, system sessions
   and every session under a system root stay untagged.
@@ -834,7 +834,7 @@ back or the dispatcher returns it.
 
 See [Owner Routing](../reference/configuration.md#owner-routing-optional) and
 the orchestration design's
-[owner routing](../../architecture/orchestration/design.md#owner-routing-and-capacity-requests-1086)
+[owner routing](../../architecture/orchestration/design.md#owner-routing-and-capacity-requests-101000)
 and [owner-only workers](../../architecture/orchestration/design.md#owner-only-workers).
 
 ### Admission

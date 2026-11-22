@@ -10,7 +10,7 @@
  *    and before it on a new one, so it must only ADD objects: a column with a
  *    constant default and two new procedures. The upgrade test compares every
  *    procedure and every row across the migration, from a schema at
- *    upstream's last migration, 0095.
+ *    upstream's last migration, 0102.
  *  - The flag has its own column because profile_settings is replaced
  *    wholesale on every preference save; a save must not touch the opt-in.
  *  - Turning the flag off must keep the dispatcher's shares (no access
@@ -74,7 +74,7 @@ describe("dispatcher delegation in the CMS (migration 9001)", () => {
             const users = (await pool.query(`SELECT * FROM "${schema}".users ORDER BY user_id`)).rows;
             const shares = (await pool.query(`SELECT * FROM "${schema}".session_shares ORDER BY session_id, user_id`)).rows;
             const records = (await pool.query(`SELECT * FROM "${schema}".schema_migrations ORDER BY version`)).rows;
-            expect(records.at(-1).version).toBe("0095");
+            expect(records.at(-1).version).toBe("0102");
 
             await catalog.initialize();
 
@@ -104,7 +104,7 @@ describe("dispatcher delegation in the CMS (migration 9001)", () => {
             const upgradedRecords = (await pool.query(`SELECT * FROM "${schema}".schema_migrations ORDER BY version`)).rows;
             expect(upgradedRecords.slice(0, -1)).toEqual(records);
             expect(upgradedRecords.at(-1)).toMatchObject({ version: "9001", name: "dispatcher_delegation" });
-        }, "0095");
+        }, "0102");
     });
 
     it("reads false for anyone who never opted in, and stores exactly what the user sets", async () => {

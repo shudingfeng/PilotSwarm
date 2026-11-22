@@ -6,31 +6,46 @@ the turn loop and its queue, the commit of a turn across retries, the timers
 delivery of child updates, and the identity of delivered prompts. A TLC pass is
 a bounded check, not a proof. A FAIL is a model counterexample.
 
-## Status: 1.0.86 is the latest version (this line); 1.0.85, 1.0.84, 1.0.83 and 1.0.82 are frozen
+## Status: 1.0.1000 is the latest version (this line); 1.0.86, 1.0.85, 1.0.84, 1.0.83 and 1.0.82 are frozen
 
-1.0.86 is upstream's 1.0.85 (Release C, next section) plus owner routing (the Windows worker pool proposal). This line
-first added owner routing as its own 1.0.84 on 1.0.83 (the latest-1.0.84 batch of section 4, bound to `34e73cb1`),
-which no deployment ran. Upstream 0.8.12 then released another 1.0.84 (tool composition) and 1.0.85 (durable titles),
-so the merge of 0.8.12 moved owner routing, unchanged, to 1.0.86 on 1.0.85. 1.0.85 is frozen in
-`orchestration_1_0_85/`: upstream's live tree at 0.8.12 (`f10b422c`) but for the version literal and the literal
-`"tool-composition-v1"` at the proxy sites (`test/unit/orchestration-freeze-1-0-85.test.mjs`). It stays registered
-beside the frozen 1.0.84, 1.0.83 and 1.0.82, and its sessions move to 1.0.86 at their next continue-as-new.
+1.0.1000 is upstream's 1.0.86 (next section) plus owner routing (the Windows worker pool proposal). This line first
+added owner routing as its own 1.0.84 on 1.0.83 (the latest-1.0.84 batch of section 4, bound to `34e73cb1`), which no
+deployment ran. Upstream 0.8.12 then released another 1.0.84 (tool composition) and 1.0.85 (durable titles), so the
+merge of 0.8.12 moved owner routing, unchanged, to this line's provisional 1.0.86 on 1.0.85 (the latest-1.0.86 batch of
+section 4, bound to `28197180`). Upstream 0.8.13 then released its own 1.0.86 (a spawned child's workspace selection),
+so the merge of 0.8.14 moved owner routing, unchanged, to 1.0.1000, a number of this line's own range, on upstream's
+1.0.86 (`FORK_ORCHESTRATION_BASES` in `orchestration-version.ts`). No deployment ran the provisional 1.0.86, and it
+is no longer registered. 1.0.86 and 1.0.85 are frozen in `orchestration_1_0_86/` and `orchestration_1_0_85/` as
+upstream froze them (`test/unit/orchestration-freeze-1-0-86.test.mjs`, `orchestration-freeze-1-0-85.test.mjs`). They
+stay registered beside the frozen 1.0.84, 1.0.83 and 1.0.82, and their sessions move to 1.0.1000 at their next
+continue-as-new.
 
-Every 1.0.86 change reads the owner tag or the fast busy flag of the session's input, so a session with neither runs as
-on 1.0.85. The lines of 1.0.85 that 1.0.86 does not keep are, file by file, the lines of 1.0.83 that this line's 1.0.84
-did not keep, but for the contract (1.0.85's literal, 1.0.86's `LIVE_SESSION_PROXY_CONTRACT`) and the spawn's
-arguments (1.0.85 passes the title lock; 1.0.86 the title lock and the child's routing)
-(`test/unit/orchestration-intake-1-0-83.test.mjs`, "1.0.86 keeps 1.0.83's intake whole"). 1.0.85 differs from 1.0.83
-only in its spawn (the tool capture, the title lock and the `session.tools_granted` event), its version and its
-contract: `state.ts`, `queue.ts`, `utils.ts` and the intake files are byte-identical, so it carries exactly 1.0.83's
-state. So the owner-routing models (`CapacityHold`, `OwnerCapped`, `OwnerTagCarry`) and `VersionHandoff` with
-`From = "83"` describe 1.0.86 and the hand-off of a 1.0.85 (or 1.0.84) session into it: in them, read 1.0.84 as 1.0.86
-and 1.0.83 as 1.0.85. One addition is not modelled: the spawn's tool capture (`captureSpawnToolsV1`, a session-scoped
-activity of tool composition) carries an owner-tagged session's owner tag, as its turns do, and like a turn it is not
-raced against a cap. The latest-1.0.86 batch (section 4) binds the owner-routing models to `28197180`
-(`CORRESPONDENCE-latest-1086.md`) and ran every case of the folder again: 236 of 236 as expected.
+Every 1.0.1000 change reads the owner tag or the fast busy flag of the session's input, so a session with neither runs
+as on 1.0.86. The lines of 1.0.86 that 1.0.1000 does not keep are, file by file, the lines of 1.0.83 that this line's
+1.0.84 did not keep, but for the contract (1.0.86's literal, 1.0.1000's `LIVE_SESSION_PROXY_CONTRACT`) and the spawn
+(1.0.86 passes the title lock; 1.0.1000 the title lock and the child's routing)
+(`test/unit/orchestration-intake-1-0-83.test.mjs`, "1.0.1000 keeps 1.0.83's intake whole"). 1.0.86 differs from 1.0.83
+only in its spawn (the tool capture, the title lock, the `session.tools_granted` event and 1.0.86's workspace
+selection and sub-agent note), its version and its contract: `state.ts`, `queue.ts`, `utils.ts` and the intake
+files are byte-identical, so it carries exactly 1.0.83's state. So the owner-routing models (`CapacityHold`,
+`OwnerCapped`, `OwnerTagCarry`) and `VersionHandoff` with `From = "83"` describe 1.0.1000 and the hand-off of a
+1.0.86 (or 1.0.85 or 1.0.84) session into it: in them, read 1.0.84 as 1.0.1000 and 1.0.83 as 1.0.86. One addition is
+not modelled: the spawn's tool capture (`captureSpawnToolsV1`, a session-scoped activity of tool composition) carries
+an owner-tagged session's owner tag, as its turns do, and like a turn it is not raced against a cap; no model reads a
+child's configuration either. `CORRESPONDENCE-latest-101000.md` binds the owner-routing models to 1.0.1000. The last
+TLC run, the latest-1.0.86 batch (section 4), bound them to `28197180` and ran every case of the folder: 236 of 236 as
+expected. No module, case or settings template changed since; no TLC run is claimed for 1.0.1000.
 
-## Upstream status at 0.8.12: 1.0.85 is the latest version (Release C); 1.0.84 is frozen
+## Upstream status at 0.8.14: 1.0.86 is the latest version; 1.0.85 is frozen
+
+1.0.85 is frozen in `orchestration_1_0_85/` as release 0.8.12 shipped it; 1.0.86
+is the live `orchestration/`. `CORRESPONDENCE-latest-1086.md` records why: a
+spawn's child workspace selection and a Workflow sub-agent's system message
+changed what the orchestration passes to its spawn activities. The 1.0.85 to
+1.0.86 hand-off is the same continue-as-new shape; no model changes.
+The sections below describe the earlier lines.
+
+## Earlier status: 1.0.85 is the latest version (Release C); 1.0.84 is frozen
 
 1.0.84 is frozen in `orchestration_1_0_84/`; 1.0.85 is the live `orchestration/`.
 `CORRESPONDENCE-latest-1085.md` records titles (FB-036/FB-040) and the FB-076
@@ -38,7 +53,7 @@ revert to main's delete behavior. The 1.0.84 to 1.0.85 hand-off is the
 continue-as-new shape of the latest-1.0.83 batch below; no earlier model changes.
 The sections below describe the earlier lines.
 
-## Earlier status: this line's 1.0.84 (owner routing, now 1.0.86) was the latest version; 1.0.83 and 1.0.82 were frozen
+## Earlier status: this line's 1.0.84 (owner routing, now 1.0.1000) was the latest version; 1.0.83 and 1.0.82 were frozen
 
 In this line orchestration 1.0.84 becomes the latest version: 1.0.83 plus owner routing (the Windows worker pool
 proposal). 1.0.83 is frozen in `orchestration_1_0_83/` and stays registered beside 1.0.82; its sessions
@@ -71,7 +86,7 @@ continue-as-new. Models and batches below name the paths of the commit they were
 | Latest-1.0.83 batch (2026-11-08, `5d8eaa46` to `4ffbf909`) | 50 cases of `VersionHandoff`, `RollingDeploy`, `DigestWindow`, `MergeRule`, `ForcedRefresh` and `IntakeDrain` with 1.0.83 as the latest version: every case as expected across seven runs (TLC 2.19, two workers, an isolated machine); no new code finding open |
 | Batches so4b, so5, so5b (2026-11-08) | The late-cancel give-back fixes in 1.0.83 (`CarriedGiveBack`): so4b found three gaps, so5 and so5b check their fixes; so5b, 48 cases at `bb162ed8` (`packages/sdk/src` identical at `8aaf5435` on v0.8.10): 48 of 48 as expected |
 | Latest-1.0.84 batch (2026-11-12, `34e73cb1`) | 52 cases of `CapacityHold`, `OwnerCapped`, `OwnerTagCarry` and `VersionHandoff` (1.0.83 into 1.0.84): 52 of 52 as expected, and the folder's other 184 cases as before; three findings in the code before `34e73cb1` (two at `76e4af8f`, one at `e94c62e4`), all fixed at `34e73cb1`; no finding open |
-| Latest-1.0.86 batch (2026-11-16, `28197180`) | No new case: the folder's 236 cases with owner routing as 1.0.86 on 1.0.85 (`CORRESPONDENCE-latest-1086.md`): 236 of 236 as expected; no finding |
+| Latest-1.0.86 batch (2026-11-16, `28197180`) | No new case: the folder's 236 cases with owner routing as this line's provisional 1.0.86 on 1.0.85, now 1.0.1000 (`CORRESPONDENCE-latest-101000.md`): 236 of 236 as expected; no finding |
 
 1.0.84 (`src/orchestration/`) is the latest version: new sessions start at it, and every continue-as-new targets it.
 1.0.83 (the durable Workflow intake) is frozen in `orchestration_1_0_83/`, and 1.0.82
@@ -455,8 +470,9 @@ duroxide itself (the drop of a queued race loser is the proposal's local observa
 
 ### Latest-1.0.86 batch (2026-11-16): owner routing on 1.0.85 (bound to `28197180`)
 
-The merge of v0.8.12 moved this line's owner routing from 1.0.84 on 1.0.83 to 1.0.86 on 1.0.85 (status, above). No
-module, case or settings template changed. `CORRESPONDENCE-latest-1086.md` binds the latest-1.0.84 batch to `28197180`:
+The merge of v0.8.12 moved this line's owner routing from 1.0.84 on 1.0.83 to 1.0.86 on 1.0.85 (status, above); this
+batch's 1.0.86 is that provisional version, now 1.0.1000, not upstream's 1.0.86. No module, case or settings template
+changed. `CORRESPONDENCE-latest-101000.md` (its section on `28197180`) binds the latest-1.0.84 batch to `28197180`:
 the owner-routing code is the code bound at `34e73cb1` but for comments and the proxy contract, 1.0.85 carries what
 1.0.83 carries, and v0.8.12's spawn adds the tool capture, which carries the owner tag and is not modelled.
 

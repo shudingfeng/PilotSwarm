@@ -92,7 +92,7 @@ flowchart LR
 
 | Piece | Lives in | What it does |
 |---|---|---|
-| SDK hooks, settings and orchestration `1.0.86` | `packages/sdk`, `packages/app` | Owner tags, capacity requests, admission, worker lifecycle hooks, personal secret resolution, CLI hardening, delegation |
+| SDK hooks, settings and orchestration `1.0.1000` | `packages/sdk`, `packages/app` | Owner tags, capacity requests, admission, worker lifecycle hooks, personal secret resolution, CLI hardening, delegation |
 | Dev Drive workspace extension | `packages/sdk/examples/devdrive-workspaces/` | A workspace provider, loaded through `PILOTSWARM_EXTENSION_MODULES` like `repo-workspaces`. It mounts a root session's drive as `Q:`. It holds no cloud code and reaches the controller and a local attacher over HTTP |
 | Windows image and worker services | `deploy/providers/azure/windows/` | Image build, Dev Drive seeding, release packing, a launcher and a local disk attacher run as Windows services |
 | Disk pool controller and broker | `deploy/providers/azure/disk-controller/` | Drive pool and leases, attach and detach, VM lifecycle and scaling, admission, capacity, the credential broker and the upgrade freeze |
@@ -142,7 +142,7 @@ Sessions that people start in the Portal get no tag and run on the Linux workers
 an external store (below), they use the deployment's shared model providers only, because the broker releases a personal
 token only to a VM bound to its owner.
 
-In orchestration `1.0.86`, every session-scoped activity of a tagged session carries the tag:
+In orchestration `1.0.1000`, every session-scoped activity of a tagged session carries the tag:
 - the turn (`runTurnV6` and `runTurnEpochV6` today) and a spawn's tool capture (`captureSpawnToolsV1`);
 - `hydrateSession`, `dehydrateSession`, `needsHydrationSession`, `checkpointSession` and `abortTurn`;
 - `checkWorkspace`, `releaseWorkspace` and `destroySession`.
@@ -226,7 +226,7 @@ We'd like your view before we design it.
 
 ### Capacity requests
 
-An owner-tagged activity waits in the queue until a worker with that tag polls. To get one started, orchestration `1.0.86`
+An owner-tagged activity waits in the queue until a worker with that tag polls. To get one started, orchestration `1.0.1000`
 schedules the activity `requestOwnerCapacity` before each turn, before a session's first owner-tagged activity after
 creation or an affinity release, and before a set-workspace command's check. Asking before every turn matters because a
 session can keep its affinity through a durable wait while its owner's last VM is deleted. The activity carries its own
@@ -234,7 +234,7 @@ capability tag, `pilotswarm.owner-capacity.v1`, so only a worker with a requeste
 `worker.setOwnerCapacityRequester(fn)`, which here means only the coordination host, runs it. The hook gets
 `{ sessionId, rootSessionId, ownerTag }` and an `AbortSignal`:
 
-| Answer | What `1.0.86` does |
+| Answer | What `1.0.1000` does |
 |---|---|
 | OK | Schedules the turn |
 | `deny` | Ends the turn as an admission refusal that isn't retried. The Azure controller denies a root that holds no drive lease |
@@ -249,7 +249,7 @@ capability tag, `pilotswarm.owner-capacity.v1`, so only a worker with a requeste
   against the existing `WORKSPACE_RELEASE_CAP_MS` (10 seconds, `orchestration/state.ts:516`), as `releaseAffinity` already
   races `releaseWorkspace` (`orchestration/lifecycle.ts:194-210`).
 
-`1.0.86` also adds an opt-in **fast busy policy**. Today affinity is released after two `WORKSPACE_BUSY` failures in a row
+`1.0.1000` also adds an opt-in **fast busy policy**. Today affinity is released after two `WORKSPACE_BUSY` failures in a row
 on one worker (`orchestration/turn.ts:1258`), with retries at 30, 120, 300 and 900 seconds (`orchestration/state.ts:489`).
 A session whose input carries `workspaceBusyFastRelease` releases on the first refusal and retries at 10, 20, 60, then
 every 180 seconds. With `PILOTSWARM_WORKSPACE_BUSY_FAST_RELEASE=1`, the client sets that flag on owner-routed sessions,
@@ -527,7 +527,7 @@ makes the controller recycle outdated VMs, and the identity and resource IDs and
 ## Compatibility contract
 
 Every slice meets these rules, with two stated exceptions: U26 and U27 propose new defaults, which you decide on (C1, open
-question 7), and U26's capped destroy, if it ships in `1.0.86`, applies to every session (C4). Reviewers can check the
+question 7), and U26's capped destroy, if it ships in `1.0.1000`, applies to every session (C4). Reviewers can check the
 rules, and tests cover them.
 
 | Rule | What it means |
@@ -535,7 +535,7 @@ rules, and tests cover them.
 | C1. Off by default | Each new behavior needs a setting, a registered hook, an optional parameter or a deploy flag, and its default reproduces today's behavior |
 | C2. Additive APIs | New optional parameters, methods, routes and settings only. Nothing is renamed or removed, and the regenerated protocol client keeps every existing call working |
 | C3. Additive schema | One CMS migration, `9001`, adds a column with a default and two new stored procedures. It replaces no procedure and rewrites no data |
-| C4. Versioned orchestration | `1.0.86` is a new version. `1.0.85` is frozen as `orchestration_1_0_85/`, beside the frozen `1.0.83` and `1.0.84`, and every version down to the floor, `1.0.47`, stays registered. `1.0.86` changes nothing for a session unless its input carries an owner tag or the fast busy flag. Orchestration code never reads `process.env`. A release that contains it changes the default orchestration version, so every deployment that takes that release upgrades by stopping every worker, deploying, then starting, as the 0.8.11 and 0.8.12 release notes ask (`CHANGELOG.md`) |
+| C4. Versioned orchestration | `1.0.1000` is a new version, from this fork's own range, on upstream's `1.0.86`. `1.0.86` and `1.0.85` are frozen as `orchestration_1_0_86/` and `orchestration_1_0_85/`, beside the frozen `1.0.83` and `1.0.84`, and every version down to the floor, `1.0.47`, stays registered. `1.0.1000` changes nothing for a session unless its input carries an owner tag or the fast busy flag. Orchestration code never reads `process.env`. A release that contains it changes the default orchestration version, so every deployment that takes that release upgrades by stopping every worker, deploying, then starting, as the 0.8.11 to 0.8.14 release notes ask (`CHANGELOG.md`) |
 | C5. Platform guards | Windows code paths run only under `process.platform === "win32"`, and Linux behavior is unchanged. The required Windows unit-test job covers them |
 | C6. Cloud-neutral core | No new cloud SDK or cloud logic in core, as `.github/copilot-instructions.md` requires. New Azure code lives under `deploy/providers/azure`, including new deploy steps in `deploy/providers/azure/deploy-steps/`. Modules with npm dependencies have their own `package.json` and lockfile. `deploy.mjs` only calls the new steps, behind `WIN_WORKERS_ENABLED` or `AZURE_POLICY_RESTRICTED`. The Azure-specific scripts already under `deploy/scripts/`, such as `render-params.mjs`, `deploy-bicep.mjs` and `compose-env.mjs`, and `Setup-PortalAuth.ps1`, get only the wiring that calls code under `deploy/providers/azure`, so no new logic joins the existing exceptions (`.github/copilot-instructions.md:38-41`; open question 4). Core's existing Azure Blob code isn't extended |
 | C7. Deploy opt-in | New Bicep and deploy paths run only with `WIN_WORKERS_ENABLED=true` or `AZURE_POLICY_RESTRICTED=true`. With both off, a redeploy changes nothing: tests check that rendered parameters and manifests match today's, and an ARM what-if shows nothing beyond what changes on every run today |
@@ -627,7 +627,7 @@ Slices without a dependency can land in any order.
 | U15 | Fine-grained token gate | — |
 | U16 | External personal secrets: the store contract, catalog references, per-turn resolution and redaction | U12, U15 |
 | U17 | Dispatcher delegation: migration `9001`, `onBehalfOfOwner`, read-only sharing of the sessions it creates and the delegated end of work | U29 |
-| U18 | Orchestration `1.0.86`: owner tags for the sessions created on behalf of a user, capacity requests, the fast busy policy, the capped owner-tagged destroy and set-workspace check, and Workflows and new root sessions refused in owner-routed trees | U17 |
+| U18 | Orchestration `1.0.1000`: owner tags for the sessions created on behalf of a user, capacity requests, the fast busy policy, the capped owner-tagged destroy and set-workspace check, and Workflows and new root sessions refused in owner-routed trees | U17 |
 | U19 | Dev Drive workspace extension | U5, U16, U18, U28 |
 | U20 | Windows image and worker-service scripts | U19 |
 | U21 | Disk pool controller and credential broker | U16, U18 |
@@ -653,13 +653,13 @@ U28.
 **Numbers stay provisional until U17 and U18 merge.** A migration's version and an orchestration's version end up in durable
 state. The migrator skips any version it has already recorded (`pg-migrator.ts:122-128`), and a deployed orchestration
 version can't change (`docs/architecture/system.md:928`). Holding a number for us would block or reorder your own changes.
-So we use the next free orchestration number, `1.0.86` today, only on a test deployment whose data we can throw away,
-and the migration takes `9001`, from a block that `main`'s sequence never reaches (`9000` to `9999`, listed after every
-upstream migration). If
-`main` takes a number first, as v0.8.11's Workflows did with `0088`, `0089` and `1.0.83` while we drafted this,
-v0.8.12 did with `0090` to `0094`, `1.0.84` and `1.0.85` after our first numbers, `0090` and `1.0.84`, and the ten
-canvas slots (#318) did with `0095` after our second, the slice takes the next free one and we recreate that data. We
-run them nowhere else until both are merged.
+So the orchestration takes `1.0.1000` and the migration takes `9001`, each from a range that `main`'s sequence never
+reaches (orchestration patch numbers from `1000`; migrations `9000` to `9999`, listed after every upstream migration),
+and we run them only on a test deployment whose data we can throw away. Our earlier numbers were `main`'s next free
+ones, and `main` took them first: v0.8.11's Workflows took `0088`, `0089` and `1.0.83` while we drafted this, v0.8.12
+took `0090` to `0094`, `1.0.84` and `1.0.85` after our first numbers, `0090` and `1.0.84`, the ten canvas slots
+(#318) took `0095` after our second, and v0.8.13 took `0096` and `1.0.86` after our third; each time the slice moved and
+we recreated that data. We run them nowhere else until both are merged.
 
 **Early review: U5, U17, U18 and U29.** They need no Azure work, so they can go up as soon as their local tests pass. U18
 carries the orchestration version and the core routing design, where your input matters most, and its TLA+ updates. U17
@@ -713,7 +713,7 @@ With the message scope on, no session message crosses owners. The manual will st
 ## Open questions
 
 1. Is this design acceptable in shape, and are there settings or hooks you'd rather see differently?
-2. Will you review U5, U17, U18 and U29 early, so that the migration's number and `1.0.86` become final on `main`?
+2. Will you review U5, U17, U18 and U29 early, so that the migration's number and the orchestration version become final on `main`?
 3. Will you create `feature/windows-workers` and grant write access, or do you prefer a fork?
 4. Should the new Azure deploy steps plug into the deployment-provider contract that the provider-boundary audit calls for
    (finding 7, #64), or stay as steps that `deploy.mjs` calls behind its settings until that contract exists?

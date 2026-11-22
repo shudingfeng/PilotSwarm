@@ -5,7 +5,7 @@
  *
  * Two things must hold and are guarded here:
  *   1. VERSION CEREMONY — every version below the latest is frozen into its
- *      own directory and registered; latest is 1.0.86. Each bump updates this
+ *      own directory and registered; latest is 1.0.1000. Each bump updates this
  *      block, which is the point: a freeze that forgets the ceremony is a
  *      freeze nobody checked.
  *   2. FREEZE BOUNDARY — the durable yield exists from 1.0.59 onward, never in
@@ -72,7 +72,7 @@ describe("orchestration version registry", () => {
         expect(frozen181).toMatch(/CURRENT_ORCHESTRATION_VERSION\s*=\s*"1\.0\.81"/);
         const frozen182 = readFileSync(new URL("../../src/orchestration_1_0_82/runtime.ts", import.meta.url), "utf8");
         expect(frozen182).toMatch(/CURRENT_ORCHESTRATION_VERSION\s*=\s*"1\.0\.82"/);
-        for (const version of ["1.0.83", "1.0.84", "1.0.85"]) {
+        for (const version of ["1.0.83", "1.0.84", "1.0.85", "1.0.86"]) {
             const frozen = readFileSync(new URL(`../../src/orchestration_${version.replaceAll(".", "_")}/runtime.ts`, import.meta.url), "utf8");
             expect(frozen).toMatch(new RegExp(`CURRENT_ORCHESTRATION_VERSION\\s*=\\s*"${version.replaceAll(".", "\\.")}"`));
         }

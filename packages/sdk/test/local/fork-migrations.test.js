@@ -4,13 +4,13 @@
  * the upstream migration it was written against (FORK_CMS_MIGRATION_BASES) and runs upstream's later migrations after
  * it. Database only: no workers, no model.
  *
- *  - Both orders must give the same schema; schemaSnapshot leaves the migration ledger out. No upstream migration
- *    follows 0095 yet, so today the orders are the same; after a sync that brings one, this is the check that this
- *    fork's migrations commute with it. It also compares column positions, so an upstream column added later to a
- *    table that a fork migration extends (9001 adds one to users) shows up here as a difference in position.
- *  - A database that recorded the dispatcher delegation migration under its provisional number, 0096, keeps working:
- *    this code lists no 0096, so the name check doesn't compare that record, and 9001 runs again without changing
- *    anything.
+ *  - Both orders must give the same schema; schemaSnapshot leaves the migration ledger out. Upstream's 0096 to 0102
+ *    (workflow outcome retention and the Workflow Decision node's) follow 0095, so an existing deployment runs them
+ *    after 9001 and a new database before it: this is the check that this fork's migrations commute with them. It also
+ *    compares column positions, so an upstream column added later to a table that a fork migration extends (9001 adds
+ *    one to users) shows up here as a difference in position.
+ *  - A database that recorded the dispatcher delegation migration under its provisional number, 0096, is refused now
+ *    that upstream's 0096 has that number, before any migration runs, like one that recorded it as 0090 or 0095.
  *
  * Run: npx vitest run test/local/fork-migrations.test.js
  */
@@ -66,33 +66,26 @@ describe("this fork's CMS migrations", () => {
         });
     });
 
-    it("migrate a database that recorded dispatcher delegation as 0096: 9001 runs again, changes nothing and ends as a new database", async () => {
-        await withSchemas(["u", "f"], async ({ pool, query, schemas: [upgraded, fresh] }) => {
+    it("refuse a database that recorded dispatcher delegation as 0096, upstream's workflow outcome retention, and run none", async () => {
+        await withSchemas(["u"], async ({ pool, query, schemas: [upgraded] }) => {
             // The list before the move: upstream's migrations through 0095, then this one as 0096.
             const previous = [
                 ...CMS_MIGRATIONS(upgraded).filter((migration) => migration.version <= "0095"),
                 { version: "0096", name: "dispatcher_delegation", sql: dispatcherDelegationMigration(upgraded) },
             ];
             await runMigrations(pool, upgraded, previous, CMS_LOCK_SEED);
-            await query(`SELECT "${upgraded}".cms_set_user_dispatcher_delegation('dev', 'alice', NULL, NULL, true)`);
             const recorded = await ledger(query, upgraded);
             const before = await schemaSnapshot(query, upgraded);
 
-            // The name check doesn't refuse it: a worker that skips migrations only waits for 9001.
-            await expect(assertMigrationsApplied(pool, upgraded, CMS_MIGRATIONS(upgraded), "CMS"))
-                .rejects.toThrow(`CMS schema "${upgraded}" lacks migration 9001 (dispatcher_delegation).`);
-            await runMigrations(pool, upgraded, CMS_MIGRATIONS(upgraded), CMS_LOCK_SEED);
-            await assertMigrationsApplied(pool, upgraded, CMS_MIGRATIONS(upgraded), "CMS");
+            // Matched by version alone, it would skip upstream's 0096. The migrator and a worker that skips migrations
+            // refuse it instead, naming the number and both names.
+            const refusal = 'records a different migration under a version this code uses: migration 0096 is recorded as '
+                + '"dispatcher_delegation", but this code\'s migration 0096 is "workflow_outcome_retention".';
+            await expect(runMigrations(pool, upgraded, CMS_MIGRATIONS(upgraded), CMS_LOCK_SEED)).rejects.toThrow(refusal);
+            await expect(assertMigrationsApplied(pool, upgraded, CMS_MIGRATIONS(upgraded), "CMS")).rejects.toThrow(refusal);
 
-            expect(await ledger(query, upgraded)).toEqual([...recorded, { version: "9001", name: "dispatcher_delegation" }]);
-            const after = await schemaSnapshot(query, upgraded);
-            expect(snapshotDifferences(before, after), "rows included").toEqual({});
-            const optIn = await query(`SELECT "${upgraded}".cms_get_user_dispatcher_delegation('dev', 'alice') AS enabled`);
-            expect(optIn.rows[0].enabled).toBe(true);
-
-            await runMigrations(pool, fresh, CMS_MIGRATIONS(fresh), CMS_LOCK_SEED);
-            const catalog = ({ data, ...rest }) => rest;
-            expect(snapshotDifferences(catalog(after), catalog(await schemaSnapshot(query, fresh)))).toEqual({});
+            expect(await ledger(query, upgraded)).toEqual(recorded);
+            expect(snapshotDifferences(before, await schemaSnapshot(query, upgraded)), "rows included").toEqual({});
         });
     });
 });

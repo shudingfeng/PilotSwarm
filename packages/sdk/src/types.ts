@@ -44,7 +44,7 @@ export type TurnAction =
     | { type: "cron_at"; action: "set"; schedule: import("./cron-at.js").CronAtSchedule; events?: CapturedEvent[] }
     | { type: "cron_at"; action: "cancel"; events?: CapturedEvent[] }
     | { type: "input_required"; question: string; choices?: string[]; allowFreeform?: boolean; events?: CapturedEvent[] }
-    | { type: "spawn_agent"; task: string; model?: string; reasoningEffort?: ReasoningEffort; contextTier?: ContextTier; systemMessage?: string | { mode: "append" | "replace"; content: string }; toolNames?: string[]; grant?: import("./tool-grant.js").CapabilityToolGrant; tools?: import("./tool-grant.js").ToolCeiling; agentName?: string; /** Historical spawn selector, retained only to deserialize frozen orchestration histories. New requests reject it. */ requiredTool?: string; title?: string; lockTitle?: boolean; contract?: Record<string, unknown>; content?: string; events?: CapturedEvent[]; /** Session workspaces (1.0.80): omitted inherits, a record is used, null gives none. */ workspace?: SessionWorkspace | null }
+    | { type: "spawn_agent"; task: string; model?: string; reasoningEffort?: ReasoningEffort; contextTier?: ContextTier; systemMessage?: string | { mode: "append" | "replace"; content: string }; toolNames?: string[]; grant?: import("./tool-grant.js").CapabilityToolGrant; tools?: import("./tool-grant.js").ToolCeiling; agentName?: string; /** Historical spawn selector, retained only to deserialize frozen orchestration histories. New requests reject it. */ requiredTool?: string; title?: string; lockTitle?: boolean; contract?: Record<string, unknown>; content?: string; events?: CapturedEvent[]; /** Session workspaces: omitted inherits; null keeps default folders; "none" clears record and defaults. */ workspace?: SessionWorkspaceSelection; workspaceInherited?: boolean }
     | { type: "message_agent"; agentId: string; message: string; contractPatch?: Record<string, unknown>; events?: CapturedEvent[] }
     | { type: "check_agents"; events?: CapturedEvent[] }
     | { type: "wait_for_agents"; agentIds: string[]; events?: CapturedEvent[] }
@@ -177,7 +177,7 @@ type TurnResultVariant =
     | ({ type: "cron_at"; action: "set"; schedule: import("./cron-at.js").CronAtSchedule; events?: CapturedEvent[] } & QueuedTurnActionCarrier)
     | ({ type: "cron_at"; action: "cancel"; events?: CapturedEvent[] } & QueuedTurnActionCarrier)
     | ({ type: "input_required"; question: string; choices?: string[]; allowFreeform?: boolean; events?: CapturedEvent[] } & QueuedTurnActionCarrier)
-    | ({ type: "spawn_agent"; task: string; model?: string; reasoningEffort?: ReasoningEffort; contextTier?: ContextTier; systemMessage?: string | { mode: "append" | "replace"; content: string }; toolNames?: string[]; grant?: import("./tool-grant.js").CapabilityToolGrant; tools?: import("./tool-grant.js").ToolCeiling; agentName?: string; /** Historical spawn selector, retained only to deserialize frozen orchestration histories. New requests reject it. */ requiredTool?: string; title?: string; lockTitle?: boolean; contract?: Record<string, unknown>; content?: string; events?: CapturedEvent[]; /** Session workspaces (1.0.80): omitted inherits, a record is used, null gives none. */ workspace?: SessionWorkspace | null } & QueuedTurnActionCarrier)
+    | ({ type: "spawn_agent"; task: string; model?: string; reasoningEffort?: ReasoningEffort; contextTier?: ContextTier; systemMessage?: string | { mode: "append" | "replace"; content: string }; toolNames?: string[]; grant?: import("./tool-grant.js").CapabilityToolGrant; tools?: import("./tool-grant.js").ToolCeiling; agentName?: string; /** Historical spawn selector, retained only to deserialize frozen orchestration histories. New requests reject it. */ requiredTool?: string; title?: string; lockTitle?: boolean; contract?: Record<string, unknown>; content?: string; events?: CapturedEvent[]; /** Session workspaces: omitted inherits; null keeps default folders; "none" clears record and defaults. */ workspace?: SessionWorkspaceSelection; workspaceInherited?: boolean } & QueuedTurnActionCarrier)
     | ({ type: "message_agent"; agentId: string; message: string; contractPatch?: Record<string, unknown>; events?: CapturedEvent[] } & QueuedTurnActionCarrier)
     | ({ type: "check_agents"; events?: CapturedEvent[] } & QueuedTurnActionCarrier)
     | ({ type: "wait_for_agents"; agentIds: string[]; events?: CapturedEvent[] } & QueuedTurnActionCarrier)
@@ -325,7 +325,7 @@ export interface TurnOptions {
          */
         spawnWorkflow?(
             args: import("./workflow/tool-spec.js").SpawnWorkflowToolArgs,
-            call?: { toolCallId?: string },
+            call?: { toolCallId?: string; workspaceInherited?: boolean },
         ): Promise<string>;
         /** Workflow: change a draft/published child workflow this session created. Returns JSON. */
         updateWorkflow?(args: Record<string, unknown>): Promise<string>;
@@ -373,7 +373,7 @@ export interface TurnOptions {
          */
         workflowMilestone?: boolean;
         /** Stage 2.1: workflow_definition (list, read, save, start) for this session's own definitions; JSON. */
-        workflowDefinition?(args: Record<string, unknown>, call?: { toolCallId?: string }): Promise<string>;
+        workflowDefinition?(args: Record<string, unknown>, call?: { toolCallId?: string; workspaceInherited?: boolean }): Promise<string>;
         spawnAgent(args: {
             agent_name?: string;
             task?: string;
@@ -387,8 +387,10 @@ export interface TurnOptions {
             title?: string;
             lock_title?: boolean;
             contract?: Record<string, unknown>;
-            /** Session workspaces: omitted inherits, a record is used, null gives none. Text-checked by the tool handler. */
-            workspace?: SessionWorkspace | null;
+            /** Session workspaces: omitted inherits, null keeps defaults, "none" clears the record and defaults. */
+            workspace?: SessionWorkspaceSelection;
+            /** Internal: the tool omitted workspace and inherited the turn's current record/defaults. */
+            workspaceInherited?: boolean;
         }): Promise<string>;
         setSessionModel(args: { model?: string; title?: string; reasoning_effort?: ReasoningEffort | null }): Promise<string>;
         /** Session regeneration: enqueue the durable regenerate cmd for THIS session (sender-stamped server-side). */
@@ -465,6 +467,9 @@ export interface SessionWorkspace {
      */
     extra?: Record<string, SessionWorkspaceExtra>;
 }
+
+/** A child/Workflow workspace argument: a record, no record, or no record and no deployment defaults. */
+export type SessionWorkspaceSelection = SessionWorkspace | null | "none";
 
 /** One extra folder of a session's workspace. */
 export interface SessionWorkspaceExtra {
@@ -652,9 +657,9 @@ export interface WorkspaceReleaseRequest extends WorkspaceAttachRequest {
  */
 export interface WorkspaceDefaultsRecord {
     /** The person's folder, when it is the working folder because the record has none. */
-    workingFolder: { root: string; folder?: string } | null;
+    workingFolder: { name?: string; root: string; folder?: string; required?: boolean } | null;
     /** Default extra folders; `home: true` marks the person's folder as an extra folder. */
-    extra: Array<{ name: string; root: string; folder?: string; home?: true }>;
+    extra: Array<{ name: string; root: string; folder?: string; home?: true; required?: boolean }>;
     /**
      * Default folders the turn left out, and why. For example the person's
      * folder ("home") while an extra folder of the record is inside it: its
@@ -677,6 +682,14 @@ export interface WorkspaceAdoptionReport {
     personal?: { agents: string[]; skills: string[] };
     /** Section 4.12: agents and skills loaded by path (load_agent, load_skill), sorted. */
     loaded?: { agents: string[]; skills: string[] };
+}
+
+/** One Workflow Start's durable base workspace and deployment-default folders. */
+export interface WorkflowWorkspace {
+    workspace: SessionWorkspace | null;
+    defaults: WorkspaceDefaultsRecord | null;
+    /** A parent's raw working directory when it has no managed workspace record. */
+    workingDirectory?: string;
 }
 
 /** What getSessionWorkspace reports, read from the session's latest workspace events. */
@@ -757,11 +770,26 @@ export type OwnerCapacityRequester = (
     signal: AbortSignal,
 ) => OwnerCapacityAnswer | void | Promise<OwnerCapacityAnswer | void>;
 
-/**
- * Error code for a refused delete, cancel, complete or rename of a system
- * session. Workers create system sessions, so these calls do not apply.
- */
+/** Fixed error code for a refused lifecycle or sharing mutation on a system session. */
 export const SYSTEM_SESSION_PROTECTED = "SYSTEM_SESSION_PROTECTED";
+
+/** The stable 409 returned when deployment policy refuses system-tree sharing changes. */
+export function systemSessionSharingError(): Error {
+    return Object.assign(new Error("System session sharing is controlled by deployment policy and cannot be changed."), {
+        code: SYSTEM_SESSION_PROTECTED,
+        status: 409,
+    });
+}
+
+/** PostgreSQL uses these messages for the two stored-procedure sharing guards. */
+export function isSystemSessionSharingRefusal(error: unknown): boolean {
+    const candidate = error as { code?: unknown; message?: unknown } | null;
+    if (candidate?.code === SYSTEM_SESSION_PROTECTED) return true;
+    if (candidate?.code !== "P0001") return false;
+    const message = String(candidate?.message ?? "").trim();
+    return message === "Cannot change visibility of a system session"
+        || message === "Cannot share a system session";
+}
 
 /**
  * Error code for a refused removal of a system session: a live worker still
@@ -831,6 +859,13 @@ export interface SerializableSessionConfig {
      * The attach path is per-turn data and is never written to config.
      */
     workspace?: SessionWorkspace;
+    /**
+     * Internal immutable provider-default snapshot. A Workflow Start and its agent nodes use this to keep the same
+     * home/shared folders across turns; undefined means ordinary sessions resolve defaults on every turn.
+     */
+    workspaceDefaults?: WorkspaceDefaultsRecord | null;
+    /** Runtime-only provider defaults resolved for this turn; not persisted as an immutable child selection. */
+    resolvedWorkspaceDefaults?: WorkspaceDefaultsRecord | null;
     /** Wait threshold in seconds. Waits shorter than this sleep in-process. */
     waitThreshold?: number;
     /** Internal: bound definition lookup key. New static bindings retain namespace:name; published bindings use name plus packageId. */
@@ -996,6 +1031,12 @@ export interface ManagedSessionConfig extends SerializableSessionConfig {
         homeIsWorkingFolder?: boolean;
         /** Section 4.11: the names of the extra folders that came from the deployment's defaults. */
         defaultExtras?: string[];
+        /** The full resolved provider defaults, independent of overlap with the session record. */
+        capturedDefaults?: WorkspaceDefaultsRecord;
+        /** The default home folder's extra name, even when that folder adopts nothing. */
+        defaultHomeExtra?: string;
+        /** The default home folder's required flag, when it is the working folder. */
+        homeRequired?: boolean;
         /** Section 4.11: the default home folder as an extra folder, and what it adopts. */
         home?: { name: string; path: string; adopt: WorkspaceAdopt; repo?: import("./workspace-check.js").RepoScan };
     };
@@ -1512,14 +1553,14 @@ export interface OrchestrationInput {
     /** Names of all loaded non-system agents. Used by orchestration to validate policy. */
     allowedAgentNames?: string[];
 
-    // ─── Owner routing (1.0.86) ──────────────────────────────
+    // ─── Owner routing (1.0.1000) ──────────────────────────────
     /**
      * The owner routing tag, `owner.<subject>` of the session's owner, as
      * its creation config holds it (the client copies it at start).
      * With it, every session-scoped activity goes only to a worker that
      * declares the tag (`PilotSwarmWorkerOptions.ownerTag`), and the session
      * asks for capacity (`requestOwnerCapacity`) before each turn. Carried
-     * across continue-as-new; absent = routed as before 1.0.86.
+     * across continue-as-new; absent = routed as before 1.0.1000.
      */
     ownerTag?: string;
     /**

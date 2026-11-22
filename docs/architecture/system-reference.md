@@ -188,8 +188,8 @@ Key fields:
 | `inputGracePeriod` | number | Keep warm for user input |
 | `checkpointInterval` | number | Periodic checkpoint (-1 disables) |
 | `retryCount` | number | Activity failure retries (resets on success) |
-| `ownerTag` | string? | 1.0.86 owner routing: `owner.<subject>`; session-scoped activities go only to workers that declare it |
-| `workspaceBusyFastRelease` | boolean? | 1.0.86 fast busy policy for `WORKSPACE_BUSY` refusals |
+| `ownerTag` | string? | 1.0.1000 owner routing: `owner.<subject>`; session-scoped activities go only to workers that declare it |
+| `workspaceBusyFastRelease` | boolean? | 1.0.1000 fast busy policy for `WORKSPACE_BUSY` refusals |
 
 Related session-view fields exposed through `PilotSwarmSessionInfo`, `PilotSwarmSessionView`, and orchestration custom status now include:
 
@@ -239,7 +239,7 @@ These execute on the specific worker holding the session's in-memory state.
 | `destroySession` | sessionId | void | Free in-memory CopilotSession |
 | `checkpointSession` | sessionId | void | Upload to blob without destroying |
 
-**Owner routing (orchestration 1.0.86).** A session whose orchestration input
+**Owner routing (orchestration 1.0.1000).** A session whose orchestration input
 has an `ownerTag` (copied at start from its creation config, where the portal
 saves it for a session the dispatcher creates for a user) schedules every
 activity above with that tag instead of its
@@ -256,7 +256,7 @@ no new root. A worker started with `ownerOnly` has the filter
 `{ tags: [ownerTag] }` and runs only these activities of its owner's sessions:
 none of the manager-scoped activities below, and none of Duroxide's untagged
 system activities behind `ctx.utcNow()` and `ctx.newGuid()`, so another
-worker must run those. See the [orchestration design](./orchestration/design.md#owner-routing-and-capacity-requests-1086).
+worker must run those. See the [orchestration design](./orchestration/design.md#owner-routing-and-capacity-requests-101000).
 
 **Turn control.** Next to the lock-bypassing abort primitive, each worker
 runs a `TurnControlHub`: one `LISTEN pilotswarm_turn_control` connection
@@ -292,7 +292,7 @@ These can run on any worker, except a worker started with `ownerOnly`.
 | `recordSessionEvent` | sessionId, events[] | void | Append CMS session events |
 | `getOrchestrationStats` | sessionId | stats | duroxide history size (CAN sizing) |
 | `getWorkerSessionPolicy` | {} | SessionPolicy | Creation-policy gate input |
-| `requestOwnerCapacity` | sessionId, ownerTag | `{ decision, code?, message?, retryAfterMs? }` | Orchestration 1.0.86: asks the worker's capacity requester before a tagged session's turn; tagged `pilotswarm.owner-capacity.v1`, so only a worker with a requester runs it; answers within about 15 s |
+| `requestOwnerCapacity` | sessionId, ownerTag | `{ decision, code?, message?, retryAfterMs? }` | Orchestration 1.0.1000: asks the worker's capacity requester before a tagged session's turn; tagged `pilotswarm.owner-capacity.v1`, so only a worker with a requester runs it; answers within about 15 s |
 | `computeCronAtNextFire` | schedule | timestamp | Next wall-clock cron_at occurrence |
 | `loadKnowledgeIndex` | {} | index | Knowledge/skill retrieval index |
 
@@ -334,7 +334,7 @@ and [Durable workflows](../developer/building/workflow-sessions.md).
 | Tool | Parameters | Behavior |
 |------|-----------|----------|
 | `enable_workflows` | — | **Ends turn.** Turns Workflows on for the session; the next turn starts at once with the Workflow tools. |
-| `workflow_definition` | operation: list \| read \| save \| start \| test \| card, name?, definition_id?, expected_revision?, yaml?, revision?, inputs?, vars?, agent_models?, notify_on_completion?, fixtures?, test_id?, update? | Inline. The session's Workflow Definitions; `start` creates a Workflow session under this one. Not offered inside a Workflow. |
+| `workflow_definition` | operation: list \| read \| save \| start \| test \| card, name?, definition_id?, expected_revision?, yaml?, revision?, inputs?, vars?, agent_models?, decision_models?, notify_on_completion?, fixtures?, test_id?, update? | Inline. The session's Workflow Definitions; `start` creates a Workflow session under this one. Not offered inside a Workflow. |
 | `read_workflow` | workflow_id, run_id?, limit?, cursor?, execution_id?, … | Inline. A Workflow's graph, runs, steps and variables. |
 | `update_workflow` | workflow_id, operation: pause \| resume \| stop \| cancel \| set_vars \| recover, operation_id, reason?, grace_seconds?, set?, delete?, expected_kv_revision? | Inline. Controls one of the session's Workflows. Not offered inside a Workflow. |
 | `send_workflow_input` | workflow_id, contract, payload, operation_id, correlation?, run_id?, ttl_seconds? | Inline. Typed input for a waiting `receive` step. |
@@ -905,7 +905,8 @@ Shared UI surfaces display wall-clock cron as `cron` with the next fire in the c
 | 1.0.83 | — | Frozen, replay-only — the durable workflow intake, `workflow-intake-v1` (v0.8.11) |
 | 1.0.84 | — | Frozen, replay-only — pinned spawn grants and subtree tool ceilings, `tool-composition-v1` (v0.8.12) |
 | 1.0.85 | — | Frozen, replay-only — durable session titles (v0.8.12) |
-| **1.0.86** | — | **Current** — 1.0.85 plus owner routing tags, capacity requests and the fast busy policy (see [orchestration design](./orchestration/design.md)) |
+| 1.0.86 | — | Frozen, replay-only — a spawned child's workspace selection (v0.8.13) |
+| **1.0.1000** | — | **Current** — this fork's own number: 1.0.86 plus owner routing tags, capacity requests and the fast busy policy (see [orchestration design](./orchestration/design.md)) |
 
 **Versioning rule:** Changing yield sequences requires a new version. Existing
 in-flight orchestrations replay against their recorded version; the registry

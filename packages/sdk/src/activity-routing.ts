@@ -16,7 +16,7 @@ export const AGENT_HANDOFF_CAPABILITY = "pilotswarm.agent-handoff.v2";
  *   routed activity keeps the handoff names and tag, as under turn-control-v1.
  * - "tool-composition-v1" (1.0.84+): turns run as runTurnV6/runTurnEpochV6
  *   with TOOL_COMPOSITION_CAPABILITY and keep the intake fields.
- *   An owner-tagged session's turns (1.0.86) carry its owner tag instead.
+ *   An owner-tagged session's turns (1.0.1000) carry its owner tag instead.
  */
 export type ActivityRoutingContract = "agent-handoff-v2" | "turn-control-v1" | "workflow-intake-v1" | "tool-composition-v1";
 export const HANDOFF_ACTIVITY_NAMES = {
@@ -154,7 +154,7 @@ export function registerToolCompositionTurnActivity(runtime: any, name: keyof ty
 }
 
 /**
- * Owner routing (1.0.86): every session-scoped activity of an owner-tagged
+ * Owner routing (1.0.1000): every session-scoped activity of an owner-tagged
  * session carries the owner's tag, `owner.<subject>`, so only that owner's
  * workers run it. duroxide gives an activity one tag, so on the turn (with or
  * without an intake invocation), the spawn's tool capture and the two
@@ -172,7 +172,7 @@ export function routeOwnerActivity(task: any, ownerTag: string): any {
 }
 
 /**
- * Owner routing (1.0.86): the requestOwnerCapacity activity goes only to
+ * Owner routing (1.0.1000): the requestOwnerCapacity activity goes only to
  * workers that have a capacity requester, which declare this tag.
  */
 export const OWNER_CAPACITY_CAPABILITY = "pilotswarm.owner-capacity.v1";

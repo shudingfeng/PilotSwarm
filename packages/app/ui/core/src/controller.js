@@ -1,10 +1,12 @@
 import { applyNativeTaskSnapshot } from "./native-tasks.js";
+import { normalizeWorkflowDecisionCapability } from "./workflow-decision.js";
 import { workflowDefinition, workflowReadModelView, workflowExecutionValueKey, workflowKvApplied, workflowKvRevisionKey, workflowOlderStart, workflowRunHistory, workflowRunRows, workflowShownExecution } from "./workflow-view.js";
+import { workflowVisitValueText } from "./workflow-visit-io.js";
 import {
     normalizeWorkflowInputPolicy, selectWorkflowInputCheck, selectWorkflowInputNote, WORKFLOW_INPUT_CHECKING_TEXT, selectWorkflowViewModal, selectWorkflowViewSelection, workflowInputPolicyApplies,
     workflowViewDefaultNode, workflowViewNodes, workflowViewPanelWidth, workflowViewProjectionFor, workflowViewRunControlFor,
     workflowViewDraftRefusal, workflowViewPublicationRefusal, workflowViewTestRefusal, workflowViewVariablesFor, WORKFLOW_PUBLICATION_KEYS,
-    workflowPublicationChange, workflowPublicationConfirm, workflowPublicationPin, workflowTestChange, workflowTestConfirm, workflowTestPin,
+    workflowPublicationChange, workflowPublicationConfirm, workflowPublicationDecision, workflowPublicationPin, workflowTestChange, workflowTestConfirm, workflowTestPin,
     WORKFLOW_TEST_ANSWER_KINDS, workflowViewTestAnswerRefusal, workflowViewTestClockRefusal, workflowViewExecutionStep,
 } from "./workflow-tui.js";
 import {
@@ -53,7 +55,7 @@ import {
     COLLAPSE_RIGHT_THRESHOLD,
     normalizeFocusRegion,
 } from "./layout.js";
-import { parseTerminalMarkupRuns } from "./formatting.js";
+import { artifactUri, parseTerminalMarkupRuns } from "./formatting.js";
 import {
     selectActiveArtifactLinks,
     selectActiveHttpLinks,
@@ -71,6 +73,8 @@ import {
     selectSessionRows,
     selectSelectedFileBrowserItem,
     selectSteerAction,
+    selectPromptUploadInFlight,
+    COMPOSER_UPLOAD_INTENT_SESSION_ID,
     selectTurnControlView,
     canConvertQueuedItem,
     formatConvertNotice,
@@ -1353,7 +1357,7 @@ export function buildGroupedAgentPickerItems(catalog = [], collapsedKeys = [], g
 }
 
 function buildPromptAttachmentToken(filename) {
-    return `📎 ${String(filename || "").trim()}`;
+    return `📎 ${JSON.stringify(String(filename ?? ""))}`;
 }
 
 function extractPromptReferenceContext(prompt, cursorIndex) {
@@ -1434,17 +1438,103 @@ export const IMAGE_PROMPT_ATTACHMENT_TYPES = new Set(["image/png", "image/jpeg",
 export const IMAGE_PROMPT_ATTACHMENT_MAX_BYTES = 4 * 1024 * 1024;
 export const IMAGE_PROMPT_ATTACHMENT_MAX_COUNT = 4;
 
+const PROMPT_ARTIFACT_UPLOAD_MAX_ATTEMPTS = 10;
+
+function isArtifactAlreadyExistsError(error) {
+    if (error?.code) return error.code === "ARTIFACT_ALREADY_EXISTS";
+    return Number(error?.status ?? error?.statusCode) === 409;
+}
+
+const IMAGE_PROMPT_ATTACHMENT_EXTENSION_TYPES = new Map([
+    [".png", "image/png"],
+    [".jpg", "image/jpeg"],
+    [".jpeg", "image/jpeg"],
+    [".gif", "image/gif"],
+    [".webp", "image/webp"],
+]);
+
+export function classifyPromptImageContentType(file) {
+    const contentType = String(file?.type || "").trim().toLowerCase();
+    if (IMAGE_PROMPT_ATTACHMENT_TYPES.has(contentType)) return contentType;
+    if (contentType) return null;
+    const filename = String(file?.name || "").toLowerCase();
+    for (const [extension, inferredType] of IMAGE_PROMPT_ATTACHMENT_EXTENSION_TYPES) {
+        if (filename.endsWith(extension)) return inferredType;
+    }
+    return null;
+}
+
+function splitPromptArtifactFilename(filename) {
+    const safeName = String(filename || "attachment").replace(/[/\\]/g, "_").trim() || "attachment";
+    const compound = /\.tar\.(?:gz|bz2|xz|zst)$/i.exec(safeName);
+    if (compound) return { stem: safeName.slice(0, -compound[0].length), extension: compound[0] };
+    const dot = safeName.lastIndexOf(".");
+    if (dot <= 0) return { stem: safeName, extension: "" };
+    return { stem: safeName.slice(0, dot), extension: safeName.slice(dot) };
+}
+
+function nextPromptArtifactFilename(filename, usedNames) {
+    const { stem, extension } = splitPromptArtifactFilename(filename);
+    let candidate = `${stem}${extension}`;
+    for (let suffix = 2; usedNames.has(candidate); suffix += 1) {
+        candidate = `${stem} (${suffix})${extension}`;
+    }
+    usedNames.add(candidate);
+    return candidate;
+}
+
+function attachUploadToPromptDraft(draft, upload, sessionId) {
+    const prompt = String(draft?.prompt || "");
+    const attachments = Array.isArray(draft?.attachments) ? draft.attachments.filter(Boolean) : [];
+    const filename = String(upload?.filename ?? "");
+    const token = buildPromptAttachmentToken(filename);
+    const existingAttachmentIndex = attachments.findIndex((attachment) => (
+        attachment?.sessionId === sessionId && attachment?.filename === filename
+    ));
+    const existingToken = existingAttachmentIndex >= 0 ? attachments[existingAttachmentIndex]?.token : null;
+    const insertion = existingAttachmentIndex === -1 || !prompt.includes(existingToken || token)
+        ? insertPromptTextAtCursor(prompt, Number.isFinite(draft?.cursor) ? draft.cursor : prompt.length, `${token} `)
+        : { prompt, cursor: Number.isFinite(draft?.cursor) ? draft.cursor : prompt.length };
+    const nextAttachment = {
+        id: `${sessionId}/${filename}`,
+        sessionId,
+        filename,
+        resolvedPath: upload.resolvedPath || upload.localPath || filename,
+        sizeBytes: upload.sizeBytes,
+        token,
+    };
+    return {
+        prompt: insertion.prompt,
+        cursor: insertion.cursor,
+        attachments: existingAttachmentIndex >= 0
+            ? attachments.map((attachment, index) => (index === existingAttachmentIndex
+                ? { ...attachment, ...nextAttachment }
+                : attachment))
+            : [...attachments, nextAttachment],
+        existingAttachmentIndex,
+        token,
+    };
+}
+
+function sanitizePromptAttachmentLabel(filename) {
+    return String(filename ?? "")
+        .replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/gu, "�")
+        .replace(/\[/gu, "［")
+        .replace(/\]/gu, "］")
+        .replace(/\\/gu, "＼");
+}
+
 function expandPromptAttachments(prompt, attachments = []) {
     const validAttachments = Array.isArray(attachments)
         // Image attachments are model-visible (sent as blob attachments by the
-        // worker) — they inject NO text ref. Only legacy artifact references
-        // still expand into artifact:// pointers.
+        // worker) — they inject NO text ref. Generic artifact attachments
+        // expand into session-qualified artifact:// pointers.
         ? attachments.filter((attachment) => attachment?.sessionId && attachment?.filename && attachment?.kind !== "image")
         : [];
     if (validAttachments.length === 0) return String(prompt || "");
 
     const attachmentRefs = validAttachments.map((attachment) => (
-        `[Attached file: ${attachment.filename} — artifact://${attachment.sessionId}/${attachment.filename}]`
+        `[Attached file: ${sanitizePromptAttachmentLabel(attachment.filename)} — ${artifactUri(attachment.sessionId, attachment.filename)}]`
     ));
     const cleanedPrompt = stripPromptAttachmentTokens(prompt, validAttachments);
     return attachmentRefs.join("\n") + (cleanedPrompt ? `\n\n${cleanedPrompt}` : "");
@@ -1901,6 +1991,104 @@ export class PilotSwarmUiController {
         this.dispatch({ type: "ui/status", text });
     }
 
+    setSessionStatus(sessionId, text) {
+        if (!sessionId) {
+            this.setStatus(text);
+            return;
+        }
+        this.dispatch({ type: "ui/sessionStatus", sessionId, text });
+    }
+
+    beginPromptUpload(sessionId, count, kind = "attachment") {
+        this._promptUploadGeneration = (this._promptUploadGeneration || 0) + 1;
+        const generation = `prompt-upload:${this._promptUploadGeneration}`;
+        this.dispatch({
+            type: "ui/promptUpload",
+            upload: { sessionId, generation, count, kind },
+        });
+        return generation;
+    }
+
+    endPromptUpload(sessionId, generation) {
+        this.dispatch({ type: "ui/promptUpload", sessionId, generation });
+    }
+
+    transferPromptUploads(fromSessionId, toSessionId) {
+        if (!fromSessionId || !toSessionId || fromSessionId === toSessionId) return;
+        const generations = this.getState().ui.promptUploads?.[fromSessionId]?.generations || {};
+        for (const [generation, upload] of Object.entries(generations)) {
+            this.dispatch({ type: "ui/promptUpload", sessionId: fromSessionId, generation });
+            this.dispatch({
+                type: "ui/promptUpload",
+                upload: {
+                    sessionId: toSessionId,
+                    generation,
+                    count: Number(upload?.count) || 0,
+                    kind: upload?.kind || "attachment",
+                },
+            });
+        }
+    }
+
+    isPromptUploadInFlight(sessionId) {
+        return selectPromptUploadInFlight(this.getState(), sessionId || null);
+    }
+
+    hasPromptUploadIntent(sessionId) {
+        return this.isPromptUploadInFlight(sessionId);
+    }
+
+    async reservePromptArtifactFilenames(sessionId, files) {
+        this._knownPromptArtifactNames ||= new Map();
+        this._reservedPromptArtifactNames ||= new Map();
+        const known = this._knownPromptArtifactNames.get(sessionId) || new Set();
+        const reserved = this._reservedPromptArtifactNames.get(sessionId) || new Set();
+        this._knownPromptArtifactNames.set(sessionId, known);
+        this._reservedPromptArtifactNames.set(sessionId, reserved);
+
+        for (const entry of this.getState().files.bySessionId?.[sessionId]?.entries || []) {
+            if (entry?.filename) known.add(String(entry.filename));
+        }
+        if (typeof this.transport.listArtifacts === "function") {
+            try {
+                for (const entry of await this.transport.listArtifacts(sessionId) || []) {
+                    if (entry?.filename) known.add(String(entry.filename));
+                }
+            } catch {
+                // Upload still has server-side error handling; cached names and
+                // in-flight reservations prevent collisions visible to this client.
+            }
+        }
+
+        const used = new Set([...known, ...reserved]);
+        return files.map((file) => {
+            const filename = nextPromptArtifactFilename(file.name, used);
+            reserved.add(filename);
+            return { file, filename };
+        });
+    }
+
+    reserveNextPromptArtifactFilename(sessionId, originalFilename) {
+        this._knownPromptArtifactNames ||= new Map();
+        this._reservedPromptArtifactNames ||= new Map();
+        const known = this._knownPromptArtifactNames.get(sessionId) || new Set();
+        const reserved = this._reservedPromptArtifactNames.get(sessionId) || new Set();
+        this._knownPromptArtifactNames.set(sessionId, known);
+        this._reservedPromptArtifactNames.set(sessionId, reserved);
+        const filename = nextPromptArtifactFilename(originalFilename, new Set([...known, ...reserved]));
+        reserved.add(filename);
+        return filename;
+    }
+
+    releasePromptArtifactFilename(sessionId, filename, { committed = false } = {}) {
+        this._reservedPromptArtifactNames?.get(sessionId)?.delete(filename);
+        if (committed) {
+            const known = this._knownPromptArtifactNames?.get(sessionId) || new Set();
+            known.add(filename);
+            this._knownPromptArtifactNames?.set(sessionId, known);
+        }
+    }
+
     getPromptAttachments() {
         const attachments = this.getState().ui.promptAttachments;
         return Array.isArray(attachments) ? attachments.filter(Boolean) : [];
@@ -1911,6 +2099,7 @@ export class PilotSwarmUiController {
             type: "ui/promptAttachments",
             attachments: Array.isArray(attachments) ? attachments : [],
         });
+        this.updateComposerDefaultDraftOwnership();
     }
 
     getSessionOutbox(sessionId) {
@@ -1968,6 +2157,10 @@ export class PilotSwarmUiController {
 
     enterPendingPromptEdit(sessionId, itemId) {
         if (!sessionId || !itemId) return false;
+        if (this.hasPromptUploadIntent(sessionId)) {
+            this.setSessionStatus(sessionId, "Wait for the attachment upload to finish before editing queued messages");
+            return false;
+        }
         const navigableItems = this.getNavigableOutboxItems(sessionId);
         const item = navigableItems.find((candidate) => candidate.id === itemId);
         if (!item) return false;
@@ -1982,10 +2175,14 @@ export class PilotSwarmUiController {
                 phase: item.phase,
                 draftPrompt: currentUi.prompt,
                 draftCursor: currentUi.promptCursor,
+                draftAttachments: Array.isArray(currentUi.promptAttachments)
+                    ? currentUi.promptAttachments
+                    : [],
             };
 
         this.dispatch({ type: "ui/promptEdit", promptEdit });
         this.setPrompt(item.text, item.text.length);
+        this.setPromptAttachments([]);
         this.setFocus(FOCUS_REGIONS.PROMPT);
         return true;
     }
@@ -1994,17 +2191,29 @@ export class PilotSwarmUiController {
         const promptEdit = this.getState().ui.promptEdit;
         if (!promptEdit) return false;
 
-        this.dispatch({ type: "ui/promptEdit", promptEdit: null });
-        if (restoreDraft) {
-            this.setPrompt(
-                promptEdit.draftPrompt || "",
-                Number.isFinite(promptEdit.draftCursor) ? promptEdit.draftCursor : String(promptEdit.draftPrompt || "").length,
-            );
-        }
+        this.dispatch({
+            type: "ui/promptEdit",
+            promptEdit: null,
+            restoreDraft: restoreDraft
+                ? {
+                    prompt: promptEdit.draftPrompt || "",
+                    promptCursor: Number.isFinite(promptEdit.draftCursor)
+                        ? promptEdit.draftCursor
+                        : String(promptEdit.draftPrompt || "").length,
+                    attachments: Array.isArray(promptEdit.draftAttachments)
+                        ? promptEdit.draftAttachments
+                        : [],
+                }
+                : null,
+        });
         return true;
     }
 
     selectPreviousPendingPrompt(sessionId = this.getState().sessions.activeSessionId) {
+        if (this.hasPromptUploadIntent(sessionId)) {
+            this.setSessionStatus(sessionId, "Wait for the attachment upload to finish before editing queued messages");
+            return false;
+        }
         const navigableItems = this.getNavigableOutboxItems(sessionId);
         if (navigableItems.length === 0) return false;
 
@@ -2019,6 +2228,10 @@ export class PilotSwarmUiController {
     }
 
     selectNextPendingPrompt(sessionId = this.getState().sessions.activeSessionId) {
+        if (this.hasPromptUploadIntent(sessionId)) {
+            this.setSessionStatus(sessionId, "Wait for the attachment upload to finish before editing queued messages");
+            return false;
+        }
         const navigableItems = this.getNavigableOutboxItems(sessionId);
         const promptEdit = this.getPromptEditSessionMatch(sessionId);
         if (!promptEdit) return false;
@@ -2156,15 +2369,23 @@ export class PilotSwarmUiController {
      * Client-side pre-validation only — the API edge re-validates on send.
      * Returns { accepted, rejected: [{name, reason}] } for UI feedback.
      */
-    addPendingImageFiles(files) {
+    addPendingImageFiles(files, { suppressStatus = false, sessionId = null } = {}) {
+        const sourceSessionId = sessionId || this.getPromptDraftSessionId();
+        if (this.getState().ui.promptEdit) {
+            this.setSessionStatus(
+                sourceSessionId,
+                "Finish editing the selected queued message before attaching files",
+            );
+            return { accepted: 0, rejected: [] };
+        }
         const incoming = Array.from(files || []).filter(Boolean);
         const current = this.getPromptAttachments();
         const existingImages = current.filter((a) => a?.kind === "image");
         const accepted = [];
         const rejected = [];
         for (const file of incoming) {
-            const contentType = String(file.type || "").toLowerCase();
-            if (!IMAGE_PROMPT_ATTACHMENT_TYPES.has(contentType)) {
+            const contentType = classifyPromptImageContentType(file);
+            if (!contentType) {
                 rejected.push({ name: file.name || "image", reason: "unsupported type" });
                 continue;
             }
@@ -2187,11 +2408,11 @@ export class PilotSwarmUiController {
         if (accepted.length > 0) {
             this.setPromptAttachments([...current, ...accepted]);
         }
-        if (rejected.length > 0) {
-            this.dispatch({
-                type: "ui/status",
-                text: `Skipped ${rejected.map((r) => `${r.name} (${r.reason})`).join(", ")}`,
-            });
+        if (rejected.length > 0 && !suppressStatus) {
+            this.setSessionStatus(
+                sourceSessionId,
+                `Skipped ${rejected.map((r) => `${r.name} (${r.reason})`).join(", ")}`,
+            );
         }
         return { accepted: accepted.length, rejected };
     }
@@ -2227,6 +2448,14 @@ export class PilotSwarmUiController {
      * upload it as a session artifact, and stage it on the next message.
      */
     async pasteImageFromClipboard() {
+        const sourceSessionId = this.getPromptDraftSessionId();
+        if (this.getState().ui.promptEdit) {
+            this.setSessionStatus(
+                sourceSessionId,
+                "Finish editing the selected queued message before attaching files",
+            );
+            return false;
+        }
         if (typeof this.transport.captureClipboardImage !== "function"
             || typeof this.transport.uploadArtifactFromPath !== "function") {
             this.dispatch({ type: "ui/status", text: "Clipboard image paste is not supported by this transport" });
@@ -2761,17 +2990,27 @@ export class PilotSwarmUiController {
      * Review SF-D5: whether the server says workflow test mode is on (its workflow capabilities' `testMode: true`),
      * kept as state.ui.workflowTestMode; a missing, older or failed answer is off. Never throws.
      */
-    async readWorkflowTestMode() {
+    /**
+     * Read the server's Workflow support. `fresh`: read it from the server again (after an admin change), where a
+     * transport can; otherwise its start-time copy. A fresh read that fails keeps test mode as it is and closes Decision.
+     */
+    async readWorkflowTestMode({ fresh = false } = {}) {
         let on = false;
+        let decision = normalizeWorkflowDecisionCapability(null);
+        const refresh = fresh && typeof this.transport.refreshWorkflowCapabilities === "function";
         // Workflows are always on (owner 2026-11-08T08:03Z): the capabilities' `enabled` is not read.
         try {
-            const capabilities = typeof this.transport.getWorkflowCapabilities === "function"
-                ? await this.transport.getWorkflowCapabilities() : null;
+            const capabilities = refresh
+                ? await this.transport.refreshWorkflowCapabilities()
+                : typeof this.transport.getWorkflowCapabilities === "function"
+                    ? await this.transport.getWorkflowCapabilities() : null;
             on = capabilities?.testMode === true;
+            decision = normalizeWorkflowDecisionCapability(capabilities?.workflows?.decision ?? capabilities?.decision);
         } catch {
-            on = false;
+            on = refresh ? this.getState().ui?.workflowTestMode === true : false;
         }
         this.dispatch({ type: "ui/workflowTestMode", on });
+        this.dispatch({ type: "ui/workflowDecision", decision });
     }
 
     async start({ initialSessionId = null } = {}) {
@@ -2891,6 +3130,8 @@ export class PilotSwarmUiController {
             this.activeSessionDetailTimer = null;
             this.activeSessionDetailSessionId = null;
         }
+        this._knownPromptArtifactNames?.delete(sessionId);
+        this._reservedPromptArtifactNames?.delete(sessionId);
         this.dispatch({ type: "sessions/gone", sessionId });
     }
 
@@ -3784,15 +4025,19 @@ export class PilotSwarmUiController {
         }
         this.dispatch({ type: "admin/modelProviders/loading" });
         try {
-            const [providerResult, modelResult, defaults, modelTypeResult] = await Promise.all([
+            const [providerResult, modelResult, defaults, modelTypeResult, decisionModels] = await Promise.all([
                 this.transport.listProviders(),
                 typeof this.transport.listModels === "function"
                     ? this.transport.listModels()
                     : this.transport.getModelsByProvider(),
+                // A defaults read that fails fails the load: the screen keeps its last defaults and shows the error, so a
+                // cycle never starts from an empty value. The server reports a Decision default problem inside the answer.
                 this.transport.getModelDefaults(),
                 typeof this.transport.getModelsByProvider === "function"
                     ? this.transport.getModelsByProvider()
                     : null,
+                typeof this.transport.listRuntimeDecisionModels === "function"
+                    ? Promise.resolve(this.transport.listRuntimeDecisionModels()).catch(() => []) : [],
             ]);
             const flattenModels = (result) => Array.isArray(result)
                 && result.some((entry) => Array.isArray(entry?.models))
@@ -3814,9 +4059,12 @@ export class PilotSwarmUiController {
                 providers,
                 models: Array.isArray(models) ? models : [],
                 runtimeModels: Array.isArray(runtimeModels) ? runtimeModels : null,
+                decisionModels: Array.isArray(decisionModels) ? decisionModels : [],
                 defaults,
             });
-            return { providers, models, runtimeModels, defaults };
+            return {
+                providers, models, runtimeModels, defaults, decisionModels: Array.isArray(decisionModels) ? decisionModels : [],
+            };
         } catch (error) {
             this.dispatch({ type: "admin/modelProviders/loadFailed", error: error?.message || String(error) });
             return null;
@@ -3838,6 +4086,8 @@ export class PilotSwarmUiController {
             const result = await run();
             this.dispatch({ type: "admin/modelProviders/mutationDone" });
             await this.refreshAdminModelProviders();
+            // A provider or default change can open or close Decision authoring: read it from the server, not the page's start.
+            await this.readWorkflowTestMode({ fresh: true });
             return { ok: true, result: result ?? null, error: null };
         } catch (error) {
             const message = error?.message || String(error);
@@ -4132,12 +4382,23 @@ export class PilotSwarmUiController {
     }
 
     async cycleAdminModelDefault(scope, { restartDisposition = null } = {}) {
+        // The defaults were never read: a cycle would start from an empty value and overwrite the real one.
+        if (!this.getState().admin?.modelProviders?.defaults) {
+            const error = "The model defaults could not be read. Reload them before changing a default.";
+            this.dispatch({ type: "admin/modelProviders/mutationFailed", error });
+            return { ok: false, result: null, error };
+        }
         const providers = selectAdminConsole(this.getState()).modelProviders;
         const choices = scope === "user" ? providers.userChoices
-            : scope === "cluster" ? providers.clusterChoices : providers.systemChoices;
+            : scope === "cluster" ? providers.clusterChoices
+                : scope === "cluster_decision" ? providers.decisionChoices : providers.systemChoices;
         const current = scope === "user" ? providers.mySessionDefault?.configured?.model
             : scope === "cluster" ? providers.clusterSessionDefault?.configured?.model
-                : providers.systemSessionDefault?.configured?.model;
+                : scope === "cluster_decision" ? providers.clusterDecisionDefault?.configured?.model
+                    : providers.systemSessionDefault?.configured?.model;
+        if (scope === "cluster_decision" && current && choices.length === 0) {
+            return this.setAdminModelDefault(scope, null);
+        }
         const values = [null, ...choices];
         const index = Math.max(0, values.findIndex((choice) => choice?.qualifiedName === current));
         const next = values[(index + 1) % values.length];
@@ -6876,7 +7137,7 @@ export class PilotSwarmUiController {
         if (!sessionId || typeof this.transport?.readWorkflow !== "function") return;
         const state = this.getState();
         const session = state.sessions.byId[sessionId];
-        if (session?.sessionKind !== "workflow") return;
+        if (session && session.sessionKind !== "workflow") return;
         if (!this.workflowReadModels) this.workflowReadModels = new Map();
         const entry = this.workflowReadModels.get(sessionId) || { generation: 0, inFlight: null, again: false, forceAgain: false };
         this.workflowReadModels.set(sessionId, entry);
@@ -6899,8 +7160,10 @@ export class PilotSwarmUiController {
             entry.inFlight = null;
             const now = this.getState();
             const current = now.ui.workflowViews?.[sessionId] || {};
+            const session = now.sessions.byId[sessionId];
+            const retained = !session;
             const own = generation === entry.generation
-                && now.sessions.byId[sessionId]?.sessionKind === "workflow"
+                && (session?.sessionKind === "workflow" || retained)
                 && (current.selectedRunId ?? null) === identity.runId;
             if (own && outcome.error) {
                 // Review UI3-F2: a failed read records its attempt and when it failed; the model it keeps is as fresh as the
@@ -6919,7 +7182,8 @@ export class PilotSwarmUiController {
                     : { readModel, readModelRunId: identity.runId, readModelAfterSeq: identity.afterSeq, readModelAttempt: identity,
                         readModelAt: identity.sessionUpdatedAt, readModelError: null, readModelFailedAt: null, readModelUnavailable: false } });
             }
-            const again = entry.again || !own;
+            const identityChanged = !workflowReadAttemptCurrent(current.readModelAttempt, this.workflowReadIdentity(sessionId));
+            const again = entry.again || (!own && identityChanged);
             const forceAgain = entry.forceAgain;
             entry.again = false;
             entry.forceAgain = false;
@@ -6959,10 +7223,10 @@ export class PilotSwarmUiController {
      * Workflow: one kept read of a workflow, as the definition revisions, a run's variables and an execution's whole
      * value are read: `{ ...identity, phase, [field], error }` under `key` of the view's `slot` (the `cap` newest kept),
      * loading, then the value `accept` takes from the answer (it throws for an answer that is not the one asked for), or
-     * the failure as `describe` words it. Returns { ok, entry } or { ok: false, reason: "failed", error, entry }. Reading
-     * changes nothing. Never throws.
+     * the failure as `describe` words it, and with it what `more` takes from the same answer (fields of its own). Returns
+     * { ok, entry } or { ok: false, reason: "failed", error, entry }. Reading changes nothing. Never throws.
      */
-    async _readWorkflowKept(sessionId, { slot, key, cap, identity = {}, field, options, accept, describe }) {
+    async _readWorkflowKept(sessionId, { slot, key, cap, identity = {}, field, options, accept, describe, more = null }) {
         const write = entry => {
             const reads = { ...(this.getState().ui.workflowViews?.[sessionId]?.[slot] ?? {}) };
             delete reads[key];
@@ -6975,8 +7239,9 @@ export class PilotSwarmUiController {
         };
         write({ phase: "loading", [field]: null, error: null });
         try {
-            const value = accept(await this.transport.readWorkflow(sessionId, options));
-            return { ok: true, entry: write({ phase: "loaded", [field]: value, error: null }) };
+            const answer = await this.transport.readWorkflow(sessionId, options);
+            const value = accept(answer);
+            return { ok: true, entry: write({ phase: "loaded", [field]: value, ...(more ? more(answer) : {}), error: null }) };
         } catch (error) {
             return { ok: false, reason: "failed", error, entry: write({ phase: "failed", [field]: null, error: describe(error) }) };
         }
@@ -7239,7 +7504,8 @@ export class PilotSwarmUiController {
     }
 
     /**
-     * Workflow: read one execution's whole output or error (readWorkflow with its run and execution id: design 04
+     * Workflow: read one execution's whole output or error, and its whole input (`input`, beside `result`: owner
+     * 2026-11-20, a visit's input in its details), (readWorkflow with its run and execution id: design 04
      * read_workflow; mock M10 "Inspect typed output"; D07, at most 256 KiB) into the view's `executionValues`, by run
      * and execution (workflowExecutionValueKey; the four read last are kept). It is read for exactly that run, never
      * the live run in its place, and an answer for another execution or run is refused. A failure is recorded with its
@@ -7261,7 +7527,9 @@ export class PilotSwarmUiController {
                     throw new Error(`The read did not answer with execution ${executionId} of run ${runId}.`);
                 }
                 return execution.result && typeof execution.result === "object" ? execution.result : null;
-            } });
+            },
+            more: read => ({ input: read.execution.input && typeof read.execution.input === "object" && !Array.isArray(read.execution.input)
+                ? read.execution.input : null }) });
         return result;
     }
 
@@ -7883,13 +8151,17 @@ export class PilotSwarmUiController {
         const state = this.getState();
         const selection = selectWorkflowViewSelection(state);
         if (!selection) return;
-        const refusal = workflowViewPublicationRefusal(selection);
+        const refusal = workflowViewPublicationRefusal(selection, state.ui.workflowDecision);
         if (refusal) {
             this.dispatch({ type: "ui/status", text: refusal });
             return;
         }
         const publication = selection.projection.publication;
-        this.dispatch({ type: "ui/modal", modal: { type: "workflowPublish", sessionId: selection.modal.sessionId, pin: workflowPublicationPin(publication),
+        const pin = workflowPublicationPin(publication);
+        const decision = workflowPublicationDecision(selection.projection, state.ui.workflowDecision, null,
+            { revision: pin?.revision ?? null });
+        this.dispatch({ type: "ui/modal", modal: { type: "workflowPublish", sessionId: selection.modal.sessionId, pin,
+            decisionSelection: decision.selection, decisionBindings: decision.bindings,
             field: "inputs", inputs: "{}", inputsCursor: 2, vars: "", varsCursor: 0, error: null,
             returnModal: selection.modal, previousFocus: state.ui.focusRegion } });
         // The Start form (UI-4): no publish-only action.
@@ -7971,7 +8243,8 @@ export class PilotSwarmUiController {
             this.dispatch({ type: "ui/status", text: error });
             return { ok: false, reason: "invalid" };
         };
-        const publication = workflowViewProjectionFor(state, modal.sessionId).publication;
+        const projection = workflowViewProjectionFor(state, modal.sessionId);
+        const publication = projection.publication;
         const change = workflowPublicationChange(modal.pin, publication);
         if (change) return refuse(change);
         const pin = modal.pin;
@@ -7981,6 +8254,10 @@ export class PilotSwarmUiController {
         const label = "Start";
         const control = publication.controls.find(item => item.operation === operation) ?? null;
         if (!control) return refuse(`${label} is not offered here.${publication.note ? ` ${publication.note}` : ""}`);
+        const decision = workflowPublicationDecision(projection, state.ui.workflowDecision, modal.decisionSelection ?? null,
+            { revision: pin.revision });
+        this.updateWorkflowPublicationReview({ decisionSelection: decision.selection, decisionBindings: decision.bindings });
+        if (!decision.available) return refuse(`Start refused: ${decision.reason}`);
         if (!control.enabled) return refuse(`${label} is not available now. ${control.title}`);
         let run = {};
         if (operation !== "publish") {
@@ -7988,12 +8265,16 @@ export class PilotSwarmUiController {
             const vars = workflowJsonObjectDraft(modal.vars, { label: "Initial variables", optional: true });
             const refused = !inputs.ok ? inputs : !vars.ok ? vars : null;
             if (refused) return refuse(refused.error);
-            run = { inputs: inputs.value, ...(vars.value !== undefined ? { vars: vars.value } : {}) };
+            run = {
+                inputs: inputs.value,
+                ...(vars.value !== undefined ? { vars: vars.value } : {}),
+                ...(Object.keys(decision.bindings).length ? { agentModels: decision.bindings } : {}),
+            };
         }
         const args = operation === "start" ? { definitionHash: pin.definitionHash, ...run }
             : { expectedRevision: pin.revision, definitionHash: pin.definitionHash, ...run };
         if (!workflowRunCommandArgs(operation, args).ok) return refuse("The revision or its definition hash is not known; read the workflow again.");
-        this.updateWorkflowPublicationReview({ error: null });
+        this.updateWorkflowPublicationReview({ decisionSelection: decision.selection, decisionBindings: decision.bindings, error: null });
         this.dispatch({ type: "ui/modal", modal: { type: "confirm", ...workflowPublicationConfirm(operation, pin, publication, args),
             action: "workflowRunCommand", workflowRunCommand: { sessionId: modal.sessionId, operation, runId: null, ...args },
             returnModal: this.getState().ui.modal, previousFocus: state.ui.focusRegion } });
@@ -8005,7 +8286,8 @@ export class PilotSwarmUiController {
         const state = this.getState();
         const modal = state.ui.modal;
         if (!modal || modal.type !== "workflowPublish") return;
-        const publication = workflowViewProjectionFor(state, modal.sessionId).publication;
+        const projection = workflowViewProjectionFor(state, modal.sessionId);
+        const publication = projection.publication;
         if (!workflowPublicationChange(modal.pin, publication)) {
             this.dispatch({ type: "ui/status", text: "This review already shows the workflow as it is now" });
             return;
@@ -8015,8 +8297,12 @@ export class PilotSwarmUiController {
             this.dispatch({ type: "ui/status", text: "The workflow can no longer be started here" });
             return;
         }
-        this.updateWorkflowPublicationReview({ pin, error: null });
-        this.dispatch({ type: "ui/status", text: `Reviewing revision ${pin.revision ?? "not known"} as it is now` });
+        const decision = workflowPublicationDecision(projection, state.ui.workflowDecision, modal.decisionSelection ?? null,
+            { revision: pin.revision });
+        this.updateWorkflowPublicationReview({ pin, decisionSelection: decision.selection, decisionBindings: decision.bindings, error: null });
+        this.dispatch({ type: "ui/status", text: decision.available
+            ? `Reviewing revision ${pin.revision ?? "not known"} as it is now`
+            : `Start refused: ${decision.reason}` });
     }
 
     /**
@@ -8465,12 +8751,15 @@ export class PilotSwarmUiController {
 
     /**
      * Stage 2.1b (Q10): a person starts a new Workflow from a revision of a session's definition; Run again (`runAgainOf`)
-     * starts the revision of the Workflow it repeats. { ok, receipt: { workflowId, revision, … } } or a failure as
+     * starts the revision of the Workflow it repeats. A new run may carry eligible per-node model overrides. { ok, receipt:
+     * { workflowId, revision, … } } or a failure as
      * saveSessionWorkflowDefinition's. The new Workflow's row is read at once. Never throws.
      */
-    async startSessionWorkflowDefinition(ownerId, { definitionId, revision = null, runAgainOf = null, inputs = {}, vars = null } = {}) {
+    async startSessionWorkflowDefinition(ownerId, { definitionId, revision = null, runAgainOf = null, inputs = {}, vars = null,
+        agentModels = null, decisionModels = null } = {}) {
         const request = { definitionId, revision: Number.isSafeInteger(revision) ? revision : null, runAgainOf: runAgainOf ?? null,
-            inputs: inputs ?? {}, vars: vars ?? null };
+            inputs: inputs ?? {}, vars: vars ?? null,
+            ...(agentModels ? { agentModels } : {}), ...(decisionModels ? { decisionModels } : {}) };
         const result = await this._sendSessionDefinitionOperation("start", ownerId, request,
             operationId => this.transport.startSessionWorkflowDefinition(ownerId, { ...request, operationId }));
         if (result.ok) {
@@ -9177,6 +9466,13 @@ export class PilotSwarmUiController {
         this.sessionRefreshSeq = (this.sessionRefreshSeq || 0) + 1;
         if (this.getState().ui.promptEdit) this.exitPendingPromptEdit({ restoreDraft: true });
         this.dispatch({ type: "sessions/selected", sessionId });
+        if (options.initialPromptDraft) {
+            this.dispatch({
+                type: "ui/promptDraft",
+                sessionId,
+                ...options.initialPromptDraft,
+            });
+        }
         this.dispatch({ type: "ui/sequenceExpandedTurns", turns: [] });
         this.dispatch({ type: "ui/sequenceSelectedTurn", turn: null });
         this.dispatch({ type: "sessions/navigationIntent", sessionId });
@@ -10637,7 +10933,8 @@ export class PilotSwarmUiController {
 
     /**
      * The TUI's workflow view: f reads the whole output or error of the visit whose result the details show (the one
-     * chosen with [ ], else the latest), for exactly the shown run (loadWorkflowExecutionValue).
+     * chosen with [ ], else the latest), and its whole input, for exactly the shown run (loadWorkflowExecutionValue). A
+     * visit still running has no value yet; its input is read when its line was cut short.
      */
     async loadWorkflowViewExecutionValue() {
         const selection = selectWorkflowViewSelection(this.getState());
@@ -10651,7 +10948,7 @@ export class PilotSwarmUiController {
                 : "This node has no visit whose value can be read" });
             return;
         }
-        if (execution.status === "pending") {
+        if (execution.status === "pending" && workflowVisitValueText(execution.inputPreview)?.truncated !== true) {
             this.dispatch({ type: "ui/status", text: "This visit has not ended; it has no value yet" });
             return;
         }
@@ -10872,6 +11169,145 @@ export class PilotSwarmUiController {
         this.setArtifactUploadValue(modal.value || "", kind === "start" ? 0 : String(modal.value || "").length);
     }
 
+    captureComposerDraftOwnership() {
+        const state = this.getState();
+        return {
+            activeSessionId: state.sessions.activeSessionId || null,
+            selectionRevision: Number(state.sessions.selectionRevision) || 0,
+            draft: {
+                prompt: String(state.ui.prompt || ""),
+                promptCursor: state.ui.promptCursor,
+                attachments: this.getPromptAttachments(),
+            },
+        };
+    }
+
+    updateComposerDefaultDraftOwnership() {
+        if (!this._composerDefaultDraftOwnership) return;
+        const state = this.getState();
+        if ((Number(state.sessions.selectionRevision) || 0)
+            !== this._composerDefaultDraftOwnership.selectionRevision) {
+            this._composerDefaultDraftOwnership.departed = true;
+        }
+        if (this._composerDefaultDraftOwnership.departed || state.sessions.activeSessionId) return;
+        this._composerDefaultDraftOwnership.draft = {
+            prompt: String(state.ui.prompt || ""),
+            promptCursor: state.ui.promptCursor,
+            attachments: this.getPromptAttachments(),
+        };
+    }
+
+    resolveComposerDraftOwnership(ownership) {
+        const state = this.getState();
+        const unchanged = (state.sessions.activeSessionId || null) === ownership.activeSessionId
+            && (Number(state.sessions.selectionRevision) || 0) === ownership.selectionRevision;
+        if (!unchanged) return ownership.draft;
+        return {
+            prompt: String(state.ui.prompt || ""),
+            promptCursor: state.ui.promptCursor,
+            attachments: this.getPromptAttachments(),
+        };
+    }
+
+    resolvePromptDraftForSession(sessionId, ownership) {
+        const state = this.getState();
+        if (state.sessions.activeSessionId === sessionId) {
+            return {
+                prompt: String(state.ui.prompt || ""),
+                promptCursor: state.ui.promptCursor,
+                attachments: this.getPromptAttachments(),
+            };
+        }
+        const stored = state.ui.promptDraftBySession?.[sessionId];
+        if (stored) {
+            return {
+                prompt: String(stored.prompt || ""),
+                promptCursor: stored.promptCursor,
+                attachments: Array.isArray(stored.attachments) ? stored.attachments.filter(Boolean) : [],
+            };
+        }
+        return ownership.draft;
+    }
+
+    clearSentPromptDraft(sessionId, sentDraft) {
+        const state = this.getState();
+        const sentAttachments = new Set(sentDraft.attachments || []);
+        if (state.sessions.activeSessionId === sessionId) {
+            if (state.ui.prompt === sentDraft.prompt) this.setPrompt("", 0);
+            this.setPromptAttachments(this.getPromptAttachments()
+                .filter((attachment) => !sentAttachments.has(attachment)));
+            return;
+        }
+        const stored = state.ui.promptDraftBySession?.[sessionId];
+        if (!stored) return;
+        this.dispatch({
+            type: "ui/promptDraft",
+            sessionId,
+            prompt: stored.prompt === sentDraft.prompt ? "" : stored.prompt,
+            promptCursor: stored.prompt === sentDraft.prompt ? 0 : stored.promptCursor,
+            attachments: (stored.attachments || [])
+                .filter((attachment) => !sentAttachments.has(attachment)),
+        });
+    }
+
+    restorePromptDraft(sessionId, draft) {
+        const state = this.getState();
+        const current = state.sessions.activeSessionId === sessionId
+            ? {
+                prompt: state.ui.prompt,
+                promptCursor: state.ui.promptCursor,
+                attachments: this.getPromptAttachments(),
+            }
+            : state.ui.promptDraftBySession?.[sessionId];
+        if (current?.prompt || current?.attachments?.length) return;
+        this.dispatch({
+            type: "ui/promptDraft",
+            sessionId,
+            prompt: draft.prompt,
+            promptCursor: draft.promptCursor,
+            attachments: draft.attachments,
+        });
+    }
+
+    async ensureComposerDefaultSessionId() {
+        const activeSessionId = this.getState().sessions.activeSessionId;
+        if (activeSessionId) return activeSessionId;
+
+        if (!this._composerDefaultSessionPromise) {
+            const ownership = this.captureComposerDraftOwnership();
+            this._composerDefaultDraftOwnership = ownership;
+            this.dispatch({ type: "ui/status", text: "Creating a session..." });
+            this._composerDefaultSessionPromise = (async () => {
+                try {
+                    const requestOptions = this.applyActiveGroupDefault({});
+                    const created = await this.transport.createSession(requestOptions);
+                    if (!created?.sessionId) throw new Error("Could not create a session");
+                    this._composerDefaultTargetSessionId = created.sessionId;
+                    // Attach may join a Send-initiated create after Send is
+                    // already awaiting this promise. Move the synchronous
+                    // no-session gate before the promise can resolve so every
+                    // waiter observes it on the created target.
+                    this.transferPromptUploads(COMPOSER_UPLOAD_INTENT_SESSION_ID, created.sessionId);
+                    await this.placeCreatedSessionInGroup(created, requestOptions.groupId ?? null);
+                    const initialPromptDraft = this.resolveComposerDraftOwnership(ownership);
+                    await this.openCreatedSession(created, {
+                        ...requestOptions,
+                        initialPromptDraft,
+                    });
+                    return created.sessionId;
+                } catch (error) {
+                    this.dispatch({ type: "ui/status", text: error?.message || String(error) || "Failed to create session" });
+                    throw error;
+                } finally {
+                    this._composerDefaultSessionPromise = null;
+                    this._composerDefaultDraftOwnership = null;
+                    this._composerDefaultTargetSessionId = null;
+                }
+            })();
+        }
+        return this._composerDefaultSessionPromise;
+    }
+
     async ensurePromptAttachmentSessionId() {
         const existingAttachmentSessionId = this.getPromptAttachments()[0]?.sessionId || null;
         if (existingAttachmentSessionId) {
@@ -10881,12 +11317,7 @@ export class PilotSwarmUiController {
             return existingAttachmentSessionId;
         }
 
-        const activeSessionId = this.getState().sessions.activeSessionId;
-        if (activeSessionId) return activeSessionId;
-
-        const created = await this.createSession({});
-        if (!created?.sessionId) throw new Error("Create a session before attaching files");
-        return created.sessionId;
+        return this.ensureComposerDefaultSessionId();
     }
 
     /**
@@ -11098,6 +11529,7 @@ export class PilotSwarmUiController {
         if (!resolvedSessionId || !upload?.filename) {
             throw new Error("Upload did not return a session id and filename");
         }
+        if (this.getState().sessions.goneIds?.includes(resolvedSessionId)) return null;
 
         if (this.getState().sessions.activeSessionId !== resolvedSessionId) {
             await this.loadSession(resolvedSessionId);
@@ -11124,78 +11556,81 @@ export class PilotSwarmUiController {
         };
     }
 
-    async applyUploadedPromptAttachment(upload, { sessionId = null, suppressStatus = false } = {}) {
+    async applyUploadedPromptAttachment(upload, {
+        sessionId = null,
+        suppressStatus = false,
+        activateSession = true,
+    } = {}) {
         const resolvedSessionId = sessionId || upload?.sessionId || await this.ensurePromptAttachmentSessionId();
         if (!resolvedSessionId || !upload?.filename) {
             throw new Error("Upload did not return a session id and filename");
         }
 
-        const token = buildPromptAttachmentToken(upload.filename);
-        const currentPrompt = this.getState().ui.prompt;
-        const currentCursor = this.getState().ui.promptCursor;
-        const previousAttachments = this.getPromptAttachments();
-        const existingAttachmentIndex = previousAttachments.findIndex((attachment) => (
-            attachment?.sessionId === resolvedSessionId
-            && attachment?.filename === upload.filename
-        ));
-
-        if (this.getState().sessions.activeSessionId !== resolvedSessionId) {
+        if (activateSession && this.getState().sessions.activeSessionId !== resolvedSessionId) {
             await this.loadSession(resolvedSessionId);
         }
 
-        if (existingAttachmentIndex === -1 || !currentPrompt.includes(previousAttachments[existingAttachmentIndex]?.token || token)) {
-            const insertion = insertPromptTextAtCursor(currentPrompt, currentCursor, `${token} `);
-            this.setPrompt(insertion.prompt, insertion.cursor);
-        }
-
-        const nextAttachments = existingAttachmentIndex >= 0
-            ? previousAttachments.map((attachment, index) => (index === existingAttachmentIndex
-                ? {
-                    ...attachment,
-                    sessionId: resolvedSessionId,
-                    filename: upload.filename,
-                    resolvedPath: upload.resolvedPath || upload.localPath || upload.filename,
-                    sizeBytes: upload.sizeBytes,
-                    token,
-                }
-                : attachment))
-            : [
-                ...previousAttachments,
-                {
-                    id: `${resolvedSessionId}/${upload.filename}`,
-                    sessionId: resolvedSessionId,
-                    filename: upload.filename,
-                    resolvedPath: upload.resolvedPath || upload.localPath || upload.filename,
-                    sizeBytes: upload.sizeBytes,
-                    token,
+        const state = this.getState();
+        const active = state.sessions.activeSessionId === resolvedSessionId;
+        const promptEdit = active ? this.getPromptEditSessionMatch(resolvedSessionId) : null;
+        const storedDraft = state.ui.promptDraftBySession?.[resolvedSessionId] || null;
+        const nextDraft = attachUploadToPromptDraft({
+            prompt: promptEdit
+                ? promptEdit.draftPrompt
+                : active ? state.ui.prompt : storedDraft?.prompt,
+            cursor: promptEdit
+                ? promptEdit.draftCursor
+                : active ? state.ui.promptCursor : storedDraft?.promptCursor,
+            attachments: promptEdit
+                ? promptEdit.draftAttachments
+                : active ? this.getPromptAttachments() : storedDraft?.attachments,
+        }, upload, resolvedSessionId);
+        if (promptEdit) {
+            this.dispatch({
+                type: "ui/promptEdit",
+                promptEdit: {
+                    ...promptEdit,
+                    draftPrompt: nextDraft.prompt,
+                    draftCursor: nextDraft.cursor,
+                    draftAttachments: nextDraft.attachments,
                 },
-            ];
-        this.setPromptAttachments(nextAttachments);
+            });
+        } else {
+            this.dispatch({
+                type: "ui/promptDraft",
+                sessionId: resolvedSessionId,
+                prompt: nextDraft.prompt,
+                promptCursor: nextDraft.cursor,
+                attachments: nextDraft.attachments,
+            });
+        }
 
         await this.ensureFilesForSession(resolvedSessionId, { force: true }).catch(() => null);
-        this.dispatch({
-            type: "files/select",
-            sessionId: resolvedSessionId,
-            filename: upload.filename,
-        });
-        if (this.getState().ui.inspectorTab === "files") {
-            await this.ensureFilePreview(resolvedSessionId, upload.filename, { force: true }).catch(() => null);
+        if (active) {
+            this.dispatch({
+                type: "files/select",
+                sessionId: resolvedSessionId,
+                filename: upload.filename,
+            });
+            if (this.getState().ui.inspectorTab === "files") {
+                await this.ensureFilePreview(resolvedSessionId, upload.filename, { force: true }).catch(() => null);
+            }
+            this.setFocus(FOCUS_REGIONS.PROMPT);
         }
 
-        this.setFocus(FOCUS_REGIONS.PROMPT);
         if (!suppressStatus) {
-            this.dispatch({
-                type: "ui/status",
-                text: existingAttachmentIndex >= 0
+            this.setSessionStatus(
+                resolvedSessionId,
+                nextDraft.existingAttachmentIndex >= 0
                     ? `Re-attached ${upload.filename}`
                     : `Attached ${upload.filename}`,
-            });
+            );
         }
 
         return {
             sessionId: resolvedSessionId,
-            existingAttachmentIndex,
-            token,
+            existingAttachmentIndex: nextDraft.existingAttachmentIndex,
+            token: nextDraft.token,
         };
     }
 
@@ -11254,8 +11689,201 @@ export class PilotSwarmUiController {
         return uploads;
     }
 
-    async uploadPromptAttachmentFiles(files = []) {
-        return this.uploadArtifactFiles(files);
+    async uploadPromptAttachmentFiles(files = [], { rejectedImages = [] } = {}) {
+        const fileList = Array.isArray(files)
+            ? files.filter((file) => file && typeof file.name === "string")
+            : [];
+        if (fileList.length === 0) {
+            this.dispatch({ type: "ui/status", text: "No files selected" });
+            return [];
+        }
+        if (typeof this.transport.uploadPromptArtifactFromFile !== "function") {
+            this.dispatch({ type: "ui/status", text: "Collision-safe composer file uploads are not supported by this transport" });
+            return [];
+        }
+
+        const entryState = this.getState();
+        const entrySessionId = this.getPromptDraftSessionId();
+        if (entrySessionId && this.getPromptEditSessionMatch(entrySessionId)) {
+            this.setSessionStatus(
+                entrySessionId,
+                "Finish editing the selected queued message before attaching files",
+            );
+            return [];
+        }
+
+        // This is deliberately synchronous and precedes every await. A send or
+        // queued-message edit racing first-session creation must see the intent.
+        let intentSessionId = entrySessionId
+            || this._composerDefaultTargetSessionId
+            || COMPOSER_UPLOAD_INTENT_SESSION_ID;
+        let generation = this.beginPromptUpload(intentSessionId, fileList.length, "artifact");
+        let resolvedSessionId = null;
+        let sourceSelectionRevision = entrySessionId
+            ? Number(entryState.sessions.selectionRevision) || 0
+            : null;
+        let plans = [];
+        const attached = [];
+        const failures = [];
+        try {
+            resolvedSessionId = await this.ensurePromptAttachmentSessionId();
+            if (intentSessionId === COMPOSER_UPLOAD_INTENT_SESSION_ID) {
+                const transferred = this.getState().ui.promptUploads?.[resolvedSessionId]
+                    ?.generations?.[generation];
+                if (transferred) {
+                    intentSessionId = resolvedSessionId;
+                } else {
+                    this.endPromptUpload(intentSessionId, generation);
+                    intentSessionId = resolvedSessionId;
+                    generation = this.beginPromptUpload(intentSessionId, fileList.length, "artifact");
+                }
+            }
+            if (sourceSelectionRevision == null) {
+                sourceSelectionRevision = Number(this.getState().sessions.selectionRevision) || 0;
+            }
+            if (this.getPromptEditSessionMatch(resolvedSessionId)) {
+                this.setSessionStatus(
+                    resolvedSessionId,
+                    "Finish editing the selected queued message before attaching files",
+                );
+                return [];
+            }
+            this.setSessionStatus(
+                resolvedSessionId,
+                fileList.length === 1
+                    ? `Uploading ${fileList[0].name}...`
+                    : `Uploading ${fileList.length} attachments...`,
+            );
+            if (this.getState().sessions.goneIds?.includes(resolvedSessionId)) return [];
+            plans = await this.reservePromptArtifactFilenames(resolvedSessionId, fileList);
+            if (this.getState().sessions.goneIds?.includes(resolvedSessionId)) return [];
+
+            for (const [index, plan] of plans.entries()) {
+                if (this.getState().sessions.goneIds?.includes(resolvedSessionId)) break;
+                if (this.getState().sessions.activeSessionId !== resolvedSessionId
+                    || (Number(this.getState().sessions.selectionRevision) || 0) !== sourceSelectionRevision) {
+                    for (const skipped of plans.slice(index)) {
+                        this.releasePromptArtifactFilename(resolvedSessionId, skipped.filename);
+                        failures.push({
+                            name: skipped.file.name,
+                            message: "not uploaded because the active session changed",
+                        });
+                    }
+                    break;
+                }
+
+                const uploadMethod = this.transport.uploadPromptArtifactFromFile;
+                let upload = null;
+                for (let attempt = 1; attempt <= PROMPT_ARTIFACT_UPLOAD_MAX_ATTEMPTS; attempt += 1) {
+                    if (this.getState().sessions.goneIds?.includes(resolvedSessionId)) break;
+                    try {
+                        upload = await uploadMethod.call(
+                            this.transport,
+                            resolvedSessionId,
+                            plan.file,
+                            plan.filename,
+                        );
+                        if (this.getState().sessions.goneIds?.includes(resolvedSessionId)) {
+                            this.releasePromptArtifactFilename(resolvedSessionId, plan.filename);
+                            upload = null;
+                            break;
+                        }
+                        // The create-only write succeeded. Keep the name known
+                        // even if local prompt finalization subsequently fails.
+                        this.releasePromptArtifactFilename(resolvedSessionId, plan.filename, { committed: true });
+                        if (upload?.filename && upload.filename !== plan.filename) {
+                            this.releasePromptArtifactFilename(resolvedSessionId, upload.filename, { committed: true });
+                        }
+                        break;
+                    } catch (error) {
+                        if (this.getState().sessions.goneIds?.includes(resolvedSessionId)) {
+                            this.releasePromptArtifactFilename(resolvedSessionId, plan.filename);
+                            break;
+                        }
+                        if (isArtifactAlreadyExistsError(error)) {
+                            // A conflict proves this exact case-sensitive name
+                            // exists. Release our reservation, remember it, and
+                            // try the next suffix — never overwrite it.
+                            this.releasePromptArtifactFilename(resolvedSessionId, plan.filename, { committed: true });
+                            if (attempt < PROMPT_ARTIFACT_UPLOAD_MAX_ATTEMPTS) {
+                                plan.filename = this.reserveNextPromptArtifactFilename(
+                                    resolvedSessionId,
+                                    plan.file.name,
+                                );
+                                continue;
+                            }
+                        } else {
+                            this.releasePromptArtifactFilename(resolvedSessionId, plan.filename);
+                        }
+                        failures.push({
+                            name: plan.file.name,
+                            message: error?.message || String(error),
+                        });
+                        break;
+                    }
+                }
+
+                if (upload) {
+                    try {
+                        const applied = await this.applyUploadedPromptAttachment(upload, {
+                            sessionId: resolvedSessionId,
+                            suppressStatus: true,
+                            activateSession: false,
+                        });
+                        if (applied) attached.push(upload);
+                    } catch (error) {
+                        failures.push({
+                            name: plan.file.name,
+                            message: error?.message || String(error),
+                        });
+                    }
+                }
+
+                if ((this.getState().sessions.activeSessionId !== resolvedSessionId
+                    || (Number(this.getState().sessions.selectionRevision) || 0) !== sourceSelectionRevision)
+                    && index < plans.length - 1) {
+                    for (const skipped of plans.slice(index + 1)) {
+                        this.releasePromptArtifactFilename(resolvedSessionId, skipped.filename);
+                        failures.push({
+                            name: skipped.file.name,
+                            message: "not uploaded because the active session changed",
+                        });
+                    }
+                    break;
+                }
+            }
+        } catch (error) {
+            failures.push({
+                name: fileList[0]?.name || "attachment",
+                message: error?.message || String(error),
+            });
+        } finally {
+            for (const plan of plans) {
+                this.releasePromptArtifactFilename(resolvedSessionId, plan.filename);
+            }
+            this.endPromptUpload(intentSessionId, generation);
+        }
+        if (resolvedSessionId && this.getState().sessions.goneIds?.includes(resolvedSessionId)) {
+            return [];
+        }
+
+        const statusParts = [];
+        if (failures.length > 0) {
+            const failureText = failures.map((failure) => `${failure.name}: ${failure.message}`).join("; ");
+            statusParts.push(attached.length > 0
+                ? `Attached ${attached.length}/${fileList.length} file(s); failed: ${failureText}`
+                : `Attachment upload failed: ${failureText}`);
+        } else {
+            statusParts.push(attached.length === 1
+                ? `Attached ${attached[0].filename}`
+                : `Attached ${attached.length} files`);
+        }
+        const imageRejections = Array.isArray(rejectedImages) ? rejectedImages.filter(Boolean) : [];
+        if (imageRejections.length > 0) {
+            statusParts.push(`Skipped ${imageRejections.map((item) => `${item.name} (${item.reason})`).join(", ")}`);
+        }
+        this.setSessionStatus(resolvedSessionId, statusParts.join("; "));
+        return attached;
     }
 
     async confirmArtifactUploadModal() {
@@ -11795,12 +12423,28 @@ export class PilotSwarmUiController {
             this.dispatch({ type: "ui/status", text: "No session selected" });
             return;
         }
-        if (session.isSystem) {
-            this.dispatch({ type: "ui/status", text: "System sessions are always private" });
-            return;
-        }
         if (session.isGroup) {
             this.dispatch({ type: "ui/status", text: "Groups don't have visibility" });
+            return;
+        }
+        if (typeof this.transport.getSessionAccess !== "function") {
+            this.dispatch({ type: "ui/status", text: "Cannot verify sharing policy for this session" });
+            return;
+        }
+        let access = null;
+        try {
+            access = await this.transport.getSessionAccess(sessionId);
+        } catch (error) {
+            this.dispatch({ type: "ui/status", text: error?.message || String(error) });
+            return;
+        }
+        if (this.getState().sessions.activeSessionId !== sessionId) return;
+        if (!access) {
+            this.dispatch({ type: "ui/status", text: "Session access could not be resolved" });
+            return;
+        }
+        if (access.isSystem) {
+            this.dispatch({ type: "ui/status", text: "System session visibility is controlled by deployment policy" });
             return;
         }
         if (typeof this.transport.setSessionVisibility !== "function") {
@@ -11836,23 +12480,29 @@ export class PilotSwarmUiController {
             this.dispatch({ type: "ui/status", text: "No session selected" });
             return;
         }
-        if (session.isSystem) {
-            this.dispatch({ type: "ui/status", text: "System sessions are always private" });
-            return;
-        }
         if (session.isGroup) {
             this.dispatch({ type: "ui/status", text: "Groups can't be shared" });
             return;
         }
-        if (typeof this.transport.listSessionShares !== "function") {
-            this.dispatch({ type: "ui/status", text: "Session sharing is not supported by this transport" });
+        if (typeof this.transport.getSessionAccess !== "function" || typeof this.transport.listSessionShares !== "function") {
+            this.dispatch({ type: "ui/status", text: "Session sharing policy is not available on this transport" });
             return;
         }
-        let shares;
+        const request = (this._shareModalOpenRequest = (this._shareModalOpenRequest || 0) + 1);
+        let access, shares;
         try {
-            shares = await this.transport.listSessionShares(sessionId);
+            [access, shares] = await Promise.all([
+                this.transport.getSessionAccess(sessionId),
+                this.transport.listSessionShares(sessionId),
+            ]);
         } catch (error) {
             this.dispatch({ type: "ui/status", text: error?.message || String(error) });
+            return;
+        }
+        const latest = this.getState();
+        if (request !== this._shareModalOpenRequest || latest.sessions.activeSessionId !== sessionId) return;
+        if (!access) {
+            this.dispatch({ type: "ui/status", text: "Session access could not be resolved" });
             return;
         }
         this.dispatch({
@@ -11865,10 +12515,15 @@ export class PilotSwarmUiController {
                 value: "",
                 cursorIndex: 0,
                 shares: Array.isArray(shares) ? shares : [],
-                visibility: session.visibility || "private",
+                visibility: access.visibility || "private",
+                isSystem: Boolean(access.isSystem),
+                systemVisibility: access.systemVisibility ?? null,
+                openRequest: request,
             },
         });
-        this.dispatch({ type: "ui/status", text: "name [r|w] grants · -name revokes · Enter apply" });
+        this.dispatch({ type: "ui/status", text: access.isSystem
+            ? "System policy: -name revokes an existing grant; new grants are disabled"
+            : "name [r|w] grants · -name revokes · Enter apply" });
     }
 
     updateShareSessionModal(updater) {
@@ -11960,6 +12615,28 @@ export class PilotSwarmUiController {
             } catch (error) {
                 this.dispatch({ type: "ui/status", text: error?.message || String(error) });
             }
+            return;
+        }
+
+        if (typeof this.transport.getSessionAccess !== "function") {
+            this.dispatch({ type: "ui/status", text: "Cannot verify sharing policy for this session" });
+            return;
+        }
+        let policy = null;
+        try {
+            policy = await this.transport.getSessionAccess(sessionId);
+        } catch (error) {
+            this.dispatch({ type: "ui/status", text: error?.message || String(error) });
+            return;
+        }
+        const currentModal = this.getState().ui.modal;
+        if (!currentModal || currentModal.type !== "shareSession" || currentModal.sessionId !== sessionId
+            || currentModal.openRequest !== modal.openRequest || currentModal.value !== modal.value) return;
+        if (this.getState().sessions.activeSessionId !== sessionId) return;
+        if (!policy || policy.isSystem) {
+            this.dispatch({ type: "ui/status", text: policy?.isSystem
+                ? "System session grants are controlled by deployment policy; only revocation is allowed"
+                : "Session access could not be resolved" });
             return;
         }
 
@@ -12291,14 +12968,41 @@ export class PilotSwarmUiController {
             } else if (modal.action === "discardWorkflowDraftEdits") {
                 this.discardWorkflowDraftEdits({ confirmed: true });
             } else if (modal.action === "workflowRunCommand") {
-                const { sessionId, ...command } = modal.workflowRunCommand || {};
+                const { sessionId, ...storedCommand } = modal.workflowRunCommand || {};
+                let command = storedCommand;
+                let publicationReview = modal.returnModal;
+                if (publicationReview?.type === "workflowPublish") {
+                    const current = this.getState();
+                    const projection = workflowViewProjectionFor(current, sessionId);
+                    const change = workflowPublicationChange(publicationReview.pin, projection.publication);
+                    const decision = change ? null : workflowPublicationDecision(
+                        projection,
+                        current.ui.workflowDecision,
+                        publicationReview.decisionSelection ?? null,
+                        { revision: publicationReview.pin?.revision ?? null },
+                    );
+                    const error = change ?? (decision?.available === false ? `Start refused: ${decision.reason}` : null);
+                    if (error) {
+                        publicationReview = { ...publicationReview, error,
+                            ...(decision ? { decisionSelection: decision.selection, decisionBindings: decision.bindings } : {}) };
+                        this.dispatch({ type: "ui/modal", modal: publicationReview });
+                        this.dispatch({ type: "ui/status", text: error });
+                        return;
+                    }
+                    command = { ...storedCommand };
+                    delete command.agentModels;
+                    if (Object.keys(decision.bindings).length) command.agentModels = decision.bindings;
+                    publicationReview = { ...publicationReview, decisionSelection: decision.selection,
+                        decisionBindings: decision.bindings, error: null };
+                    this.dispatch({ type: "ui/modal", modal: publicationReview });
+                }
                 const result = await this.sendWorkflowRunCommand(sessionId, { ...command, confirmed: true });
                 // A removal confirmed from one of the TUI's variables forms goes back to the view once accepted; the TUI also says a
                 // refusal on the status line (the portal shows its notice beside the graph).
                 if (modal.returnModal?.type === "workflowVariable" || modal.returnModal?.type === "workflowVariableBatch") {
                     this.afterWorkflowVariableUpdate(modal.returnModal, result);
-                } else if (modal.returnModal?.type === "workflowPublish") {
-                    this.afterWorkflowPublication(modal.returnModal, result);
+                } else if (publicationReview?.type === "workflowPublish") {
+                    this.afterWorkflowPublication(publicationReview, result);
                 } else if (modal.returnModal?.type === "workflowTest") {
                     this.afterWorkflowTest(modal.returnModal, result);
                 } else if (!result.ok && (result.reason === "failed" || result.reason === "unconfirmed")) {
@@ -12597,17 +13301,35 @@ export class PilotSwarmUiController {
     }
 
     async sendPrompt() {
-        const state = this.getState();
-        const rawPrompt = state.ui.prompt;
-        const promptAttachments = this.getPromptAttachments();
+        const sendOwnership = this.captureComposerDraftOwnership();
+        let state = this.getState();
+        let sessionId = state.sessions.activeSessionId;
+        if (!sessionId) {
+            try {
+                sessionId = await this.ensureComposerDefaultSessionId();
+            } catch {
+                return;
+            }
+            // Session creation is shared with attachment selection. Re-read
+            // everything after it settles: an attachment intent may have joined
+            // the same promise and must finish before this draft can be sent.
+            state = this.getState();
+        }
+        if (this.isPromptUploadInFlight(sessionId)) {
+            this.setSessionStatus(sessionId, "Wait for the attachment upload to finish before sending");
+            return;
+        }
+
+        const ownedDraft = this.resolvePromptDraftForSession(sessionId, sendOwnership);
+        const rawPrompt = ownedDraft.prompt;
+        const promptAttachments = ownedDraft.attachments;
         const attachmentSessionId = promptAttachments[0]?.sessionId || null;
         const prompt = expandPromptAttachments(rawPrompt, promptAttachments);
-
-        let sessionId = state.sessions.activeSessionId;
         if (attachmentSessionId) {
             sessionId = attachmentSessionId;
             if (state.sessions.activeSessionId !== attachmentSessionId) {
                 await this.loadSession(attachmentSessionId);
+                state = this.getState();
             }
         }
         let activeSession = sessionId ? state.sessions.byId[sessionId] || null : null;
@@ -12633,13 +13355,6 @@ export class PilotSwarmUiController {
             this.dispatch({ type: "ui/status", text: inputCheck === "failed" ? "Checking again whether you can send messages here…" : WORKFLOW_INPUT_CHECKING_TEXT });
             return;
         }
-        if (!sessionId) {
-            const created = await this.createSession({});
-            if (!created?.sessionId) return;
-            sessionId = created.sessionId;
-            activeSession = this.getState().sessions.byId[sessionId] || null;
-        }
-
         // Empty Enter on a session with pending outbox items forces an immediate
         // dispatch of any pending merge group; this is the "send batch" affordance.
         // Staged image attachments make an empty prompt sendable (a default
@@ -12666,8 +13381,7 @@ export class PilotSwarmUiController {
                 this.exitPendingPromptEdit({ restoreDraft: true });
                 return;
             }
-            this.setPrompt("", 0);
-            this.setPromptAttachments([]);
+            this.clearSentPromptDraft(sessionId, ownedDraft);
             await this.dispatchPendingOutbox(sessionId).catch(() => {});
             return;
         }
@@ -12682,8 +13396,10 @@ export class PilotSwarmUiController {
                 answeredAt,
                 pendingPhase: "pending",
             };
-            this.setPrompt("", 0);
-            this.setPromptAttachments([]);
+            this.clearSentPromptDraft(sessionId, ownedDraft);
+            if (promptAttachments.some((attachment) => attachment?.kind !== "image")) {
+                this.setSessionStatus(sessionId, "");
+            }
             this.dispatch({
                 type: "sessions/merged",
                 session: {
@@ -12721,9 +13437,7 @@ export class PilotSwarmUiController {
                     type: "sessions/merged",
                     session: { sessionId, pendingQuestion: activePendingQuestion },
                 });
-                if (!String(this.getState().ui.prompt || "").trim()) {
-                    this.setPrompt(prompt, String(prompt || "").length);
-                }
+                this.restorePromptDraft(sessionId, ownedDraft);
                 this.dispatch({ type: "ui/status", text: error?.message || String(error) });
             }
             return;
@@ -12743,7 +13457,6 @@ export class PilotSwarmUiController {
         // and the staged images — a message never goes out half-attached.
         // The composer keeps its text and images until an upload ends, so any
         // submit meanwhile would send the same message again.
-        if (this._attachmentUploadInFlight) return;
         const pendingImages = promptAttachments.filter((a) => a?.kind === "image");
         let attachmentRefs = null;
         if (pendingImages.length > 0) {
@@ -12752,19 +13465,17 @@ export class PilotSwarmUiController {
                 this.dispatch({ type: "ui/status", text: "This transport does not support image attachments." });
                 return;
             }
-            this._attachmentUploadInFlight = true;
-            this.dispatch({ type: "ui/promptUpload", upload: { sessionId, count: pendingImages.length } });
+            const uploadGeneration = this.beginPromptUpload(sessionId, pendingImages.length, "image-send");
             const uploadItem = this.buildOutboxItem("", "pending");
-            this.dispatch({ type: "ui/status", text: `Uploading ${pendingImages.length} image${pendingImages.length > 1 ? "s" : ""}...` });
+            this.setSessionStatus(sessionId, `Uploading ${pendingImages.length} image${pendingImages.length > 1 ? "s" : ""}...`);
             try {
                 attachmentRefs = await this.uploadPendingImageAttachments(sessionId, pendingImages, uploadItem.id);
-                this.dispatch({ type: "ui/status", text: "" });
+                this.setSessionStatus(sessionId, "");
             } catch (error) {
-                this.dispatch({ type: "ui/status", text: `Image upload failed: ${error?.message || error}` });
+                this.setSessionStatus(sessionId, `Image upload failed: ${error?.message || error}`);
                 return;
             } finally {
-                this._attachmentUploadInFlight = false;
-                this.dispatch({ type: "ui/promptUpload", upload: null });
+                this.endPromptUpload(sessionId, uploadGeneration);
             }
         }
         const outboundPrompt = prompt.trim()
@@ -12772,9 +13483,10 @@ export class PilotSwarmUiController {
             : (attachmentRefs && attachmentRefs.length > 0 ? "See the attached image(s)." : prompt);
         this.queuePromptInOutbox(sessionId, outboundPrompt, attachmentRefs ? { attachments: attachmentRefs } : null);
         // Clear what was sent; keep a draft or images added during an upload.
-        if (this.getState().ui.prompt === rawPrompt) this.setPrompt("", 0);
-        const sent = new Set(promptAttachments);
-        this.setPromptAttachments(this.getPromptAttachments().filter((attachment) => !sent.has(attachment)));
+        this.clearSentPromptDraft(sessionId, ownedDraft);
+        if (promptAttachments.some((attachment) => attachment?.kind !== "image")) {
+            this.setSessionStatus(sessionId, "");
+        }
         await this.dispatchPendingOutbox(sessionId).catch(() => {});
     }
 
@@ -12799,6 +13511,7 @@ export class PilotSwarmUiController {
             this.setSessionOutboxItems(currentUi.promptEdit.sessionId, nextItems);
         }
         this.dispatch({ type: "ui/prompt", prompt: nextPrompt, promptCursor: nextCursor });
+        this.updateComposerDefaultDraftOwnership();
         this.syncPromptReferenceBrowser();
     }
 
@@ -14321,6 +15034,10 @@ export class PilotSwarmUiController {
             this.dispatch({ type: "ui/status", text: WORKFLOW_INPUT_CHECKING_TEXT });
             return;
         }
+        if (this.isPromptUploadInFlight(sessionId)) {
+            this.dispatch({ type: "ui/status", text: "Wait for the attachment upload to finish before steering" });
+            return;
+        }
         if (typeof this.transport.steerSessionTurn !== "function") {
             this.dispatch({ type: "ui/status", text: "Steer is not supported by this transport" });
             return;
@@ -14374,15 +15091,21 @@ export class PilotSwarmUiController {
             else await this.steerQueuedMessages(sessionId, action.itemIds);
             return;
         }
-        const text = String(state.ui.prompt || "");
+        const promptAttachments = this.getPromptAttachments();
+        const text = expandPromptAttachments(state.ui.prompt, promptAttachments);
         if (!text.trim()) {
             this.dispatch({ type: "ui/status", text: "Type the guidance to steer the running turn" });
             return;
         }
         const request = { requestId: this._newTurnControlRequestId(), kind: "steer", text, phase: "sending" };
         this._setTurnControl(sessionId, { steer: request, steerNotice: null });
-        // The text moves into the request: it is immutable until an answer.
+        // The text and generic artifact refs move into the request. Staged
+        // images cannot travel in a text-only Steer, so keep them for Send.
         this.setPrompt("", 0);
+        this.setPromptAttachments(promptAttachments.filter((attachment) => attachment?.kind === "image"));
+        if (promptAttachments.some((attachment) => attachment?.kind !== "image")) {
+            this.setSessionStatus(sessionId, "");
+        }
         await this._sendSteer(sessionId, request);
     }
 
@@ -14765,9 +15488,9 @@ export class PilotSwarmUiController {
         this.dispatch({ type: "sessions/selectToggle", sessionId });
     }
 
-    setSessionSelection(sessionIds) {
+    setSessionSelection(sessionIds, preferredSessionId = null) {
         const ids = Array.isArray(sessionIds) ? sessionIds : [];
-        this.dispatch({ type: "sessions/selectSet", sessionIds: ids });
+        this.dispatch({ type: "sessions/selectSet", sessionIds: ids, preferredSessionId });
     }
 
     clearSessionSelection() {

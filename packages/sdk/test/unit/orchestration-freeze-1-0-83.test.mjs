@@ -6,13 +6,13 @@
  * orchestration schedules, so 1.0.83 is frozen in orchestration_1_0_83/ (the
  * released live code with only its version literal), in-flight 1.0.83
  * sessions keep replaying on it, and each moves to the latest version at its
- * next continue-as-new. 1.0.84 and 1.0.85 were frozen in turn
- * (orchestration-freeze-1-0-84 and -1-0-85.test.mjs); the latest, 1.0.86, adds
- * owner routing: a capacity request before each turn and before a
- * set-workspace check, a capped destroy, a capped workspace check, the fast
- * busy policy for sessions that ask for it, and an owner-tagged session's
- * activities routed with its owner tag. The frozen 1.0.83 copy keeps 1.0.83's
- * routing and busy policy.
+ * next continue-as-new. 1.0.84, 1.0.85 and 1.0.86 were frozen in turn
+ * (orchestration-freeze-1-0-84, -1-0-85 and -1-0-86.test.mjs); this fork's
+ * latest, 1.0.1000, adds owner routing: a capacity request before each turn
+ * and before a set-workspace check, a capped destroy, a capped workspace
+ * check, the fast busy policy for sessions that ask for it, and an
+ * owner-tagged session's activities routed with its owner tag. The frozen
+ * 1.0.83 copy keeps 1.0.83's routing and busy policy.
  *
  * Run: node --test test/unit/orchestration-freeze-1-0-83.test.mjs (after npm run build).
  */
@@ -46,7 +46,7 @@ function importsOf(text) {
 
 const LIVE_VERSION_LINE = "export const CURRENT_ORCHESTRATION_VERSION = DURABLE_SESSION_LATEST_VERSION;";
 const FROZEN_VERSION_LINE = 'export const CURRENT_ORCHESTRATION_VERSION = "1.0.83";';
-// The latest version's handler; orchestration-freeze-1-0-85.test.mjs pins the version itself.
+// The latest version's handler; orchestration-freeze-1-0-86.test.mjs pins the version itself.
 const LATEST_HANDLER = `durableSessionOrchestration_${DURABLE_SESSION_LATEST_VERSION.replaceAll(".", "_")}`;
 
 test("the registry freezes 1.0.83 on its copy and registers a later version, from the live tree, as the latest version", () => {

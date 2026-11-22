@@ -103,6 +103,7 @@ export type { DuroxideSchemaMigrationOptions, DuroxideSchemaMigrationResult } fr
 export { PgSessionCatalog, PgSessionCatalogProvider, computeCacheHitRatio } from "./cms.js";
 export { normalizeUserRole } from "./cms.js";
 export type { SessionCatalog, SessionCatalogProvider, SessionRow, SessionRowUpdates, SessionEvent, PlacementViewer, SessionPlacementResult, TopEventEmitterRow, InsertTurnMetricInput, CompleteTurnWritebackInput, TurnMetricRow, HourlyTokenBucketRow, TokensByModelRow, SessionMetricSummary, SessionMetricSummaryUpsert, FleetStats, UserStats, UserStatsBucket, UserStatsModelBucket, UserStatsOwnerKind, SessionTreeStats, SkillKind, SkillUsageRow, SessionTreeSkillUsage, FleetSkillUsageRow, FleetSkillUsage, RetrievalSurface, RetrievalOperation, RetrievalUsageRow, SessionTreeRetrievalUsage, FleetRetrievalUsageRow, FleetRetrievalUsage, GraphNodeUsageKind, GraphNodeUsageRow, FleetGraphNodeUsageRow, FleetGraphNodeUsage, GraphEdgeSearchUsageRow, UserProfile, UserPrincipal, UserRoleInfo, UserRoleValue, DispatcherDelegationStatus } from "./cms.js";
+export type { SessionShareAuditActor } from "./cms.js";
 export type {
     FactStore,
     FactRecord,
@@ -255,6 +256,8 @@ export {
     WORKSPACE_ERROR_CODES,
     SYSTEM_SESSION_PROTECTED,
     SYSTEM_AGENT_LOADED,
+    systemSessionSharingError,
+    isSystemSessionSharingRefusal,
 } from "./types.js";
 // Session workspaces
 export { validateWorkspaceText, sameWorkspace, sameWorkingFolder, mergeWorkspaceChange, MAX_WORKSPACE_EXTRAS } from "./workspace-check.js";
@@ -320,7 +323,8 @@ export type {
 } from "./personal-secret-store.js";
 export { installLogRedaction, redactSecretPrefixes, redactSecrets, redactSecretsIn, secretRedactionEnabled } from "./secret-redaction.js";
 export { assertCliProgramForExternalSecrets } from "./cli-program-guard.js";
-export { bootstrapProviders, buildRuntimeRegistry, loadProviderTypes } from "./provider-catalog.js";
+export { bootstrapProviders, buildRuntimeRegistry, loadProviderTypes, resolveDecisionProviderCredential,
+    resolveQualifiedDecisionProviderCredential } from "./provider-catalog.js";
 // Resource Manager Agent tools
 export { createResourceManagerTools } from "./resourcemgr-tools.js";
 // Model providers
@@ -333,8 +337,8 @@ export {
     readAnthropicWifSettings, resetAnthropicWifCredentials, WifExchangeError,
 } from "./wif-credentials.js";
 export type { AnthropicWifSettings, WifIdentitySource, WifSettingsResult } from "./wif-credentials.js";
-export { resolveRuntimeModelSelection, firstRuntimeModel } from "./provider-catalog.js";
-export type { RuntimeModelSelection, RuntimeModelResolutionSource } from "./provider-catalog.js";
+export { resolveRuntimeModelSelection, firstRuntimeModel, resolveClusterDecisionCapability, resolveRuntimeDecisionModelSelection } from "./provider-catalog.js";
+export type { RuntimeModelSelection, RuntimeModelResolutionSource, ClusterDecisionCapability, RuntimeDecisionModelSelection } from "./provider-catalog.js";
 // A BYOK reasoning effort rides on the provider baseUrl as a path prefix —
 // exported so the proxy that strips it (grimfanda
 // deploy/openai-compat-proxy.mjs) has one place to read the contract from.
@@ -344,7 +348,7 @@ export {
     decodeReasoningEffortFromBaseUrl,
     encodeReasoningEffortInBaseUrl,
 } from "./model-providers.js";
-export type { ModelEntry, ModelDescriptor, ModelProviderConfig, ModelProvidersFile, ProviderType, ResolvedProvider, ReasoningEffort, ContextTier, ToolCatalogCapability } from "./model-providers.js";
+export type { ModelEntry, ModelDescriptor, DecisionModelEntry, DecisionModelDescriptor, ModelProviderConfig, ModelProvidersFile, ProviderType, ResolvedProvider, ReasoningEffort, ContextTier, ToolCatalogCapability } from "./model-providers.js";
 export { composeSystemPrompt, extractPromptContent, mergePromptSections } from "./prompt-layering.js";
 export type { PromptLayeringKind } from "./prompt-layering.js";
 export {
