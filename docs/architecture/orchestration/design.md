@@ -11,9 +11,11 @@ It does **not** own tool implementations or Copilot SDK session state. Those
 live in worker activities and the session manager.
 
 Primary source: [`packages/sdk/src/orchestration/`](../../../packages/sdk/src/orchestration).
-The current latest version is `1.0.86`: 1.0.85 plus owner routing (see
-[Owner routing and capacity requests](#owner-routing-and-capacity-requests-1086)).
-1.0.85 is 1.0.84 plus durable session titles, and 1.0.84 is 1.0.83 plus
+The current latest version is `1.0.1000`, a number of this fork's own range:
+upstream's 1.0.86 plus owner routing (see
+[Owner routing and capacity requests](#owner-routing-and-capacity-requests-101000)).
+1.0.86 is 1.0.85 plus a spawned child's workspace selection, 1.0.85 is 1.0.84
+plus durable session titles, and 1.0.84 is 1.0.83 plus
 pinned spawn grants and subtree tool ceilings (tool composition, design
 `docs/proposals/workflows/tool-composition.md`; its turns are composition
 turns). 1.0.83 is 1.0.82 plus the durable workflow
@@ -22,9 +24,9 @@ workflow request turns). The intake ships switched off: no worker sets the
 `workflowIntake` capability, so no send creates a durable exchange, and a
 Workflow's messages reach a session through the session queue as before. Frozen prior versions live as siblings (single files
 `packages/sdk/src/orchestration_1_0_47.ts` … `_1_0_51.ts`, then directories
-`orchestration_1_0_52/` … `orchestration_1_0_85/`) and run unchanged for any
+`orchestration_1_0_52/` … `orchestration_1_0_86/`) and run unchanged for any
 in-flight execution that started against them. The sections below describe
-1.0.82's queue and turn behaviour, which 1.0.83 to 1.0.86 keep; the intake's
+1.0.82's queue and turn behaviour, which 1.0.83 to 1.0.1000 keep; the intake's
 additions are in the intake design, and tool composition's and the titles' in
 `docs/proposals/workflows/tool-composition.md` and
 `docs/proposals/workflows/controller-1-1-and-admission.md`.
@@ -39,12 +41,12 @@ queued prompts and answers at once whatever timer is armed, and `decide` merges
 every queued prompt past timer items into one turn. The KV FIFO compacts
 instead of dropping items. Version 1.0.81 and older keep the old queue.
 
-In 1.0.86, a session can be bound to its owner's workers (owner routing), and
+In 1.0.1000, a session can be bound to its owner's workers (owner routing), and
 a session can use a faster policy for `WORKSPACE_BUSY` refusals. Both come from
 two optional orchestration inputs, `ownerTag` and `workspaceBusyFastRelease`,
 which the client sets only when it is configured to (see
-[§10](#owner-routing-and-capacity-requests-1086)). Without them, 1.0.86
-schedules exactly what 1.0.85 schedules. Version 1.0.85 and older ignore both
+[§10](#owner-routing-and-capacity-requests-101000)). Without them, 1.0.1000
+schedules exactly what 1.0.86 schedules. Version 1.0.86 and older ignore both
 inputs.
 
 ---
@@ -104,9 +106,9 @@ interface DurableSessionRuntime {
 
 `options` holds per-execution thresholds derived from input
 (`idleTimeout`, `inputGracePeriod`, `isSystem`, `parentSessionId`,
-`nestingLevel`, `baseSystemMessage`, and in 1.0.86 `ownerTag` and
+`nestingLevel`, `baseSystemMessage`, and in 1.0.1000 `ownerTag` and
 `workspaceBusyFastRelease`, each only when the input sets it). These do not
-change inside an execution, and continue-as-new carries the two 1.0.86 fields
+change inside an execution, and continue-as-new carries the two 1.0.1000 fields
 when set. Legacy `dehydrateThreshold` and `checkpointInterval` inputs are
 accepted but ignored.
 
@@ -437,7 +439,7 @@ sequenceDiagram
     Decide->>Turn: prompt, bootstrap?, requiredTool?, clientMessageIds?
     Turn->>Life: wrapWithResumeContext for legacy hydration input
     Turn->>Turn: normalize prompt and trailing system context
-    opt ownerTag set (1.0.86)
+    opt ownerTag set (1.0.1000)
         Turn->>Manager: requestOwnerCapacity: deny ends the turn, busy holds the prompt
     end
     Turn->>Session: hydrate (with retry) if needed
@@ -504,13 +506,13 @@ workspace, the status returns to `ready`, `workspaceRetry` is cleared and
 `session.workspace_available` is recorded. A session without a workspace can
 also be held on the workspace timer: by any turn result with the workspace
 gate, such as a default folder that fails to attach or a `busy` answer from an
-admission hook or a credential resolver, and in 1.0.86 by a capacity request's
+admission hook or a credential resolver, and in 1.0.1000 by a capacity request's
 `busy` answer. Such a session keeps the status and the retry state, so every
-later hold goes on up the schedule, as on 1.0.85. In 1.0.86, when its input
+later hold goes on up the schedule, as on 1.0.86. In 1.0.1000, when its input
 carries an owner tag or the fast busy flag, the status and `workspaceRetry`
 are cleared without an event instead: the next hold starts the schedule again
 at its first step, with one failure on the worker, and a continue-as-new
-carries no retry count. Frozen 1.0.85 and older keep the hold for every
+carries no retry count. Frozen 1.0.86 and older keep the hold for every
 session.
 
 ### Stop, Steer, and carried guidance (1.0.81)
@@ -613,22 +615,24 @@ declare, so an old worker never fetches those activities. The commands are in
 Run one image per database and leave no old workers in another namespace.
 
 1.0.84 (tool composition) and 1.0.85 (durable titles), released together in
-v0.8.12, and 1.0.86 (owner routing) keep the same version pattern and the same
-stop, deploy, start upgrade. 1.0.83 is frozen in `orchestration_1_0_83/`, as
-v0.8.11 released it but for its version literal; 1.0.84 and 1.0.85 are frozen
-in `orchestration_1_0_84/` and `orchestration_1_0_85/`, each as it ran but for
-its version and contract literals (1.0.85 as v0.8.12 released it). Each stays
+v0.8.12, 1.0.86 (a spawned child's workspace selection, v0.8.13) and this
+fork's 1.0.1000 (owner routing, on 1.0.86) keep the same version pattern and the
+same stop, deploy, start upgrade. 1.0.83 is frozen in `orchestration_1_0_83/`,
+as v0.8.11 released it but for its version literal; 1.0.84, 1.0.85 and 1.0.86
+are frozen in `orchestration_1_0_84/`, `orchestration_1_0_85/` and
+`orchestration_1_0_86/`, each as it ran but for its version and contract
+literals (1.0.85 as v0.8.12 released it, 1.0.86 as v0.8.13 did). Each stays
 registered beside 1.0.82: in-flight histories of any of them replay on their
-frozen copy, and each such session moves to 1.0.86 at its next
+frozen copy, and each such session moves to 1.0.1000 at its next
 continue-as-new, with everything its version carries, its intake state
 included.
 
-For 1.0.86, deploy the workers before turning on owner routing on the portal.
+For 1.0.1000, deploy the workers before turning on owner routing on the portal.
 An owner-tagged activity runs only on a worker that declares the owner's tag,
 and a capacity request only on a worker with a capacity requester; until such
 a worker exists, the activity waits in the queue. A session started on 1.0.82
-to 1.0.85 keeps its routing: none of them carries `ownerTag` or
-`workspaceBusyFastRelease` across continue-as-new, so after its move to 1.0.86
+to 1.0.86 keeps its routing: none of them carries `ownerTag` or
+`workspaceBusyFastRelease` across continue-as-new, so after its move to 1.0.1000
 the session stays untagged.
 
 ### processTimer
@@ -741,7 +745,7 @@ For `delete`, `cancelSession` additionally enumerates descendants via
 `getDescendantSessionIds` and calls `deleteSession` on each before deleting
 self.
 
-In 1.0.86, the `destroySession` of an owner-tagged session (in
+In 1.0.1000, the `destroySession` of an owner-tagged session (in
 `completeSession`, `cancelSession` and `failPendingShutdown`) is raced against
 `WORKSPACE_RELEASE_CAP_MS` (10 s), as `releaseAffinity` races
 `releaseWorkspace`. When no worker of the owner runs, the timer wins and the
@@ -803,7 +807,7 @@ worker's preamble; they do not ask the orchestration for a hydration probe.
 | Connection-closed error during retry | `"error"` |
 | Connection-closed retries exhausted | `"lossy_handoff"` |
 | Two or more consecutive workspace failures on one worker | `"workspace_unavailable"` |
-| The first `WORKSPACE_BUSY` refusal under the fast busy policy (1.0.86) | `"workspace_unavailable"` |
+| The first `WORKSPACE_BUSY` refusal under the fast busy policy (1.0.1000) | `"workspace_unavailable"` |
 
 Before rotating the recorded affinity GUID, workspace sessions release their
 workspace through the worker activity, bounded by a durable cap. A cleared
@@ -829,7 +833,7 @@ storeless session cannot hand off: it writes the give-up error with
 The rotation uses `yield ctx.newGuid()` and rebuilds `runtime.session` with the
 turn-control routing contract. Workspace releases retain their capability tag.
 
-### Owner routing and capacity requests (1.0.86)
+### Owner routing and capacity requests (1.0.1000)
 
 An owner-routed session is one whose creation config carries
 `ownerTag: "owner.<subject>"`. The portal saves it, with
@@ -867,7 +871,7 @@ answers:
 | Answer | Effect |
 |---|---|
 | `ok` (or anything else) | the turn runs |
-| `deny` | the turn ends as a refusal that is not retried: the session shows the requester's message, the prompt is dropped, a child reports the failure to its parent, and the next prompt asks again; no turn index is taken. The status names the refusal's response before the catalog shows the error, so a client that then syncs its response cursor never reads the refusal back as its next turn's answer; other non-retryable failures keep the order of 1.0.85 and older, status first |
+| `deny` | the turn ends as a refusal that is not retried: the session shows the requester's message, the prompt is dropped, a child reports the failure to its parent, and the next prompt asks again; no turn index is taken. The status names the refusal's response before the catalog shows the error, so a client that then syncs its response cursor never reads the refusal back as its next turn's answer; other non-retryable failures keep the order of 1.0.86 and older, status first |
 | `busy` | the prompt is held on the workspace timer, as for a `WORKSPACE_BUSY` refusal, at least `retryAfterMs`, with the message as the session's wait reason, and the session asks again when the timer fires; `done`, `cancel` and `delete` reach it meanwhile |
 | no answer within 15 s, a failed request, or no row for the session | `busy` with code `CAPACITY_UNAVAILABLE` and `retryAfterMs` of a minute. It is not counted as a failure: the session waits the answer's `retryAfterMs`, a minute, whatever the schedule's step, also after busy answers and under the fast policy; the step and the failure count stay as they were, and no affinity is released |
 
@@ -911,9 +915,9 @@ owners' workers. A user session's sub-agents are still created inside its turn
 (`spawn_agent`), on its owner's worker, with the turn's tag. A complete, cancel or delete still ends at once while the owner's
 worker holds the session: that worker runs the destroy.
 
-### Owner routing and durable workflows (1.0.86)
+### Owner routing and durable workflows (1.0.1000)
 
-1.0.86 keeps 1.0.85's `tool-composition-v1` contract, which keeps 1.0.83's
+1.0.1000 keeps 1.0.86's `tool-composition-v1` contract, which keeps 1.0.83's
 intake protocol, and puts the owner tag on top of it. Duroxide gives an
 activity one tag:
 
@@ -956,7 +960,7 @@ as a worker's gate refusal does: an intake invocation the attempt carried is
 noted not sent and parked for the gate, so the busy timer's attempt carries it.
 A `deny` parks it as a non-retryable failure.
 
-### Fast busy policy (1.0.86)
+### Fast busy policy (1.0.1000)
 
 A session started with `workspaceBusyFastRelease` (a client with the option
 `workspaceBusyFastRelease`, or `PILOTSWARM_WORKSPACE_BUSY_FAST_RELEASE=1`,
@@ -1052,8 +1056,9 @@ src/orchestration_1_0_55/     │
 src/orchestration_1_0_82/     │
 src/orchestration_1_0_83/     │
 src/orchestration_1_0_84/     │
-src/orchestration_1_0_85/     ┘
-src/orchestration/            ← current latest (1.0.86: 1.0.85 plus owner routing; 1.0.85 is 1.0.84 plus durable titles, 1.0.84 is 1.0.83 plus tool composition, 1.0.83 is 1.0.82 plus the durable workflow intake)
+src/orchestration_1_0_85/     │
+src/orchestration_1_0_86/     ┘
+src/orchestration/            ← current latest (1.0.1000, this fork's: upstream's 1.0.86 plus owner routing; 1.0.86 is 1.0.85 plus a spawned child's workspace selection, 1.0.85 is 1.0.84 plus durable titles, 1.0.84 is 1.0.83 plus tool composition, 1.0.83 is 1.0.82 plus the durable workflow intake)
 ```
 
 All registered versions are listed in

@@ -193,7 +193,7 @@ with a workspace, when a turn gets past its workspace check. A session without
 one keeps its place in the schedule after a turn runs, so that each later busy
 answer waits at least as long as the one before, and two busy answers on one
 worker, however far apart, release it from that worker. On orchestration
-1.0.86 and later, a session without a workspace that has an owner tag or the
+1.0.1000 and later, a session without a workspace that has an owner tag or the
 fast busy policy starts over when a turn runs.
 
 A hook that throws or answers anything else, or a session that the worker

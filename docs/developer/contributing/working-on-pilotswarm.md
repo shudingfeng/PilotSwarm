@@ -91,6 +91,13 @@ When you change orchestration behavior:
 5. Stamp the source orchestration version into the carried `OrchestrationInput` so the new latest handler can normalize older state when needed
 6. Keep version-specific logs obvious in orchestration tracing
 
+In this fork, a version of its own takes the next patch number from `1000` up (`1.0.1000` is the first), never
+upstream's next number, so an upstream sync never changes what a recorded fork version means. Name the upstream version
+it is built on in `FORK_ORCHESTRATION_BASES` (`packages/sdk/src/orchestration-version.ts`):
+`test/unit/fork-migrations.test.mjs` checks the ranges, and `test/unit/orchestration-gate-parity.test.mjs` checks that
+every version gate answers for it as for its base. A sync that brings a new upstream version freezes this fork's latest
+under its own number and opens the next fork number on that upstream version.
+
 If the change affects replay behavior, `continueAsNew`, KV state, or command/event handling, treat it as a version bump even if the diff looks small.
 
 The compatibility bar is higher than “old JSON still parses”:

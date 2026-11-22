@@ -39,7 +39,9 @@ import {
 import { assertUnambiguousProvider, isWebOptions, type PilotSwarmWebOptions } from "./web/api-connection.js";
 import { WebPilotSwarmClient } from "./web/web-client.js";
 import { loadModelProviderTypes, type ModelProviderRegistry } from "./model-providers.js";
-import { applyModelDiscovery, resolveRuntimeModelSelection, type RuntimeModelSelection } from "./provider-catalog.js";
+import { applyModelDiscovery, resolveClusterDecisionCapability, resolveRuntimeDecisionProviderBinding,
+    resolveRuntimeModelSelection, type ClusterDecisionCapability, type RuntimeDecisionProviderBinding,
+    type RuntimeModelSelection } from "./provider-catalog.js";
 
 // duroxide is CommonJS — use createRequire for ESM compatibility
 import { createRequire } from "node:module";
@@ -144,6 +146,7 @@ export function projectSerializableSessionConfig(
         // Session workspaces: present only when set, so a session without one
         // projects exactly as before.
         ...(fullConfig?.workspace ? { workspace: fullConfig.workspace } : {}),
+        ...(fullConfig?.workspaceDefaults !== undefined ? { workspaceDefaults: fullConfig.workspaceDefaults } : {}),
     };
 }
 
@@ -333,6 +336,7 @@ export class PilotSwarmClient {
                 ...(resolvedConfig.toolGrant ? { toolGrant: resolvedConfig.toolGrant } : {}),
                 ...(resolvedConfig.toolCeiling ? { toolCeiling: resolvedConfig.toolCeiling } : {}),
                 ...(workspace ? { workspace } : {}),
+                ...(resolvedConfig.workspaceDefaults !== undefined ? { workspaceDefaults: resolvedConfig.workspaceDefaults } : {}),
             };
         }
 
@@ -765,6 +769,29 @@ export class PilotSwarmClient {
 
         this.started = true;
         trace("[client] start complete");
+    }
+
+    /** @internal Fresh Cluster Decision capability for Workflow save and Start admission. */
+    _workflowDecisionCapability(): () => Promise<ClusterDecisionCapability> {
+        return async () => {
+            const store = this._catalog?.providers;
+            if (!store || !this._modelProviderTypes) {
+                return { available: false, defaultModel: null, models: [], reason: "no_cluster_decision_default" };
+            }
+            const [credentials, configured] = await Promise.all([store.allCredentials(), store.getClusterDecisionDefault()]);
+            return resolveClusterDecisionCapability(this._modelProviderTypes, credentials, configured);
+        };
+    }
+
+    /** @internal Pin shared Decision models to their CMS provider incarnation at Workflow Start. */
+    _workflowDecisionProviderBindings(): (models: string[]) => Promise<Record<string, RuntimeDecisionProviderBinding | null>> {
+        return async models => {
+            const store = this._catalog?.providers;
+            if (!store || !this._modelProviderTypes) return Object.fromEntries(models.map(model => [model, null]));
+            const credentials = await store.allCredentials();
+            return Object.fromEntries(models.map(model => [model,
+                resolveRuntimeDecisionProviderBinding(this._modelProviderTypes, credentials, model)]));
+        };
     }
 
     /**

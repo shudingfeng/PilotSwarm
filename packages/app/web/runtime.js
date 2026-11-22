@@ -6,6 +6,7 @@ import {
     requiresFineGrainedGitHubTokens,
     resolveSessionMessageScope,
     secretRedactionEnabled,
+    systemSessionSharingError,
     workflowReaderView,
 } from "pilotswarm-sdk";
 import { adminCanAccessResource, adminCapabilities, ADMIN_SCOPE_POLICY_VERSION, getOperation, isOwnerOnlyArtifact, normalizeCanvasSlot, CANVAS_SLOT_ERROR } from "pilotswarm-sdk/api";
@@ -453,6 +454,19 @@ export class PortalRuntime {
                     { owner, isAdmin, enforce: toOwnerOnly }),
             ]);
             return { snapshot: to.snapshot ?? from.snapshot };
+        }
+
+        if (method === "getChildOutcome" || method === "readWorkflow") {
+            const childSessionId = method === "getChildOutcome" ? safeParams.childSessionId : safeParams.sessionId;
+            if (!await this._getAccessSnapshot(childSessionId, owner) && typeof this.transport.getChildOutcome === "function") {
+                const outcome = await this.transport.getChildOutcome(String(childSessionId));
+                if (outcome?.parentSessionId) {
+                    return this._gateSession(method, "session:read", outcome.parentSessionId, authContext, { owner, isAdmin });
+                }
+            }
+            if (method === "getChildOutcome") {
+                return this._gateSession(method, "session:read", childSessionId, authContext, { owner, isAdmin });
+            }
         }
 
         if (access.startsWith("session:")) {
@@ -1191,6 +1205,16 @@ export class PortalRuntime {
         // Ownership/visibility gate — the single enforcement point for both
         // the generated /api/v1 routes and the legacy /api/rpc dispatcher.
         const gate = await this._authorizeCall(method, safeParams, authContext, { owner, isAdmin });
+        if (gate.snapshot?.isSystem && (method === "setSessionVisibility" || method === "grantSessionShare")) {
+            this._recordAudit({
+                actor: this._auditActor(authContext),
+                action: method,
+                sessionId: String(safeParams.sessionId),
+                decision: "deny",
+                reason: "system_session_sharing_policy",
+            });
+            throw systemSessionSharingError();
+        }
         const listViewer = this._listViewer(owner, isAdmin);
         switch (method) {
             case "listSessions": {
@@ -1333,8 +1357,10 @@ export class PortalRuntime {
                     revision: safeParams.revision ?? null, runAgainOf: safeParams.runAgainOf ?? null, inputs: safeParams.inputs ?? {},
                     vars: safeParams.vars ?? null, notifyParent: safeParams.notifyParent !== false, operationId: safeParams.operationId,
                     ...(safeParams.key !== undefined ? { key: safeParams.key } : {}),
+                    ...(Object.hasOwn(safeParams, "workspace") ? { workspace: safeParams.workspace } : {}),
                     // OF-S2-7: agent node models chosen at start (the SDK checks them against the revision and the owning session's catalog).
-                    ...(safeParams.agentModels !== undefined && safeParams.agentModels !== null ? { agentModels: safeParams.agentModels } : {}) },
+                    ...(safeParams.agentModels !== undefined && safeParams.agentModels !== null ? { agentModels: safeParams.agentModels } : {}),
+                    ...(safeParams.decisionModels !== undefined && safeParams.decisionModels !== null ? { decisionModels: safeParams.decisionModels } : {}) },
                     { principal: owner ? { provider: owner.provider, subject: owner.subject } : null });
             case "deleteSessionWorkflowDefinition":
                 return this.transport.deleteSessionWorkflowDefinition(safeParams.sessionId, { definitionId: safeParams.definitionId,
@@ -1864,6 +1890,7 @@ export class PortalRuntime {
                     sessionId: safeParams.sessionId,
                     rootSessionId: snapshot.rootSessionId,
                     isSystem: snapshot.isSystem,
+                    systemVisibility: snapshot.isSystem ? this.authz.systemVisibility : null,
                     visibility: snapshot.visibility,
                     owner: snapshot.owner,
                     relation,
@@ -1886,7 +1913,7 @@ export class PortalRuntime {
                 if (visibility === "shared_write") {
                     await this._assertDelegatedTreeReadOnly(method, safeParams.sessionId, authContext, { change: "shared_write visibility" });
                 }
-                await this.transport.setSessionVisibility(safeParams.sessionId, visibility);
+                await this.transport.setSessionVisibility(safeParams.sessionId, visibility, this._auditActor(authContext));
                 this._recordAudit({
                     actor: this._auditActor(authContext),
                     action: "setSessionVisibility",
@@ -1905,7 +1932,7 @@ export class PortalRuntime {
                 if (access === "write") {
                     await this._assertDelegatedTreeReadOnly(method, safeParams.sessionId, authContext, { grantee, change: "a write share" });
                 }
-                await this.transport.grantSessionShare(safeParams.sessionId, grantee, access, owner);
+                await this.transport.grantSessionShare(safeParams.sessionId, grantee, access, owner, this._auditActor(authContext));
                 this._recordAudit({
                     actor: this._auditActor(authContext),
                     action: "grantSessionShare",
@@ -2006,6 +2033,8 @@ export class PortalRuntime {
                 return this.transport.deleteSessionGroup(safeParams.groupId);
             case "listModels":
                 return this.transport.listModels({ principal: owner, isAdmin });
+            case "listRuntimeDecisionModels":
+                return this.transport.listRuntimeDecisionModels({ principal: owner, isAdmin });
             case "listArtifacts": {
                 // A caller who may not read an owner-only file (SF-3) is not shown its name either.
                 const listed = await this.transport.listArtifacts(safeParams.sessionId);
@@ -2028,6 +2057,7 @@ export class PortalRuntime {
                     safeParams.content,
                     safeParams.contentType,
                     safeParams.contentEncoding,
+                    safeParams.ifAbsent === true,
                 );
             case "copyArtifact":
                 return this.transport.copyArtifact(

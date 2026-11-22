@@ -40,7 +40,7 @@ function importsOf(text) {
         .map(match => match[1] ?? match[2] ?? match[3]);
 }
 
-// The latest version's handler; orchestration-freeze-1-0-85.test.mjs pins the version itself (1.0.86).
+// The latest version's handler; orchestration-freeze-1-0-86.test.mjs pins the version itself (1.0.1000).
 const LATEST_HANDLER = `durableSessionOrchestration_${DURABLE_SESSION_LATEST_VERSION.replaceAll(".", "_")}`;
 
 test("the registry keeps 1.0.84 frozen and registers a later version from the live tree", () => {
@@ -53,6 +53,7 @@ test("the registry keeps 1.0.84 frozen and registers a later version from the li
     assert.notEqual(latest.handler, frozen[0].handler);
     const registry = read("orchestration-registry.ts");
     assert.match(registry, /import \{ durableSessionOrchestration_1_0_84 \} from "\.\/orchestration_1_0_84\/index\.js";/);
+    assert.match(registry, /import \{ durableSessionOrchestration_1_0_85 \} from "\.\/orchestration_1_0_85\/index\.js";/);
     assert.match(registry, new RegExp(`import \\{ ${LATEST_HANDLER} \\} from "\\.\\/orchestration\\/index\\.js";`));
     assert.match(registry, /\{ version: "1\.0\.84", handler: durableSessionOrchestration_1_0_84 \}/);
 });

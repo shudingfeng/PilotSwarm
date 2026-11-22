@@ -510,6 +510,9 @@ export function createInitialState({ mode = "local", branding = null, docs = nul
             // Review SF-D5: whether the server says workflow test mode is on (its bootstrap's workflows.testMode); only
             // then does a session show a stored "Workflow · test waiting" card. Off until the server says so.
             workflowTestMode: false,
+            // A Decision workflow model picker is conditional on the server's eligible Cluster Decision Default. Fail closed
+            // until bootstrap answers; chat models never fill this catalog.
+            workflowDecision: { available: false, defaultModel: null, models: [], reason: "no_cluster_decision_default" },
             // That read in flight ("checking") or failed ("failed"), per session; absent otherwise (owner decision q18).
             workflowInputChecks: {},
             // Per-session desktop views (see normalizeStoredSessionViews).
@@ -525,8 +528,10 @@ export function createInitialState({ mode = "local", branding = null, docs = nul
             promptCursor: 0,
             promptRows: 1,
             promptAttachments: [],
-            // The image upload of a send in progress: { sessionId, count } (busy Send).
-            promptUpload: null,
+            // In-flight composer uploads by session. Each entry aggregates its
+            // independently-owned generations so one completion cannot clear another.
+            promptUploads: {},
+            promptStatusBySession: {},
             promptEdit: null,
             statusText: "Starting PilotSwarm...",
             // A persisted theme id may name a theme that no longer ships —
@@ -902,6 +907,7 @@ export function createInitialState({ mode = "local", branding = null, docs = nul
                 providers: [],
                 models: [],
                 runtimeModels: null,
+                decisionModels: [],
                 defaults: null,
                 fetchedAt: 0,
                 mutation: { pending: null, error: null },

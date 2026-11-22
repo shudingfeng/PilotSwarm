@@ -6,6 +6,11 @@
  * order and the list order give the same schema. The Facts and HorizonDB lists follow the same rule; this fork has no
  * migration there yet.
  *
+ * Orchestration versions follow the same rule: this fork's take a patch number from 1000 up, after every upstream
+ * version, each built on the upstream version FORK_ORCHESTRATION_BASES names, and the latest is this fork's, built on
+ * upstream's latest. test/unit/orchestration-gate-parity.test.mjs checks that every version gate answers for a fork
+ * version as for its base.
+ *
  * Run: node --test test/unit/fork-migrations.test.mjs (after npm run build)
  */
 import test from "node:test";
@@ -15,6 +20,9 @@ import { CMS_MIGRATIONS } from "../../dist/cms-migrations.js";
 import { FACTS_MIGRATIONS } from "../../dist/facts-migrations.js";
 import { FORK_CMS_MIGRATION_BASES } from "../../dist/fork-migrations.js";
 import { loadMigrations } from "../../../horizon-store/src/horizon-migrator.ts";
+import { DURABLE_SESSION_LATEST_VERSION, DURABLE_SESSION_ORCHESTRATION_REGISTRY } from "../../dist/orchestration-registry.js";
+import { FORK_ORCHESTRATION_BASES } from "../../dist/orchestration-version.js";
+import { assertIntakeContinueAsNewTarget } from "../../dist/orchestration/intake-state.js";
 import { deploymentOrder } from "../helpers/fork-migrations.js";
 
 /**
@@ -70,4 +78,50 @@ test("an existing deployment ran each fork migration right after its base, and l
     const cms = deploymentOrder(CMS_MIGRATIONS("s"), FORK_CMS_MIGRATION_BASES).map(migration => migration.version);
     assert.deepEqual([...cms].sort(), CMS_MIGRATIONS("s").map(migration => migration.version).sort());
     assert.equal(cms[cms.indexOf("0095") + 1], "9001");
+});
+
+/** An orchestration version's three numbers. */
+function versionNumbers(version) {
+    assert.match(version, /^\d+\.\d+\.\d+$/, `${version} is an orchestration version`);
+    return version.split(".").map(Number);
+}
+
+/** Orders two orchestration versions by their numbers, never as text. */
+function compareVersions(a, b) {
+    const [x, y] = [versionNumbers(a), versionNumbers(b)];
+    for (let index = 0; index < 3; index += 1) if (x[index] !== y[index]) return x[index] - y[index];
+    return 0;
+}
+
+test("orchestration: upstream's versions in order, then this fork's from patch 1000, each built on a registered upstream version", () => {
+    const versions = DURABLE_SESSION_ORCHESTRATION_REGISTRY.map(entry => entry.version);
+    versions.forEach((version, i) => {
+        if (i > 0) assert.ok(compareVersions(version, versions[i - 1]) > 0, `${version} follows ${versions[i - 1]}`);
+    });
+    const firstFork = versions.findIndex(version => versionNumbers(version)[2] >= 1000);
+    assert.ok(firstFork > 0, "this fork has an orchestration version, after upstream's");
+    const upstream = versions.slice(0, firstFork);
+    const fork = versions.slice(firstFork);
+    for (const version of fork) assert.ok(versionNumbers(version)[2] >= 1000, `${version}, after a fork version, has a patch of at least 1000`);
+    assert.deepEqual(Object.keys(FORK_ORCHESTRATION_BASES).sort(), [...fork].sort(), "the base table names exactly the registered fork versions");
+    fork.forEach((version, i) => {
+        const base = FORK_ORCHESTRATION_BASES[version];
+        assert.ok(upstream.includes(base), `fork ${version}'s base, ${base}, is a registered upstream version`);
+        if (i > 0) assert.ok(compareVersions(base, FORK_ORCHESTRATION_BASES[fork[i - 1]]) >= 0, `fork ${version} is based on ${base}, before ${fork[i - 1]}'s base`);
+    });
+    // The latest is the highest registered version, this fork's, and built on upstream's latest.
+    assert.equal(versions.at(-1), DURABLE_SESSION_LATEST_VERSION);
+    assert.ok(versionNumbers(DURABLE_SESSION_LATEST_VERSION)[2] >= 1000);
+    assert.equal(FORK_ORCHESTRATION_BASES[DURABLE_SESSION_LATEST_VERSION], upstream.at(-1));
+});
+
+test("orchestration: owner routing is this fork's 1.0.1000, on upstream's 1.0.86", () => {
+    assert.equal(DURABLE_SESSION_LATEST_VERSION, "1.0.1000");
+    assert.deepEqual({ ...FORK_ORCHESTRATION_BASES }, { "1.0.1000": "1.0.86" });
+});
+
+test("orchestration: every registered version continues as new to the latest", () => {
+    for (const { version } of DURABLE_SESSION_ORCHESTRATION_REGISTRY) {
+        assert.doesNotThrow(() => assertIntakeContinueAsNewTarget(version, DURABLE_SESSION_LATEST_VERSION), version);
+    }
 });

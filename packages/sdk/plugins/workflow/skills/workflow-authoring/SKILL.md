@@ -5,23 +5,23 @@ description: Use before Workflow design, editing, publishing, running or diagnos
 
 # Workflow authoring
 
-A Workflow is your child session running a declared state graph without
-model turns. Save its YAML with `workflow_definition`; each save is a
-revision. `start` runs that revision, unchanged by later saves.
+A Workflow runs a child graph without model turns. Each `workflow_definition save` makes a revision; `start` runs it unchanged.
 
 Call `load_skill` with name `workflow-reference` for fields and name
 `workflow-tools` for tool arguments.
 
 ## 1. Decide if a workflow is the right tool
 
-Use a workflow for authorized finite steps, branches, waits or repeated
-checks. Do simple one-offs directly; use ordinary sub-agents for open-ended
-work. Permissions do not expand: scripts use your tools; agent steps also
-get selected package tools (workflow-tools).
+Use a workflow for finite steps, branches, waits or repeated
+checks. Do simple one-offs directly; use sub-agents for open-ended
+work. Permissions do not expand: scripts use your tools; agent steps get
+selected package tools (workflow-tools).
 
 Nothing runs before Start. Preserve descriptions (graph labels) and root/state/route notes when rewriting YAML unless asked to change them.
 
 ## 2. Choose the state type
+
+Use `decision` only if `workflows.decision.available` is `true`; no chat fallback.
 
 | You need | Use | Do not use |
 |---|---|---|
@@ -36,8 +36,6 @@ Nothing runs before Start. Preserve descriptions (graph labels) and root/state/r
 | The same steps for each item of a list, then one join | `parallel` | many agent states copied by hand |
 | Different nodes at once (a prompt or a model for each branch), then one join | `parallel` with named `branches` | several Workflows |
 | The end of the run, with its outcome | `terminal` | — |
-
-Scripts compute facts; agents judge. Both outcomes obey your schema.
 
 ## 3. Design a bounded graph
 
@@ -223,12 +221,13 @@ Never use several Workflows for this; `workflow-patterns` has an example.
 Read Save's warnings and errors. Start refuses missing literal tools;
 dynamic names stay unchecked.
 
-1. `workflow_definition` `save` (`name`, `yaml`) saves revision 1; read its
-   errors in the answer. Show the person the revision (`read`). Change it with
-   `save`, its `definition_id` and the `expected_revision` you read: that is
-   the next revision. A save based on an older revision is refused.
-2. `start` makes a Workflow from the newest valid revision (`inputs`,
-   `vars?`). A revision with errors cannot start. To start another Workflow,
+1. `save` (`name`, `yaml`) makes revision 1; read its errors. Change it with
+   `definition_id` and the read `expected_revision`; an older revision is refused.
+2. Create/select the checkout first (`create_session_clone`, then
+   `set_session_workspace`), then start (`inputs`, `vars?`, `workspace?`). Omit:
+   record+defaults; object: chosen record+defaults; `null`: defaults only;
+   `"none"`: neither. One writer for every node and child. Invalid revisions do
+   not start. To start another Workflow,
    call `start` again; never rename the definition. Optional `key` deduplicates
    retries; a fresh key or no key on a new call makes a new attempt.
 3. Control the run with `update_workflow`: `pause`, `resume`, `stop`,

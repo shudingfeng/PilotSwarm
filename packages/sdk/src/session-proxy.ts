@@ -16,7 +16,7 @@ import type { SessionStateStore } from "./session-store.js";
 import { resolveEffectiveSpawnOwner, SYSTEM_USER_PRINCIPAL, type SessionCatalog } from "./cms.js";
 import { recordSessionEndRequested } from "./session-end-mark.js";
 import { admissionToWait, PROVIDER_BUDGET_WAKE_PROMPT } from "./provider-budgets.js";
-import { applyWorkspaceDefaults, checkWorkspaceForSpawn, defaultsRecordOf, orchestrationSupportsWorkspaces, prepareWorkspace, prepareWorkspaceExtras, readDefaultsRecord, resolveWorkspaceDefaults, sameDefaultsRecord, WORKSPACE_PARTIAL_CHANGES_NOTE, workspaceOpenedKey } from "./workspace.js";
+import { applySessionWorkspaceSelection, applyWorkspaceDefaults, capturedWorkspaceDefaultsRecord, checkWorkspaceForSpawn, defaultsRecordOf, orchestrationSupportsWorkspaces, prepareWorkspace, prepareWorkspaceExtras, readDefaultsRecord, resolveWorkspaceDefaults, sameDefaultsRecord, workflowWorkspaceDefaults, workflowWorkspaceDefaultsSnapshot, WORKSPACE_PARTIAL_CHANGES_NOTE, workspaceOpenedKey } from "./workspace.js";
 import { childWorkspacesDisabled, workingFolderOf } from "./workspace-check.js";
 import { changedExtraNames, sameWorkingFolder } from "./workspace-check.js";
 import { adoptionNote, sameAdoption } from "./workspace-repo-agents.js";
@@ -463,7 +463,7 @@ export function collectContractViolations(contractJson: Record<string, unknown> 
     return violations;
 }
 
-function buildResultJson(resultInput: unknown, child: { sessionId: string; parentSessionId?: string }, contractJson: Record<string, unknown> | null, existingResultJson: Record<string, unknown> | null, fallbackVerdict: string, missingResultCode?: string): { resultJson: Record<string, unknown>; verdict: string; summary: string; violations: Array<Record<string, unknown>>; strictBlocked: boolean } {
+export function buildResultJson(resultInput: unknown, child: { sessionId: string; parentSessionId?: string }, contractJson: Record<string, unknown> | null, existingResultJson: Record<string, unknown> | null, fallbackVerdict: string, missingResultCode?: string): { resultJson: Record<string, unknown>; verdict: string; summary: string; violations: Array<Record<string, unknown>>; strictBlocked: boolean } {
     const normalized = normalizeJsonObject(resultInput);
     const completedAt = new Date().toISOString();
     const baseResult: Record<string, any> = normalized
@@ -474,6 +474,7 @@ function buildResultJson(resultInput: unknown, child: { sessionId: string; paren
         };
     const result: Record<string, any> = {
         ...baseResult,
+        kind: "agent",
         sessionId: child.sessionId,
         parentSessionId: child.parentSessionId,
         verdict: typeof baseResult.verdict === "string" ? baseResult.verdict : fallbackVerdict,
@@ -874,7 +875,7 @@ export function createSessionProxy(
     config: SerializableSessionConfig,
     routingContract?: ActivityRoutingContract,
     /**
-     * Owner routing (1.0.86): with an owner tag, every activity below goes
+     * Owner routing (1.0.1000): with an owner tag, every activity below goes
      * only to workers that declare the tag. Older orchestrations pass none
      * and keep their routing.
      */
@@ -957,7 +958,7 @@ export function createSessionProxy(
                     ...(turnControl && turnMeta?.carriedSteers && turnMeta.carriedSteers.length > 0
                         ? { carriedSteers: turnMeta.carriedSteers }
                         : {}),
-                    // 1.0.86 (each only when set): what a session created
+                    // 1.0.1000 (each only when set): what a session created
                     // during this turn takes from it.
                     ...(turnMeta?.ownerTag ? { ownerTag: turnMeta.ownerTag } : {}),
                     ...(turnMeta?.workspaceBusyFastRelease ? { workspaceBusyFastRelease: true } : {}),
@@ -966,7 +967,7 @@ export function createSessionProxy(
                 },
                 affinityKey,
             );
-            // Owner routing (1.0.86): the owner's tag replaces the capability
+            // Owner routing (1.0.1000): the owner's tag replaces the capability
             // tag, the workflow-request one included; only workers of this
             // release can declare an owner tag.
             if (ownerTag) return routeOwnerActivity(task, ownerTag);
@@ -994,7 +995,7 @@ export function createSessionProxy(
                 ...(parentContext ? { parentContext } : {}),
                 ...(legacyToolNames ? { legacyToolNames: true } : {}),
             }, affinityKey);
-            // Owner routing (1.0.86): the capture reads the parent's session
+            // Owner routing (1.0.1000): the capture reads the parent's session
             // state on the worker that holds it, so it carries the owner's
             // tag instead of the tool-composition one, as the turn does.
             return ownerTag ? routeOwnerActivity(task, ownerTag) : routeToolCompositionActivity(task);
@@ -1350,13 +1351,13 @@ export function createSessionManagerProxy(
                 // Session workspaces (1.0.80): set only when the parent chose a record.
                 ...(workspaceChosen ? { workspaceChosen: true } : {}),
                 ...(lockTitle !== undefined ? { lockTitle } : {}),
-                // Owner routing (1.0.86): the child takes the parent's tag and busy policy.
+                // Owner routing (1.0.1000): the child takes the parent's tag and busy policy.
                 ...(routing?.ownerTag ? { ownerTag: routing.ownerTag } : {}),
                 ...(routing?.workspaceBusyFastRelease ? { workspaceBusyFastRelease: true } : {}),
             }), routingContract);
         },
         /**
-         * Owner routing (1.0.86): ask a worker with a capacity requester for
+         * Owner routing (1.0.1000): ask a worker with a capacity requester for
          * capacity for this session's owner. The activity answers within
          * about 15 seconds.
          */
@@ -1701,34 +1702,44 @@ export function registerActivities(
         sessionId: string,
         revision: number,
         current: import("./types.js").WorkspaceDefaultsRecord | null,
+        captured: import("./types.js").WorkspaceDefaultsRecord | null,
         trace: (message: string) => void,
     ): Promise<void> => {
         let previous: import("./types.js").WorkspaceDefaultsRecord | null | undefined = session.getRecordedDefaults();
-        if (previous === undefined) {
-            previous = null;
-            if (catalog) {
-                const [latest] = await catalog.getSessionEventsBefore(sessionId, Number.MAX_SAFE_INTEGER, 1, ["session.workspace_defaults"]).catch(() => []);
-                previous = readDefaultsRecord(latest?.data);
-            }
+        let hadPrevious = previous !== undefined;
+        let previousCaptured: import("./types.js").WorkspaceDefaultsRecord | null = null;
+        if (catalog) {
+            const [latest] = await catalog.getSessionEventsBefore(sessionId, Number.MAX_SAFE_INTEGER, 1, ["session.workspace_defaults"]).catch(() => []);
+            if (latest) hadPrevious = true;
+            if (previous === undefined) previous = readDefaultsRecord(latest?.data);
+            previousCaptured = Object.hasOwn(latest?.data ?? {}, "capturedDefaults")
+                ? readDefaultsRecord((latest?.data as any)?.capturedDefaults)
+                : readDefaultsRecord(latest?.data);
         }
-        if (sameDefaultsRecord(previous, current)) {
+        if (hadPrevious && sameDefaultsRecord(previous ?? null, current) && sameDefaultsRecord(previousCaptured, captured)) {
             session.setRecordedDefaults(current);
             return;
         }
         if (catalog) {
-            await cmsRetryBestEffort(
+            const persisted = await cmsRetryBestEffort(
                 `runTurn.recordEvent workspace-defaults session=${sessionId}`,
-                () => catalog!.recordEvents(sessionId, [{
-                    eventType: "session.workspace_defaults",
-                    data: {
-                        revision,
-                        workingFolder: current?.workingFolder ?? null,
-                        extra: current?.extra ?? [],
-                        ...(current?.skipped?.length ? { skipped: current.skipped } : {}),
-                    },
-                }], workerNodeId),
+                async () => {
+                    await catalog!.recordEvents(sessionId, [{
+                        eventType: "session.workspace_defaults",
+                        data: {
+                            revision,
+                            workingFolder: current?.workingFolder ?? null,
+                            extra: current?.extra ?? [],
+                            ...(current?.skipped?.length ? { skipped: current.skipped } : {}),
+                            capturedDefaults: captured,
+                        },
+                    }], workerNodeId);
+                    return true;
+                },
                 trace,
             );
+            if (persisted === true) session.setRecordedDefaults(current);
+            return;
         }
         session.setRecordedDefaults(current);
     };
@@ -1806,9 +1817,9 @@ export function registerActivities(
             stashedAttachments?: PromptAttachmentRef[];
             /** 1.0.81 (runTurnV4): steers carried from an earlier turn. Used from phase A4 on. */
             carriedSteers?: import("./types.js").LateSteer[];
-            /** 1.0.86: the session's owner tag, for the sessions this turn creates. */
+            /** 1.0.1000: the session's owner tag, for the sessions this turn creates. */
             ownerTag?: string;
-            /** 1.0.86: the fast workspace busy policy, for the sessions this turn creates. */
+            /** 1.0.1000: the fast workspace busy policy, for the sessions this turn creates. */
             workspaceBusyFastRelease?: boolean;
         },
         turnUsage: RuntimeMetricUsage,
@@ -2516,7 +2527,9 @@ export function registerActivities(
         // an extra folder; plus folders every session gets. Applied for this
         // turn only, never saved. Not for an orchestration older than 1.0.80,
         // which cannot hold a turn for a folder.
-        const workspaceDefaults = (runConfig as ManagedSessionConfig).workspaceToolsBlocked ? null
+        const workspaceConfig = runConfig as ManagedSessionConfig;
+        const workspaceDefaults = workspaceConfig.workspaceToolsBlocked ? null
+            : workspaceConfig.workspaceDefaults !== undefined ? workflowWorkspaceDefaults(workspaceConfig.workspaceDefaults)
             : await resolveWorkspaceDefaults(sessionManager.getWorkspaceProvider(), {
                 sessionId: input.sessionId,
                 rootSessionId: catalogSessionRow?.rootSessionId ?? input.sessionId,
@@ -2530,6 +2543,8 @@ export function registerActivities(
         const turnWorkspace = withDefaults.workspace;
         // Section 4.11: the defaults this turn used, once its folders attached.
         let turnDefaults: import("./types.js").WorkspaceDefaultsRecord | null = null;
+        const turnCapturedDefaults = capturedWorkspaceDefaultsRecord(workspaceDefaults);
+        (runConfig as ManagedSessionConfig).resolvedWorkspaceDefaults = turnCapturedDefaults;
         if (turnWorkspace) {
             const workspaceRevision = input.workspaceRevision ?? 1;
             const attachWorker = workerNodeId ?? os.hostname();
@@ -2649,8 +2664,13 @@ export function registerActivities(
                     // Section 4.11: which folders came from the deployment's
                     // defaults, and what the default home folder adopts when it
                     // is an extra folder (the working folder's adoption is above).
-                    ...(withDefaults.homeIsWorkingFolder && workspaceDefaults?.home ? { homeIsWorkingFolder: true } : {}),
+                    ...(withDefaults.homeIsWorkingFolder && workspaceDefaults?.home ? { homeIsWorkingFolder: true,
+                        homeRequired: workspaceDefaults.home.required === true } : {}),
+                    ...(capturedWorkspaceDefaultsRecord(workspaceDefaults) ? {
+                        capturedDefaults: capturedWorkspaceDefaultsRecord(workspaceDefaults)!,
+                    } : {}),
                     ...(withDefaults.defaultNames.length > 0 ? { defaultExtras: [...withDefaults.defaultNames] } : {}),
+                    ...(withDefaults.homeExtra ? { defaultHomeExtra: withDefaults.homeExtra } : {}),
                     ...(homeExtra && homeExtra.ok && homeExtra.adopt ? {
                         home: { name: homeExtra.name, path: homeExtra.attach.path, adopt: homeExtra.adopt, ...(homeExtra.repo ? { repo: homeExtra.repo } : {}) },
                     } : {}),
@@ -2982,7 +3002,7 @@ export function registerActivities(
             }
         }
 
-        // Owner routing (1.0.86): a session this turn creates gets the turn's
+        // Owner routing (1.0.1000): a session this turn creates gets the turn's
         // owner tag and busy policy. In an owner-routed tree a Workflow is not
         // started or tested and create_agent_session makes no new root
         // (owner-routing.ts).
@@ -3025,8 +3045,10 @@ export function registerActivities(
                 scripts: sessionManager.workflowScriptsEnabled,
                 // Stage 2.3: packages' Workflow Definitions, for a session to attach and start.
                 ...(packageWorkflowSource ? { packageWorkflows: packageWorkflowSource } : {}),
-                // OF-S2-7: an agent node's model chosen at start is checked against the owning session's catalog (its owner's).
+                // OF-S2-7: Agent and Decision choices use their separate current catalogs.
                 checkAgentModel: sdkClient._workflowAgentModelCheck(),
+                decisionCapability: sdkClient._workflowDecisionCapability(),
+                resolveDecisionProviderBindings: sdkClient._workflowDecisionProviderBindings(),
                 describeAgentTools: (node, binding, caller, agent) => sessionManager.describeWorkflowAgentTools(node, binding, caller, agent),
                 // The test operations only while workflow test mode is on (spec 16; off by default).
                 testMode: workflowTestModeFromEnv(),
@@ -3392,6 +3414,7 @@ export function registerActivities(
                     ? resolveEffectiveSpawnOwner((id) => catalog!.getSession(id), input.sessionId)
                     : null,
                 captureToolBinding: () => sessionManager.captureWorkflowToolBinding(input.sessionId),
+                captureWorkspace: () => sessionManager.captureWorkflowWorkspace(input.sessionId),
                 workflowHost,
             }),
 
@@ -3411,7 +3434,7 @@ export function registerActivities(
              * Stage 2.1: workflow_definition, this session's own definitions (definition-tool.ts). The calling session is the session;
              * refused inside a Workflow (A1, by the stored lineage).
              */
-            workflowDefinition: async (args: Record<string, unknown>, call?: { toolCallId?: string }) => {
+            workflowDefinition: async (args: Record<string, unknown>, call?: { toolCallId?: string; workspaceInherited?: boolean }) => {
                 if (ownerRoutedTree && (args.operation === "start" || args.operation === "test")) return workflowOwnerRoutedRefusal();
                 try { if (await definitionToolsRefused()) return workflowDefinitionToolsRefusal(); } catch (error) { return workflowToolErrorPayload(error); }
                 // A save's scripts gate from its YAML alone, before the host is made (e02ec6f8 run); a start's is decided on the
@@ -3427,6 +3450,8 @@ export function registerActivities(
                     // FB-008: a capture that fails is not swallowed here. A Start of a revision with script states is refused
                     // (session-definitions.ts startToolBinding); a test runs without the grant, its calls answered by fixtures.
                     binding: () => sessionManager.captureWorkflowToolBinding(input.sessionId),
+                    workspace: () => sessionManager.captureWorkflowWorkspace(input.sessionId),
+                    workspaceInherited: call?.workspaceInherited === true,
                     // Stage 2.3 (P4): the bound agent's workflows list, from the agent this worker loaded (its package, by id),
                     // else from the agent registry's manifest of that package.
                     agentWorkflows: () => boundAgentWorkflows(runConfig.boundAgentName ?? null, runConfig.boundAgentPackageId ?? null),
@@ -3659,7 +3684,8 @@ export function registerActivities(
                 title?: string;
                 lock_title?: boolean;
                 contract?: Record<string, unknown>;
-                workspace?: import("./types.js").SessionWorkspace | null;
+                workspace?: import("./types.js").SessionWorkspaceSelection;
+                workspaceInherited?: boolean;
             }) => {
                 let createdChildSessionId: string | undefined;
                 try {
@@ -3791,7 +3817,7 @@ export function registerActivities(
                     // on the child's first turn. The child id is assigned
                     // first because the provider attaches per session.
                     let childSessionIdForWorkspace: string | undefined;
-                    if (args.workspace) {
+                    if (args.workspace && args.workspace !== "none") {
                         childSessionIdForWorkspace = randomUUID();
                         const checked = await checkWorkspaceForSpawn(sessionManager.getWorkspaceProvider(), {
                             sessionId: childSessionIdForWorkspace,
@@ -3826,7 +3852,7 @@ export function registerActivities(
                         toolGrant: _parentToolGrant,
                         ...parentConfig
                     } = input.config;
-                    const childConfig: SerializableSessionConfig = {
+                    let childConfig: SerializableSessionConfig = {
                         ...parentConfig,
                         ...(boundAgentName ? { systemMessage: undefined } : {}),
                         ...(agentModel ? { model: agentModel } : {}),
@@ -3842,12 +3868,11 @@ export function registerActivities(
                         ...(contract ? { childContract: contract } : {}),
                         ...(composition ?? {}),
                     };
-                    // Session workspaces: omitted inherits the parent's
-                    // workspace (already in the spread), a record replaces
-                    // it, null gives the child none, and so does omitting it
-                    // where children get no workspace.
-                    if (args.workspace) childConfig.workspace = args.workspace;
-                    else if (args.workspace === null || childWorkspacesDisabled()) delete childConfig.workspace;
+                    // Where children get no workspace, an omitted one gives
+                    // the child none, as null does.
+                    childConfig = applySessionWorkspaceSelection(childConfig,
+                        args.workspace === undefined && childWorkspacesDisabled() ? null : args.workspace,
+                        args.workspaceInherited === true);
 
                     const parentSystemMsg = typeof childConfig.systemMessage === "string"
                         ? childConfig.systemMessage
@@ -3864,7 +3889,9 @@ export function registerActivities(
                         `- Your final response is automatically forwarded to the parent. Be thorough but concise — the parent synthesizes results from multiple agents. When your task is complete, provide a clear summary of your findings.\n` +
                         `- If the task implies ongoing monitoring or follow-through, keep yourself alive until the goal is complete: for ANY waiting or scheduling use the \`wait\`, \`wait_on_worker\`, \`cron\`, or \`cron_at\` tools — never setTimeout/sleep, and never poll inside one turn.\n` +
                         `- Prefer using \`store_fact\` for larger structured context handoffs across your session lineage; pass fact keys or \`read_facts\` pointers in messages/prompts instead of pasting large context blobs.\n` +
-                        `- FILESYSTEM ISOLATION: parent, siblings, and sub-agents run on separate worker pods and do NOT share a filesystem — the artifact store is the only shared byte channel (\`write_artifact({fromFile})\` → \`read_artifact({toFile})\`; never inline file bytes through messages). Include returned artifact:// links in your response.\n` +
+                        ((runConfig as ManagedSessionConfig).workflowInsideWorkflow === true
+                            ? `- FILESYSTEM ISOLATION: worker-local scratch files do NOT share a filesystem between pods. Attached durable workspace folders are shared: follow the Workflow's inherited workspace, coordinate edits, and allow only one writer when Git HEAD, index or stash can overlap. Use artifacts for worker-local transfers.\n`
+                            : `- FILESYSTEM ISOLATION: parent, siblings, and sub-agents run on separate worker pods and do NOT share a filesystem — the artifact store is the only shared byte channel (\`write_artifact({fromFile})\` → \`read_artifact({toFile})\`; never inline file bytes through messages). Include returned artifact:// links in your response.\n`) +
                         `- Model overrides: call list_available_models first and use only an exact provider:model value it returns.\n` +
                         `- Worker-managed system agents are not valid spawn targets; if one is missing, report that the workers likely need to be restarted.\n` +
                         (canSpawnMore
@@ -3892,6 +3919,8 @@ export function registerActivities(
                         ...spawnAgentCreationBudget(agentIsSystem, MAX_SUB_AGENTS),
                         ...childModelCreationOptions(childConfig),
                         ...(childConfig.workspace ? { workspace: childConfig.workspace } : {}),
+                        ...(childConfig.workspaceDefaults !== undefined ? { workspaceDefaults: childConfig.workspaceDefaults } : {}),
+                        ...(childConfig.workingDirectory ? { workingDirectory: childConfig.workingDirectory } : {}),
                         systemMessage: childConfig.systemMessage,
                         boundAgentName: childConfig.boundAgentName,
                         boundAgentPackageId: childConfig.boundAgentPackageId,
@@ -4381,7 +4410,7 @@ export function registerActivities(
                             return `[SYSTEM: complete_agent blocked by strict contract validation for ${child.orchId}: ${builtOutcome.violations.map(v => v.message || v.code).join("; ")}]`;
                         }
                     }
-                    if (catalog && builtOutcome) {
+                    if (catalog && builtOutcome && child.sessionKind !== "workflow") {
                         await cmsRetryCritical(
                             `runTurn.complete.upsertChildOutcome result child=${child.sessionId}`,
                             () => catalog!.upsertChildOutcome({
@@ -4421,7 +4450,7 @@ export function registerActivities(
                             builtOutcome = buildResultJson(args.partial_result, child, existing?.contractJson ?? null, existing?.resultJson ?? null, "cancelled", "completed_without_result");
                         }
                     }
-                    if (catalog && builtOutcome) {
+                    if (catalog && builtOutcome && child.sessionKind !== "workflow") {
                         await cmsRetryCritical(
                             `runTurn.cancel.upsertChildOutcome partial child=${child.sessionId}`,
                             () => catalog!.upsertChildOutcome({
@@ -5081,13 +5110,12 @@ export function registerActivities(
                 await noteWorkspaceOpened(session, input.sessionId, input.workspaceRevision ?? 1, { path: openedAttach.path, extraPaths }, (msg) => activityCtx.traceInfo(msg));
             }
 
-            // Section 4.11: the default folders this turn used, recorded when
-            // they change. Only where the provider has defaults at all, so a
-            // worker without them reads nothing more.
-            if (workspaceDefaults !== null || sessionManager.getWorkspaceProvider()?.defaultFolders) {
-                if (typeof session?.getRecordedDefaults === "function") {
-                    await noteWorkspaceDefaults(session, input.sessionId, input.workspaceRevision ?? 1, turnDefaults, (msg) => activityCtx.traceInfo(msg));
-                }
+            // Section 4.11: even an empty resolution is durable. It proves a
+            // real turn completed with no provider folders, rather than that
+            // defaults have not been resolved yet.
+            if (workspaceConfig.workspaceDefaults !== null && typeof session?.getRecordedDefaults === "function") {
+                await noteWorkspaceDefaults(session, input.sessionId, input.workspaceRevision ?? 1, turnDefaults,
+                    turnCapturedDefaults, (msg) => activityCtx.traceInfo(msg));
             }
 
             // Session workspaces (section 4.6): the repo agents and skills this
@@ -6644,6 +6672,8 @@ export function registerActivities(
                 ...spawnAgentCreationBudget(input.isSystem === true, WORKFLOW_CHILD_BUDGET_MAX),
                 ...childModelCreationOptions(input.config),
                 ...(input.config.workspace ? { workspace: input.config.workspace } : {}),
+                ...(input.config.workspaceDefaults !== undefined ? { workspaceDefaults: input.config.workspaceDefaults } : {}),
+                ...(input.config.workingDirectory ? { workingDirectory: input.config.workingDirectory } : {}),
                 systemMessage: input.config.systemMessage,
                 boundAgentName: input.config.boundAgentName,
                 boundAgentPackageId: input.config.boundAgentPackageId,
@@ -6656,7 +6686,7 @@ export function registerActivities(
                 waitThreshold: input.config.waitThreshold,
                 agentId: input.agentId,
                 ...(inheritedOwner ? { owner: inheritedOwner } : {}),
-                // Owner routing (1.0.86): the parent's tag and busy policy. A
+                // Owner routing (1.0.1000): the parent's tag and busy policy. A
                 // system child gets neither.
                 ...(!input.isSystem && isOwnerRoutingTag(input.ownerTag) ? { ownerTag: input.ownerTag } : {}),
                 ...(!input.isSystem && input.workspaceBusyFastRelease === true ? { workspaceBusyFastRelease: true } : {}),
@@ -7152,7 +7182,7 @@ export function registerActivities(
         };
     });
 
-    // ── requestOwnerCapacity (owner routing, 1.0.86) ────────
+    // ── requestOwnerCapacity (owner routing, 1.0.1000) ────────
     // Only workers with a capacity requester declare this activity's tag.
     // The answer comes within OWNER_CAPACITY_TIMEOUT_MS: a requester that is
     // still waiting then gets its signal, and the session waits on its timer
@@ -7299,7 +7329,7 @@ export function registerActivities(
         input: { sessionId: string; epoch: number; attemptId: string; archiveArtifactId?: string; archiveChunkIds?: string[]; handoff?: string; instructions?: string; distillerModel?: string; distillerReasoningEffort?: string; distillerContextTier?: string; ownerTag?: string; workspaceBusyFastRelease?: boolean },
     ) => {
         if (!catalog) throw new Error("distiller spawn requires the CMS catalog");
-        // Owner routing (1.0.86): the distiller runs with the served session's tag and busy policy.
+        // Owner routing (1.0.1000): the distiller runs with the served session's tag and busy policy.
         const distillerRouting = {
             ...(isOwnerRoutingTag(input.ownerTag) ? { ownerTag: input.ownerTag } : {}),
             ...(input.workspaceBusyFastRelease === true ? { workspaceBusyFastRelease: true } : {}),

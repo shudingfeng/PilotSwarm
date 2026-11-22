@@ -38,7 +38,9 @@ import { durableSessionOrchestration_1_0_82 } from "./orchestration_1_0_82/index
 import { durableSessionOrchestration_1_0_83 } from "./orchestration_1_0_83/index.js";
 import { durableSessionOrchestration_1_0_84 } from "./orchestration_1_0_84/index.js";
 import { durableSessionOrchestration_1_0_85 } from "./orchestration_1_0_85/index.js";
-import { durableSessionOrchestration_1_0_86 } from "./orchestration/index.js";
+import { durableSessionOrchestration_1_0_86 } from "./orchestration_1_0_86/index.js";
+// This fork's own version, upstream's 1.0.86 plus this fork's changes (FORK_ORCHESTRATION_BASES).
+import { durableSessionOrchestration_1_0_1000 } from "./orchestration/index.js";
 
 export const DURABLE_SESSION_ORCHESTRATION_NAME = "durable-session-v2";
 export { DURABLE_SESSION_LATEST_VERSION } from "./orchestration-version.js";
@@ -86,5 +88,6 @@ export const DURABLE_SESSION_ORCHESTRATION_REGISTRY: ReadonlyArray<{
     { version: "1.0.83", handler: durableSessionOrchestration_1_0_83 },
     { version: "1.0.84", handler: durableSessionOrchestration_1_0_84 },
     { version: "1.0.85", handler: durableSessionOrchestration_1_0_85 },
-    { version: DURABLE_SESSION_LATEST_VERSION, handler: durableSessionOrchestration_1_0_86 },
+    { version: "1.0.86", handler: durableSessionOrchestration_1_0_86 },
+    { version: DURABLE_SESSION_LATEST_VERSION, handler: durableSessionOrchestration_1_0_1000 },
 ];

@@ -8,9 +8,9 @@
  * literal) and in-flight 1.0.82 sessions keep replaying on it. The registry
  * registers it, and a later version (orchestration/) is the latest version: new
  * starts and every continue-as-new target it, the frozen copy's included.
- * 1.0.83, 1.0.84 and 1.0.85 were frozen in turn (orchestration-freeze-1-0-83,
- * -1-0-84 and -1-0-85.test.mjs); 1.0.86 added owner routing, and the frozen
- * 1.0.82 copy keeps 1.0.82's routing and busy policy.
+ * 1.0.83, 1.0.84, 1.0.85 and 1.0.86 were frozen in turn (orchestration-freeze-1-0-83,
+ * -1-0-84, -1-0-85 and -1-0-86.test.mjs); this fork's 1.0.1000 added owner routing,
+ * and the frozen 1.0.82 copy keeps 1.0.82's routing and busy policy.
  *
  * Run: node --test test/unit/orchestration-freeze-1-0-82.test.mjs
  */
@@ -43,7 +43,7 @@ function importsOf(text) {
 
 const LIVE_VERSION_LINE = "export const CURRENT_ORCHESTRATION_VERSION = DURABLE_SESSION_LATEST_VERSION;";
 const FROZEN_VERSION_LINE = 'export const CURRENT_ORCHESTRATION_VERSION = "1.0.82";';
-// The latest version's handler; orchestration-freeze-1-0-85.test.mjs pins the version itself.
+// The latest version's handler; orchestration-freeze-1-0-86.test.mjs pins the version itself (1.0.1000).
 const LATEST_HANDLER = `durableSessionOrchestration_${DURABLE_SESSION_LATEST_VERSION.replaceAll(".", "_")}`;
 
 function versionNumbers(version) {
@@ -70,7 +70,7 @@ test("the registry freezes 1.0.82 on its copy and registers a later version, fro
     assert.match(registry, new RegExp(`\\{ version: DURABLE_SESSION_LATEST_VERSION, handler: ${LATEST_HANDLER} \\}`));
     assert.ok(read("orchestration-version.ts").includes(`export const DURABLE_SESSION_LATEST_VERSION = "${DURABLE_SESSION_LATEST_VERSION}";`));
     // Every later frozen copy is imported from its own directory, never from the live tree.
-    for (const version of ["1.0.83", "1.0.84", "1.0.85"]) {
+    for (const version of ["1.0.83", "1.0.84", "1.0.85", "1.0.86"]) {
         const name = version.replaceAll(".", "_");
         assert.match(registry, new RegExp(`import \\{ durableSessionOrchestration_${name} \\} from "\\.\\/orchestration_${name}\\/index\\.js";`));
     }

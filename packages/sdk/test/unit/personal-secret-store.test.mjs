@@ -460,21 +460,32 @@ test("core loads no cloud SDK for personal secrets", () => {
     const dependencies = Object.keys({ ...manifest.dependencies, ...manifest.optionalDependencies, ...manifest.peerDependencies });
     assert.deepEqual(dependencies.filter((name) => /keyvault|secrets-manager|secret-manager|vault/i.test(name)), []);
 
-    // What loading the feature's modules actually resolves.
+    // What loading the feature's modules actually resolves, and which module asks for it.
     const modules = ["personal-secret-store.js", "secret-redaction.js", "cli-program-guard.js", "provider-store.js", "provider-catalog.js"]
         .map((name) => pathToFileURL(join(SDK_DIR, "dist", name)).href);
     const script = [
         'import { registerHooks } from "node:module";',
-        "const seen = new Set();",
+        "const seen = [];",
         "registerHooks({ resolve(specifier, context, next) {",
-        '    if (!/^(\\.|node:|file:)/.test(specifier)) seen.add(specifier);',
-        "    return next(specifier, context);",
+        "    const resolved = next(specifier, context);",
+        '    if (!specifier.startsWith("node:")) seen.push([specifier, context.parentURL ?? "", resolved.url]);',
+        "    return resolved;",
         "} });",
         `for (const url of ${JSON.stringify(modules)}) await import(url);`,
-        "console.log(JSON.stringify([...seen]));",
+        "console.log(JSON.stringify(seen));",
     ].join("\n");
     const run = spawnSync(process.execPath, ["--input-type=module", "-e", script], { cwd: SDK_DIR, encoding: "utf8" });
     assert.equal(run.status, 0, run.stderr);
-    const loaded = JSON.parse(run.stdout.trim().split("\n").at(-1));
-    assert.deepEqual(loaded.filter((specifier) => SECRET_SERVICE_SDK.test(specifier)), [], `loaded: ${loaded.join(", ")}`);
+    const resolutions = JSON.parse(run.stdout.trim().split("\n").at(-1));
+    const packages = resolutions.filter(([specifier]) => !/^(\.|file:)/.test(specifier));
+    const fromDist = (url, name) => url.startsWith("file:") && fileURLToPath(url) === join(SDK_DIR, "dist", name);
+    // The provider catalog reaches the Decision provider, whose Foundry credential
+    // authenticates model calls, not a secret store: that credential module is the
+    // one importer allowed to load @azure/identity, and only the Decision provider
+    // loads it.
+    const secretServiceLoads = packages.filter(([specifier, importer]) => SECRET_SERVICE_SDK.test(specifier)
+        && !(specifier === "@azure/identity" && fromDist(importer, "foundry-credentials.js")));
+    assert.deepEqual(secretServiceLoads, [], `loaded: ${[...new Set(packages.map(([specifier]) => specifier))].join(", ")}`);
+    const credentialImporters = resolutions.filter(([, , url]) => fromDist(url, "foundry-credentials.js")).map(([, importer]) => importer);
+    assert.ok(credentialImporters.every((importer) => fromDist(importer, "decision-provider.js")), `foundry-credentials.js loaded by ${credentialImporters.join(", ")}`);
 });

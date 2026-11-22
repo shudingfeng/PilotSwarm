@@ -294,11 +294,11 @@ function* projectNonRetryableTurnFailure(
     runtime: DurableSessionRuntime,
     errorMessage: string,
     clientMessageIds?: string[],
-    // 1.0.86, the capacity deny only: publish the status again once the
+    // 1.0.1000, the capacity deny only: publish the status again once the
     // response is written, in the same episode, so the status names the
     // refusal's response before the catalog shows the error. A client that
     // then syncs its response cursor from the status never reads the refusal
-    // again as its next turn's answer. Other callers keep 1.0.85's order.
+    // again as its next turn's answer. Other callers keep 1.0.86's order.
     opts: { statusAfterResponse?: boolean } = {},
 ): Generator<any, void, any> {
     yield* noteIntakeAttempt(runtime, { kind: "failed", cause: "non_retryable" });
@@ -490,7 +490,7 @@ export function* processPrompt(
 
     ctx.traceInfo(`[turn ${state.iteration}] session=${runtime.input.sessionId} prompt="${prompt.slice(0, 80)}"`);
 
-    // 1.0.86: an owner-tagged session asks for capacity before each turn,
+    // 1.0.1000: an owner-tagged session asks for capacity before each turn,
     // also when it keeps its worker: that worker may be gone. `deny` ends
     // the turn without a retry; `busy` holds the prompt on the busy timer,
     // as a WORKSPACE_BUSY refusal does. Neither runs a turn, so neither
@@ -653,7 +653,7 @@ export function* processPrompt(
                 : {}),
             ...(sender ? { sender } : {}),
             ...(attachments && attachments.length > 0 ? { attachments } : {}),
-            // 1.0.86: what a session this turn creates takes from it.
+            // 1.0.1000: what a session this turn creates takes from it.
             ...createdSessionRouting(runtime.options),
             // Store-wins (1.0.59): send only the turnKey. expectedVersion is
             // retired from the wire — the store-wins worker reconciles against
@@ -1267,7 +1267,7 @@ function holdRefusedTurnNote(runtime: DurableSessionRuntime, sourcePrompt: strin
  * schedule, and let another worker try after two failures in a row on one
  * worker (docs/proposals/session-workspaces.md, section 4.7).
  *
- * 1.0.86: a capacity `busy` answer holds the prompt the same way. With the
+ * 1.0.1000: a capacity `busy` answer holds the prompt the same way. With the
  * fast busy policy, a WORKSPACE_BUSY refusal releases the worker at once and
  * retries follow WORKSPACE_BUSY_RETRY_SCHEDULE_SECONDS. A hold that is not a
  * failure (`countsAsFailure: false`, no capacity answer) waits the answer's
@@ -1438,13 +1438,13 @@ export function* handleTurnResult(
             data: { revision: Math.max(1, state.workspaceRevision) },
         }]);
     }
-    // 1.0.86: a session without a workspace is held on the same timer by a
+    // 1.0.1000: a session without a workspace is held on the same timer by a
     // capacity request's busy answer, and by any turn result with the
     // workspace gate, such as a busy answer from an admission hook or a
     // credential resolver. For a session with an owner tag or the fast busy
     // policy, a turn that got past the gates ends that hold: the next one
     // starts the schedule again, and no retry count is carried. Any other
-    // session keeps 1.0.85's schedule (C4).
+    // session keeps 1.0.86's schedule (C4).
     if (pastGates && !state.config.workspace && (options.ownerTag || options.workspaceBusyFastRelease)
         && state.workspaceStatus?.state === "unavailable") {
         state.workspaceStatus = null;

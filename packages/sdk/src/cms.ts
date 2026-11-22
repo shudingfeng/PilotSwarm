@@ -18,7 +18,7 @@ import { ProviderStore } from "./provider-store.js";
 import { FeatureStore } from "./feature-store.js";
 import { MotdStore } from "./motd-store.js";
 import { redactSecrets, redactSecretsIn } from "./secret-redaction.js";
-import { systemSessionProtectedError, type SessionOwnerInfo, type SessionSummaryState, type TurnControlKind, type TurnControlAddResult, type TurnStartResult, type TurnLookInput, type TurnLookRow, type TurnEndKind, type TurnEndOptions, type TurnEndResult, type TurnControl, type TurnStartRecord } from "./types.js";
+import { isSystemSessionSharingRefusal, systemSessionProtectedError, systemSessionSharingError, type SessionOwnerInfo, type SessionSummaryState, type TurnControlKind, type TurnControlAddResult, type TurnStartResult, type TurnLookInput, type TurnLookRow, type TurnEndKind, type TurnEndOptions, type TurnEndResult, type TurnControl, type TurnStartRecord } from "./types.js";
 import type { MessageSender } from "./message-sender.js";
 import { TurnControlUnavailableError } from "./turn-control-contract.js";
 import type { TurnControlListenClient } from "./turn-control.js";
@@ -234,6 +234,14 @@ export interface SessionAccessSnapshot {
     viewerShareAccess: "read" | "write" | null;
 }
 
+/** Trusted actor metadata for a catalog-level sharing refusal audit. */
+export interface SessionShareAuditActor {
+    provider?: string | null;
+    subject?: string | null;
+    display?: string | null;
+    displayName?: string | null;
+}
+
 /** A directory entry for share autocomplete. */
 export interface KnownUserInfo {
     provider: string;
@@ -319,6 +327,7 @@ export interface SessionGroupRow {
 
 export interface ChildOutcomeRow {
     childSessionId: string;
+    outcomeType: "agent" | "workflow" | null;
     parentSessionId: string;
     contractJson: Record<string, unknown> | null;
     resultJson: Record<string, unknown> | null;
@@ -1334,10 +1343,16 @@ export interface SessionCatalog {
     // ── Visibility / sharing / audit (security model) ─────────
 
     /** Set the sharing level on the ROOT of the given session's tree. */
-    setSessionVisibility(sessionId: string, visibility: SessionVisibility): Promise<void>;
+    setSessionVisibility(sessionId: string, visibility: SessionVisibility, auditActor?: SessionShareAuditActor | null): Promise<void>;
 
     /** Grant (or update) a targeted share on the session's tree root. */
-    grantSessionShare(sessionId: string, grantee: SessionOwnerInfo, access: "read" | "write", grantedBy?: SessionOwnerInfo | null): Promise<void>;
+    grantSessionShare(
+        sessionId: string,
+        grantee: SessionOwnerInfo,
+        access: "read" | "write",
+        grantedBy?: SessionOwnerInfo | null,
+        auditActor?: SessionShareAuditActor | null,
+    ): Promise<void>;
 
     /** Revoke a targeted share on the session's tree root. */
     revokeSessionShare(sessionId: string, grantee: { provider: string; subject: string }): Promise<void>;
@@ -2542,11 +2557,44 @@ export class PgSessionCatalog implements SessionCatalog {
         }
     }
 
-    async setSessionVisibility(sessionId: string, visibility: SessionVisibility): Promise<void> {
-        await this.pool.query(
-            `SELECT ${this.sql.fn.setSessionVisibility}($1, $2)`,
-            [sessionId, visibility],
-        );
+    private async auditSystemSharingRefusal(
+        action: string,
+        sessionId: string,
+        actor?: SessionShareAuditActor | null,
+        target?: string | null,
+    ): Promise<void> {
+        await this.recordAuthzAudit({
+            actor: actor ? {
+                provider: actor.provider ?? null,
+                subject: actor.subject ?? null,
+                display: actor.display ?? actor.displayName ?? null,
+            } : null,
+            action,
+            sessionId,
+            target: target ?? null,
+            decision: "deny",
+            reason: "system_session_sharing_policy",
+            details: { source: "catalog" },
+        }).catch(() => {});
+    }
+
+    async setSessionVisibility(
+        sessionId: string,
+        visibility: SessionVisibility,
+        auditActor?: SessionShareAuditActor | null,
+    ): Promise<void> {
+        try {
+            await this.pool.query(
+                `SELECT ${this.sql.fn.setSessionVisibility}($1, $2)`,
+                [sessionId, visibility],
+            );
+        } catch (error) {
+            if (isSystemSessionSharingRefusal(error)) {
+                await this.auditSystemSharingRefusal("setSessionVisibility", sessionId, auditActor);
+                throw systemSessionSharingError();
+            }
+            throw error;
+        }
     }
 
     async grantSessionShare(
@@ -2554,20 +2602,34 @@ export class PgSessionCatalog implements SessionCatalog {
         grantee: SessionOwnerInfo,
         access: "read" | "write",
         grantedBy?: SessionOwnerInfo | null,
+        auditActor?: SessionShareAuditActor | null,
     ): Promise<void> {
-        await this.pool.query(
-            `SELECT ${this.sql.fn.grantSessionShare}($1, $2, $3, $4, $5, $6, $7, $8)`,
-            [
-                sessionId,
-                grantee.provider,
-                grantee.subject,
-                grantee.email ?? null,
-                grantee.displayName ?? null,
-                access,
-                grantedBy?.provider ?? null,
-                grantedBy?.subject ?? null,
-            ],
-        );
+        try {
+            await this.pool.query(
+                `SELECT ${this.sql.fn.grantSessionShare}($1, $2, $3, $4, $5, $6, $7, $8)`,
+                [
+                    sessionId,
+                    grantee.provider,
+                    grantee.subject,
+                    grantee.email ?? null,
+                    grantee.displayName ?? null,
+                    access,
+                    grantedBy?.provider ?? null,
+                    grantedBy?.subject ?? null,
+                ],
+            );
+        } catch (error) {
+            if (isSystemSessionSharingRefusal(error)) {
+                await this.auditSystemSharingRefusal(
+                    "grantSessionShare",
+                    sessionId,
+                    auditActor,
+                    `${grantee.provider}/${grantee.subject}`,
+                );
+                throw systemSessionSharingError();
+            }
+            throw error;
+        }
     }
 
     async revokeSessionShare(sessionId: string, grantee: { provider: string; subject: string }): Promise<void> {
@@ -4556,6 +4618,7 @@ function rowToSessionGroupRow(row: any): SessionGroupRow {
 function rowToChildOutcomeRow(row: any): ChildOutcomeRow {
     return {
         childSessionId: row.child_session_id,
+        outcomeType: row.outcome_type === "workflow" ? "workflow" : row.outcome_type === "agent" ? "agent" : null,
         parentSessionId: row.parent_session_id,
         contractJson: row.contract_json ?? null,
         resultJson: row.result_json ?? null,

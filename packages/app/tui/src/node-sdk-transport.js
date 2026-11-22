@@ -26,6 +26,8 @@ import {
 } from "pilotswarm-sdk";
 import { startEmbeddedWorkers, stopEmbeddedWorkers } from "./embedded-workers.js";
 import { getPluginDirsFromEnv } from "./plugin-config.js";
+import { guessArtifactContentType as guessSharedArtifactContentType } from "pilotswarm/ui-core";
+import { artifactUri } from "pilotswarm-sdk/api";
 
 const EXPORTS_DIR = path.resolve(
     expandUserPath(process.env.PILOTSWARM_EXPORT_DIR || path.join(os.homedir(), "pilotswarm-exports")),
@@ -320,28 +322,7 @@ export function defaultIdleTimeoutSecFromEnv(raw = process.env.PILOTSWARM_DEFAUL
 }
 
 function guessArtifactContentType(filename) {
-    const ext = path.extname(String(filename || "")).toLowerCase();
-    if (ext === ".md" || ext === ".markdown" || ext === ".mdx") return "text/markdown";
-    if (ext === ".json" || ext === ".jsonl") return "application/json";
-    if (ext === ".html" || ext === ".htm") return "text/html";
-    if (ext === ".csv") return "text/csv";
-    if (ext === ".yaml" || ext === ".yml") return "text/yaml";
-    if (ext === ".xml") return "application/xml";
-    if (ext === ".js" || ext === ".mjs" || ext === ".cjs") return "application/javascript";
-    if (ext === ".pdf") return "application/pdf";
-    if (ext === ".zip") return "application/zip";
-    if (ext === ".tar") return "application/x-tar";
-    if (ext === ".tgz" || ext === ".gz") return "application/gzip";
-    if (ext === ".png") return "image/png";
-    if (ext === ".jpg" || ext === ".jpeg") return "image/jpeg";
-    if (ext === ".gif") return "image/gif";
-    if (ext === ".webp") return "image/webp";
-    if (ext === ".svg") return "image/svg+xml";
-    if (ext === ".xlsx") return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
-    if (ext === ".docx") return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
-    if (ext === ".pptx") return "application/vnd.openxmlformats-officedocument.presentationml.presentation";
-    if (ext === ".bin") return "application/octet-stream";
-    return "text/plain";
+    return guessSharedArtifactContentType(filename, { unknownType: "text/plain" });
 }
 
 function spawnDetached(command, args) {
@@ -596,6 +577,9 @@ export class NodeSdkTransport {
         // The native TUI runs as the local user. Portal deployments override
         // this per-RPC from the auth context inside PortalRuntime.call().
         this.currentUser = currentUser ? normalizeUserPrincipal(currentUser) : { ...LOCAL_DEFAULT_USER_PRINCIPAL };
+        this.systemVisibility = String(process.env.SESSIONS_SYSTEM_VISIBILITY || "").trim().toLowerCase() === "admin"
+            ? "admin"
+            : "read";
     }
 
     /**
@@ -1097,7 +1081,12 @@ export class NodeSdkTransport {
     // ── Session sharing / access (security model) ────────────────
 
     async getSessionAccess(sessionId, viewer) {
-        return this.mgmt.getSessionAccess(sessionId, viewer);
+        const resolved = resolveUserPrincipalFor(this, viewer);
+        const access = await this.mgmt.getSessionAccess(sessionId, resolved);
+        return access ? {
+            ...access,
+            systemVisibility: access.isSystem ? this.systemVisibility : null,
+        } : null;
     }
 
     /** What a person may send to a session by its workflow lineage (workflow agent states refuse human input). */
@@ -1105,8 +1094,8 @@ export class NodeSdkTransport {
         return typeof this.mgmt.getWorkflowInputPolicy === "function" ? this.mgmt.getWorkflowInputPolicy(sessionId) : null;
     }
 
-    async setSessionVisibility(sessionId, visibility) {
-        return this.mgmt.setSessionVisibility(sessionId, visibility);
+    async setSessionVisibility(sessionId, visibility, auditActor) {
+        return this.mgmt.setSessionVisibility(sessionId, visibility, auditActor ?? this.currentUser);
     }
 
     /** The delegation record of the session's tree, or null: the portal keeps such a tree shared for reading only. */
@@ -1114,8 +1103,8 @@ export class NodeSdkTransport {
         return this.mgmt.getSessionDelegation(sessionId);
     }
 
-    async grantSessionShare(sessionId, grantee, access, grantedBy) {
-        return this.mgmt.grantSessionShare(sessionId, grantee, access, grantedBy);
+    async grantSessionShare(sessionId, grantee, access, grantedBy, auditActor) {
+        return this.mgmt.grantSessionShare(sessionId, grantee, access, grantedBy, auditActor ?? this.currentUser);
     }
 
     async revokeSessionShare(sessionId, grantee) {
@@ -1778,6 +1767,13 @@ export class NodeSdkTransport {
         return await this.mgmt.listRuntimeModels(resolvedViewer);
     }
 
+    async listRuntimeDecisionModels(viewer = undefined) {
+        const hasExplicitViewer = viewer && typeof viewer === "object"
+            && Object.prototype.hasOwnProperty.call(viewer, "principal");
+        const resolvedViewer = hasExplicitViewer ? viewer : await this._modelProviderViewer();
+        return this.mgmt.listRuntimeDecisionModels(resolvedViewer);
+    }
+
     async _modelProviderViewer() {
         const principal = resolveUserPrincipalFor(this, null);
         const profile = await this.mgmt.getUserProfile(principal).catch(() => null);
@@ -2055,7 +2051,7 @@ export class NodeSdkTransport {
         return resolved;
     }
 
-    async uploadArtifactContent(sessionId, filename, content, contentType = guessArtifactContentType(filename), contentEncoding = null) {
+    async uploadArtifactContent(sessionId, filename, content, contentType = guessArtifactContentType(filename), contentEncoding = null, ifAbsent = false) {
         if (!this.artifactStore) {
             throw new Error("Artifact store is not available for this transport.");
         }
@@ -2084,6 +2080,7 @@ export class NodeSdkTransport {
             safeFilename,
             safeContent,
             contentType || guessArtifactContentType(safeFilename),
+            { ifAbsent: ifAbsent === true },
         );
 
         return {
@@ -2148,7 +2145,7 @@ export class NodeSdkTransport {
         return {
             sessionId,
             filename,
-            artifactLink: `artifact://${sessionId}/${filename}`,
+            artifactLink: artifactUri(sessionId, filename),
             sizeBytes: Buffer.byteLength(content, "utf8"),
         };
     }

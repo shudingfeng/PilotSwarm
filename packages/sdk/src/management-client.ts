@@ -17,7 +17,9 @@ import {
     commandResponseKey,
     stopTurnQueueName,
     sanitizePromptAttachmentRefs,
+    isSystemSessionSharingRefusal,
     systemSessionProtectedError,
+    systemSessionSharingError,
     SYSTEM_AGENT_LOADED,
 } from "./types.js";
 import type {
@@ -139,6 +141,7 @@ import type {
     SessionAccessSnapshot,
     AuthzAuditEntry,
     KnownUserInfo,
+    SessionShareAuditActor,
 } from "./cms.js";
 import type {
     FactStore, EnhancedFactStore, FactsStatsRow, FactsTombstoneStats, FactRecord, StoreFactInput,
@@ -157,7 +160,9 @@ import { SessionDumper } from "./session-dumper.js";
 import { computeSessionFootprint, FootprintCache, type SessionFootprint } from "./footprint.js";
 import { catalogModelNames, loadModelProviders, loadModelProviderTypes, providerTypeUsesWorkloadIdentity, type ModelProviderRegistry, type ModelDescriptor, type ReasoningEffort, type ContextTier } from "./model-providers.js";
 import {
-    applyModelDiscovery, bootstrapProviders, providerOffersModel, resolveProviderCredential, resolveRuntimeModelSelection,
+    applyModelDiscovery, bootstrapProviders, providerOffersModel, resolveClusterDecisionCapability, resolveProviderCredential,
+    resolveQualifiedDecisionProviderCredential, resolveRuntimeDecisionProviderBinding, resolveRuntimeModelSelection,
+    runtimeDecisionModels, type ClusterDecisionCapability, type RuntimeDecisionProviderBinding,
 } from "./provider-catalog.js";
 import {
     resolvePendingQuestion, deriveStatusFromCmsAndRuntime, shouldRecordWorkflowControllerFailed, shouldSyncCompletedStatus, shouldSyncFailedStatus,
@@ -179,7 +184,7 @@ import { createFactTools } from "./facts-tools.js";
 import { workflowAgentToolOffer } from "./workflow/agent-tools.js";
 import { COPILOT_NATIVE_TOOL_NAMES } from "./reserved-tool-names.js";
 import { NATIVE_EXCLUDED_TOOLS } from "./native-subagents.js";
-import { readWorkflowModel, workflowExclusiveRead } from "./workflow/tools.js";
+import { readWorkflowModel, retainedWorkflowReadModel, workflowExclusiveRead } from "./workflow/tools.js";
 import { WORKFLOW_READ_STATUS } from "./workflow/read-pages.js";
 import { updateWorkflowForPerson, workflowCapabilities, workflowCommandsForPerson, workflowCommandStatus } from "./workflow/human-commands.js";
 import {
@@ -676,7 +681,7 @@ export interface ProviderCredentialUpdateInput {
 }
 
 export interface ModelDefaultInput {
-    scope: "user" | "cluster";
+    scope: "user" | "cluster" | "cluster_decision";
     provider: string | null;
     model: string | null;
     reasoningEffort?: ReasoningEffort | null;
@@ -696,7 +701,7 @@ export interface ResolvedModelDefault {
     model: string;
     reasoningEffort: ReasoningEffort | null;
     contextTier: ContextTier | null;
-    source: "user_default" | "cluster_default" | "system_default" | "first_available";
+    source: "user_default" | "cluster_default" | "system_default" | "first_available" | "cluster_decision_default";
 }
 
 /** Which limit on which provider: one per (period, scope). */
@@ -744,47 +749,72 @@ export interface ProviderUsageQuery extends UsageFilters {
 /** The whole usage view in one answer: totals, the daily chart, one breakdown. */
 /** What the cluster summary is asked for. */
 export interface ProviderUsageSummaryQuery {
-    /** Days of history for the chart and the model table: 1–365, default 14. */
+    /** Days of history for the chart and the model table: 1-365, default 14. */
     days?: number;
     /** Only these providers; empty or absent means all of them. */
     providers?: string[];
 }
 
-/** One window's four-way token split. */
-export interface ProviderUsageSummaryWindow {
-    input: number; output: number; cacheRead: number; cacheWrite: number;
-    total: number; turns: number; sessions: number;
+/** Counts and token semantics shared by every settled-usage projection. */
+export interface ProviderUsageOperationCounts {
+    /** Settled non-chat inference operations. */
+    operations: number;
+    /** Settled operations whose provider omitted a complete usage count. */
+    unknownUsageOperations: number;
 }
 
-/** The cluster summary, as `cms_provider_usage_summary` builds it. */
+/** A window token split and separate chat/operation counts. */
+export interface ProviderUsageSummaryWindow extends ProviderUsageOperationCounts {
+    input: number; output: number; cacheRead: number; cacheWrite: number;
+    total: number;
+    /** Tokens from chat turns only, so Tok/turn never includes Decision operations. */
+    turnTokens: number;
+    turns: number; sessions: number;
+}
+
+/** The cluster summary, as cms_provider_usage_summary builds it. */
 export interface ProviderUsageSummary {
     days: number;
-    /** The UTC day the windows and series count as "today". */
+    /** The UTC day the windows and series count as today. */
     today: string;
-    /** "cluster" for an admin, "mine" for everyone else. */
+    /** cluster for an admin, mine for everyone else. */
     scope: "cluster" | "mine";
     windows: { day: ProviderUsageSummaryWindow; week: ProviderUsageSummaryWindow; month: ProviderUsageSummaryWindow };
-    daily: Array<{ day: string; input: number; output: number; cacheRead: number; cacheWrite: number; total: number; turns: number }>;
+    daily: Array<{ day: string; input: number; output: number; cacheRead: number; cacheWrite: number;
+        total: number; turnTokens: number; turns: number } & ProviderUsageOperationCounts>;
     /** Pivoted on the model NAME, across providers, efforts and context tiers. */
     models: Array<{
-        model: string; providers: number; turns: number;
+        model: string; providers: number; turns: number; turnTokens: number;
         input: number; output: number; cacheRead: number; cacheWrite: number; total: number;
         daily: Array<{ day: string; total: number }>;
-    }>;
-    classes: Array<{ chargeClass: string; total: number; turns: number }>;
+    } & ProviderUsageOperationCounts>;
+    classes: Array<{ chargeClass: string; total: number; turns: number; turnTokens: number } & ProviderUsageOperationCounts>;
+}
+
+/** Per-agent usage over the same rows and filter as the cluster summary. */
+export interface ProviderUsageAgent extends ProviderUsageOperationCounts {
+    agent: string; models: string[]; turns: number; turnTokens: number; sessions: number;
+    input: number; output: number; cacheRead: number; cacheWrite: number; total: number;
+    daily: Array<{ day: string; total: number }>;
+}
+
+export interface ProviderUsageAgents {
+    days: number; today: string; scope: "cluster" | "mine";
+    agents: ProviderUsageAgent[];
+    daily: Array<{ day: string; agent: string; total: number; turnTokens: number; turns: number } & ProviderUsageOperationCounts>;
 }
 
 export interface ProviderUsageReport {
-    totals: { tokensTotal: number; turns: number; sessions: number };
+    totals: { tokensTotal: number; turnTokens: number; turns: number; sessions: number } & ProviderUsageOperationCounts;
     daily: Array<{
-        dayUtc: string; tokensTotal: number; turns: number;
+        dayUtc: string; tokensTotal: number; turnTokens: number; turns: number;
         /** The four parts of tokensTotal. */
         tokensInput: number; tokensOutput: number; tokensCacheRead: number; tokensCacheWrite: number;
-    }>;
-    breakdown: Array<{ key: string; label: string; tokensTotal: number; turns: number }>;
+    } & ProviderUsageOperationCounts>;
+    breakdown: Array<{ key: string; label: string; tokensTotal: number; turnTokens: number; turns: number } & ProviderUsageOperationCounts>;
     /** The dimension actually grouped by, which is the default when the request named an unknown one. */
     dimension: ProviderUsageDimension;
-    /** True when more rows exist than `limit` returned. */
+    /** True when more rows exist than limit returned. */
     truncated: boolean;
 }
 
@@ -1415,9 +1445,18 @@ export class PilotSwarmManagementClient {
     }
 
     /** Set the sharing level on the ROOT of the given session's tree. */
-    async setSessionVisibility(sessionId: string, visibility: SessionVisibility): Promise<void> {
+    async setSessionVisibility(
+        sessionId: string,
+        visibility: SessionVisibility,
+        auditActor?: SessionShareAuditActor | null,
+    ): Promise<void> {
         this._ensureStarted();
-        await this._catalog!.setSessionVisibility(sessionId, visibility);
+        try {
+            await this._catalog!.setSessionVisibility(sessionId, visibility, auditActor);
+        } catch (error) {
+            if (isSystemSessionSharingRefusal(error)) throw systemSessionSharingError();
+            throw error;
+        }
     }
 
     /** Grant (or update) a targeted share on the session's tree root. */
@@ -1426,19 +1465,26 @@ export class PilotSwarmManagementClient {
         grantee: { provider: string; subject: string; email?: string | null; displayName?: string | null },
         access: "read" | "write",
         grantedBy?: { provider: string; subject: string } | null,
+        auditActor?: SessionShareAuditActor | null,
     ): Promise<void> {
         this._ensureStarted();
-        await this._catalog!.grantSessionShare(
-            sessionId,
-            {
-                provider: grantee.provider,
-                subject: grantee.subject,
-                email: grantee.email ?? null,
-                displayName: grantee.displayName ?? null,
-            },
-            access,
-            grantedBy ? { provider: grantedBy.provider, subject: grantedBy.subject, email: null, displayName: null } : null,
-        );
+        try {
+            await this._catalog!.grantSessionShare(
+                sessionId,
+                {
+                    provider: grantee.provider,
+                    subject: grantee.subject,
+                    email: grantee.email ?? null,
+                    displayName: grantee.displayName ?? null,
+                },
+                access,
+                grantedBy ? { provider: grantedBy.provider, subject: grantedBy.subject, email: null, displayName: null } : null,
+                auditActor,
+            );
+        } catch (error) {
+            if (isSystemSessionSharingRefusal(error)) throw systemSessionSharingError();
+            throw error;
+        }
     }
 
     /** Revoke a targeted share on the session's tree root. */
@@ -2219,7 +2265,9 @@ export class PilotSwarmManagementClient {
      * each section pages on (run.pages), bounded as the read_workflow tool
      * bounds them; the YAML is omitted. `cursor` (a nextCursor a read
      * returned, given back as it was) reads that section's next, older page
-     * instead, and `executionId` one node execution's whole output or error;
+     * instead, and `executionId` one node execution's whole input
+     * (`execution.input`) and whole output or error (`execution.result`;
+     * each node execution row has an `inputPreview` beside its preview);
      * `limit` (1 to 200) sets the rows per page, and `kvRevision` (with an
      * optional `kvKey`) reads one revision of the run's variables
      * (readWorkflowView; a revision it does not have is
@@ -2264,7 +2312,24 @@ export class PilotSwarmManagementClient {
             throw failure("INVALID_REQUEST", 400, "runId must be a run id of 1 to 256 characters.");
         }
         const session = await this._catalog!.getSession(sessionId);
-        if (!session || session.deletedAt) throw failure("NOT_FOUND", 404, "Session not found.");
+        if (!session || session.deletedAt) {
+            const retained = await this._catalog!.getChildOutcome(sessionId);
+            if (retained) {
+                try {
+                    return retainedWorkflowReadModel(sessionId, retained, { ...options,
+                        ...(options?.runId !== undefined ? { run_id: options.runId } : {}),
+                    });
+                } catch (error) {
+                    const status = error instanceof WorkflowStoreError ? WORKFLOW_READ_STATUS[error.code] : undefined;
+                    if (error instanceof WorkflowStoreError && status !== undefined) {
+                        Object.assign(error, { status });
+                        throw error;
+                    }
+                    throw error;
+                }
+            }
+            throw failure("NOT_FOUND", 404, "Session not found.");
+        }
         const store = this._catalog!.workflowStore?.();
         if (session.sessionKind !== "workflow" || !store) throw failure("WORKFLOW_NOT_FOUND", 404, "This session is not a durable Workflow.");
         const request = { ...options, runId };
@@ -2368,6 +2433,8 @@ export class PilotSwarmManagementClient {
             // OF7-R2: a person's real-agent test, start or publish_and_start with agent models is checked against the owning
             // session's catalog before anything is admitted.
             checkAgentModel: (choice, owner) => this._checkWorkflowAgentModel(choice, owner),
+            decisionCapability: () => this._workflowDecisionCapability(),
+            resolveDecisionProviderBindings: models => this._workflowDecisionProviderBindings(models),
         };
         try {
             // A command that names the session it comes from is refused a definition operation from inside a Workflow (SF-2).
@@ -2420,11 +2487,31 @@ export class PilotSwarmManagementClient {
             ...(packages ? { packageWorkflows: packages } : {}),
             // OF-S2-7: an agent node's model chosen at start is checked against the owning session's catalog (its owner's).
             checkAgentModel: (choice, owner) => this._checkWorkflowAgentModel(choice, owner),
+            decisionCapability: () => this._workflowDecisionCapability(),
+            resolveDecisionProviderBindings: models => this._workflowDecisionProviderBindings(models),
             // A person's Start has no parent grant; only the step's defaults and its agent's own declarations are available.
             describeAgentTools: async (node, _binding, _caller, agent) => ({ ...workflowAgentToolOffer(node, null, [],
                 [...defaults, ...(agent?.tools ?? []).map(name => ({ name }))], {}, agent,
                 COPILOT_NATIVE_TOOL_NAMES.filter(name => !NATIVE_EXCLUDED_TOOLS.includes(name) && name !== "task")), unchecked: true }),
         };
+    }
+
+    /** Fresh shared Decision availability; save and Start never rely on a cached chat default or first model. */
+    private async _workflowDecisionCapability(): Promise<ClusterDecisionCapability> {
+        const store = this._catalog?.providers;
+        if (!store || !this._modelProviders) {
+            return { available: false, defaultModel: null, models: [], reason: "no_cluster_decision_default" };
+        }
+        const [credentials, configured] = await Promise.all([store.allCredentials(), store.getClusterDecisionDefault()]);
+        return resolveClusterDecisionCapability(this._modelProviders, credentials, configured);
+    }
+
+    private async _workflowDecisionProviderBindings(models: string[]): Promise<Record<string, RuntimeDecisionProviderBinding | null>> {
+        const store = this._catalog?.providers;
+        if (!store || !this._modelProviders) return Object.fromEntries(models.map(model => [model, null]));
+        const credentials = await store.allCredentials();
+        return Object.fromEntries(models.map(model => [model,
+            resolveRuntimeDecisionProviderBinding(this._modelProviders, credentials, model)]));
     }
 
     /**
@@ -2556,8 +2643,11 @@ export class PilotSwarmManagementClient {
      */
     async startSessionWorkflowDefinition(ownerSessionId: string, request: { definitionId: string; revision?: number | null; runAgainOf?: string | null;
         inputs?: unknown; vars?: Record<string, unknown> | null; notifyParent?: boolean; operationId: string; key?: string;
-        /** OF-S2-7: agent node models chosen at start, by state id (agent-models.ts); absent with runAgainOf: the repeated one's. */
-        agentModels?: unknown },
+        workspace?: SessionWorkspace | { root: string; folder?: string; extra?: Record<string, unknown> } | null | "none";
+        /** Agent node models chosen at start, by state id (agent-models.ts); absent with runAgainOf: the repeated one's. */
+        agentModels?: unknown;
+        /** Additive Decision-node model overrides; absent with Run again retains the repeated effective bindings. */
+        decisionModels?: unknown },
         options: { principal?: { provider?: string | null; subject?: string | null } | null } = {}): Promise<Record<string, unknown>> {
         try {
             this._requirePersonCommands();
@@ -2569,13 +2659,48 @@ export class PilotSwarmManagementClient {
             const subject = String(options.principal?.subject ?? "").trim();
             const actor: WorkflowActor = provider && subject ? { kind: "user", provider, subject } : { kind: "system", name: "management-client" };
             const inputs = request.inputs === undefined ? {} : request.inputs;
+            const [workspaceView, creationConfig, latestDefaultsEvents, latestWorkspaceEvents] = await Promise.all([
+                this.getSessionWorkspace(ownerSessionId),
+                this._catalog!.getSessionCreationConfig?.(ownerSessionId) ?? Promise.resolve(null),
+                this._catalog!.getSessionEventsBefore(ownerSessionId, Number.MAX_SAFE_INTEGER, 1, ["session.workspace_defaults"]),
+                this._catalog!.getSessionEventsBefore(ownerSessionId, Number.MAX_SAFE_INTEGER, 1, ["session.workspace_changed"]),
+            ]);
+            const inheritedWorkspace = !Object.hasOwn(request, "workspace");
+            const creation = creationConfig && typeof creationConfig === "object" ? creationConfig as Record<string, unknown> : null;
+            const latestWorkspaceEvent = latestWorkspaceEvents.find(event => event.eventType === "session.workspace_changed") as any;
+            const workspaceRevision = Number(latestWorkspaceEvent?.data?.revision ?? workspaceView.revision ?? 0) || 0;
+            const latestWorkspace = latestWorkspaceEvent
+                ? (latestWorkspaceEvent.data?.workspace && typeof latestWorkspaceEvent.data.workspace === "object"
+                    ? latestWorkspaceEvent.data.workspace as SessionWorkspace : null)
+                : workspaceView.workspace;
+            const capturedWorkspace = latestWorkspace
+                ?? (inheritedWorkspace && workspaceRevision === 0 && creation?.workspace && typeof creation.workspace === "object"
+                    ? creation.workspace as SessionWorkspace : null);
+            const defaultsEvent = latestDefaultsEvents.find(event => event.eventType === "session.workspace_defaults") as any;
+            const hasCreationDefaults = creation !== null && Object.hasOwn(creation, "workspaceDefaults");
+            if (request.workspace !== "none" && !defaultsEvent && !hasCreationDefaults) {
+                throw new WorkflowStoreError("WORKFLOW_COMMAND_INVALID", "The Workflow was not started because this session's effective "
+                    + "default folders have not been captured yet. Send one turn in the session, then start it again. Nothing was started.");
+            }
+            const capturedDefaults = defaultsEvent
+                ? readDefaultsRecord(Object.hasOwn(defaultsEvent.data ?? {}, "capturedDefaults")
+                    ? defaultsEvent.data.capturedDefaults : defaultsEvent.data)
+                : hasCreationDefaults ? readDefaultsRecord(creation.workspaceDefaults) : null;
+            const capturedWorkingDirectory = inheritedWorkspace && workspaceRevision === 0 && capturedWorkspace === null
+                && typeof creation?.workingDirectory === "string" && creation.workingDirectory
+                ? creation.workingDirectory : undefined;
             return (await startSessionWorkflowDefinition(host, { ownerSessionId: ownerSessionId, definition: { definitionId: request.definitionId },
                 revision: request.revision ?? null, runAgainOf: request.runAgainOf ?? null, inputs: inputs as JsonValue,
                 vars: (request.vars ?? null) as { [key: string]: JsonValue } | null, notifyParent: request.notifyParent !== false, actor,
                 operationId: request.operationId,
                 ...(request.key !== undefined ? { key: request.key } : {}),
+                workspace: inheritedWorkspace ? capturedWorkspace : (request.workspace ?? null),
+                workspaceDefaults: request.workspace === "none" ? null : capturedDefaults,
+                ...(capturedWorkingDirectory ? { workspaceWorkingDirectory: capturedWorkingDirectory } : {}),
+                workspaceInherited: inheritedWorkspace,
                 // OF7-R4: kept as given, an explicit {} included (it clears Run again's choices); the start parses and checks it.
                 ...(request.agentModels !== undefined && request.agentModels !== null ? { agentModels: request.agentModels } : {}),
+                ...(request.decisionModels !== undefined && request.decisionModels !== null ? { decisionModels: request.decisionModels } : {}),
             })) as unknown as Record<string, unknown>;
         } catch (error) {
             throw this._definitionFailure(error);
@@ -2731,9 +2856,23 @@ export class PilotSwarmManagementClient {
     }
 
     async getWorkflowCapabilities(): Promise<Record<string, unknown> | null> {
+        let decision: ClusterDecisionCapability | undefined;
+        const store = this._catalog?.providers;
+        if (store) {
+            try {
+                const [credentials, configured] = await Promise.all([store.allCredentials(), store.getClusterDecisionDefault()]);
+                decision = resolveClusterDecisionCapability(this._modelProviders,
+                    credentials.sort((a, b) => a.name.localeCompare(b.name)), configured);
+            } catch {
+                // Decision is an optional catalog capability. A failed provider/default read must not remove the
+                // ordinary Workflow capability advertisement. Admission remains fail-closed.
+                decision = { available: false, defaultModel: null, models: [], reason: "cluster_decision_default_ineligible" };
+            }
+        }
         return workflowCapabilities({
             read: typeof this._catalog?.workflowStore === "function",
             commands: this.config?.workflowCommands ?? null,
+            decision,
         });
     }
 
@@ -5259,7 +5398,7 @@ export class PilotSwarmManagementClient {
         actor: number | null,
         isAdmin: boolean,
         tuple: DefaultTuple,
-        scope: "user" | "cluster" | "system",
+        scope: "user" | "cluster" | "system" | "cluster_decision",
     ): Promise<DefaultTuple> {
         if (!tuple.provider) return normalizeDefaultTuple(null);
         await this._refreshModelDiscovery(await store.allCredentials());
@@ -5269,19 +5408,36 @@ export class PilotSwarmManagementClient {
         if (scope === "user" && !row.usableByMe) {
             throw new ProviderError("PROVIDER_NOT_FOUND", `There is no provider named "${tuple.provider}".`);
         }
-        if (scope === "cluster" && row.class !== "shared") {
-            throw new ProviderError("PROVIDER_INVALID", "The cluster default must be a shared provider.");
+        if ((scope === "cluster" || scope === "cluster_decision") && row.class !== "shared") {
+            throw new ProviderError("PROVIDER_INVALID", scope === "cluster_decision"
+                ? "The Cluster Decision Default must be a shared provider."
+                : "The cluster default must be a shared provider.");
         }
         if (scope === "system" && !row.systemEligible) {
             throw new ProviderError("PROVIDER_INVALID", `Provider "${row.name}" is not enabled for system sessions.`);
         }
-        const normalized = this._normalizeProviderTuple(row, tuple);
+        let normalized: DefaultTuple;
+        if (scope === "cluster_decision") {
+            const prefix = `${row.name}:`;
+            const modelName = tuple.model?.startsWith(prefix) ? tuple.model.slice(prefix.length) : "";
+            if (!modelName || !this._modelProviders?.getDecisionDescriptor(`${row.typeId}:${modelName}`)) {
+                throw new ProviderError("PROVIDER_INVALID", `The model must name an exact Decision model offered by "${row.name}": "${row.name}:<model>".`);
+            }
+            if (tuple.reasoning || tuple.context) {
+                throw new ProviderError("PROVIDER_INVALID", "Decision models do not offer chat reasoning efforts or context tiers.");
+            }
+            normalized = { provider: row.name, model: `${row.name}:${modelName}`, reasoning: null, context: null };
+        } else {
+            normalized = this._normalizeProviderTuple(row, tuple);
+        }
         const credential = scope === "system"
             ? await store.getSystemCredential(row.name)
             : await store.getCredential(row.name, actor);
         const modelName = normalized.model!.slice(normalized.model!.indexOf(":") + 1);
         if (!credential || !this._modelProviders
-            || !resolveProviderCredential(this._modelProviders, credential, modelName)) {
+            || !(scope === "cluster_decision"
+                ? resolveQualifiedDecisionProviderCredential(this._modelProviders, credential, modelName)
+                : resolveProviderCredential(this._modelProviders, credential, modelName))) {
             throw new ProviderError("PROVIDER_INVALID", `Provider "${row.name}" does not have a usable credential and endpoint.`);
         }
         return normalized;
@@ -5568,7 +5724,8 @@ export class PilotSwarmManagementClient {
      * Remove a shared provider. Its sessions are not moved anywhere: they
      * wait on a name that no longer resolves, and the count says how many.
      */
-    async deleteProvider(viewer: ProviderViewer, name: string): Promise<{ name: string; waitingSessions: number }> {
+    async deleteProvider(viewer: ProviderViewer, input: string | { name: string }): Promise<{ name: string; waitingSessions: number }> {
+        const name = typeof input === "string" ? input : input.name;
         const { store, actor, isAdmin } = await this._providerActor(viewer);
         const result = { name, waitingSessions: await store.deleteProvider(name, actor, isAdmin) };
         await this._auditProviderMutation(viewer, "deleteProvider", name, { waitingSessions: result.waitingSessions });
@@ -5711,11 +5868,17 @@ export class PilotSwarmManagementClient {
 
     async setModelDefault(viewer: ProviderViewer, input: ModelDefaultInput): Promise<DefaultTuple> {
         const { store, actor, isAdmin } = await this._providerActor(viewer);
-        if (input.scope !== "user" && input.scope !== "cluster") {
-            throw new ProviderError("PROVIDER_INVALID", "scope must be user or cluster.");
+        if (input.scope !== "user" && input.scope !== "cluster" && input.scope !== "cluster_decision") {
+            throw new ProviderError("PROVIDER_INVALID", "scope must be user, cluster or cluster_decision.");
         }
-        if (input.scope === "cluster" && !isAdmin) {
-            throw new ProviderError("PROVIDER_FORBIDDEN", "Only an administrator can set the cluster default.");
+        if (input.scope !== "user" && !isAdmin) {
+            throw new ProviderError("PROVIDER_FORBIDDEN", input.scope === "cluster_decision"
+                ? "Only an administrator can set the Cluster Decision Default."
+                : "Only an administrator can set the cluster default.");
+        }
+        if (input.scope === "cluster_decision"
+            && Boolean(String(input.provider ?? "").trim()) !== Boolean(String(input.model ?? "").trim())) {
+            throw new ProviderError("PROVIDER_INVALID", "The Cluster Decision Default needs both a provider and model, or neither to clear it.");
         }
         const requested = normalizeDefaultTuple({
             provider: input.provider,
@@ -5724,7 +5887,8 @@ export class PilotSwarmManagementClient {
             context: input.contextTier ?? null,
         });
         const next = await this._validatedDefaultTuple(store, actor, isAdmin, requested, input.scope);
-        if (input.scope === "cluster") await store.setClusterDefault(next, isAdmin);
+        if (input.scope === "cluster_decision") await store.setClusterDecisionDefault(next, isAdmin);
+        else if (input.scope === "cluster") await store.setClusterDefault(next, isAdmin);
         else await store.setUserDefault(actor, next);
         await this._auditProviderMutation(viewer, "setModelDefault", next.provider, {
             scope: input.scope, model: next.model, cleared: next.provider === null,
@@ -5781,6 +5945,7 @@ export class PilotSwarmManagementClient {
     async getModelDefaults(viewer: ProviderViewer): Promise<{
         userSession: { configured: DefaultTuple; effective: ResolvedModelDefault | null; error: string | null };
         clusterSession: { configured: DefaultTuple; effective: ResolvedModelDefault | null; error: string | null };
+        clusterDecision: { configured: DefaultTuple; effective: ResolvedModelDefault | null; error: string | null };
         system: { configured: DefaultTuple; effective: ResolvedModelDefault | null; error: string | null; updatedBy: number | null; updatedAt: string | null };
         systemOverrides: SystemAgentModelOverride[];
     }> {
@@ -5841,6 +6006,18 @@ export class PilotSwarmManagementClient {
                 (credential) => credential.class === "shared" || credential.systemUseEnabled === true,
                 systemFallback)
             : { tuple: null, source: "first_available" as const, error: "Provider type catalog is unavailable." };
+        let configuredDecision = normalizeDefaultTuple(null);
+        let decision: ClusterDecisionCapability = { available: false, defaultModel: null, models: [], reason: "cluster_decision_default_ineligible" };
+        let decisionError: string | null = null;
+        try {
+            configuredDecision = normalizeDefaultTuple(configured.clusterDecision);
+            decision = resolveClusterDecisionCapability(this._modelProviders, credentials, configuredDecision);
+            if (decision.reason === "cluster_decision_default_ineligible") {
+                decisionError = "The configured Cluster Decision Default is not an eligible shared Decision model.";
+            }
+        } catch {
+            decisionError = "The Decision model catalog or Cluster Decision Default could not be read.";
+        }
         return {
             userSession: {
                 configured: configured.mine,
@@ -5851,6 +6028,11 @@ export class PilotSwarmManagementClient {
                 configured: configured.cluster,
                 effective: this._resolvedDefault(clusterResolution.tuple, clusterResolution.source),
                 error: clusterResolution.error,
+            },
+            clusterDecision: {
+                configured: configuredDecision,
+                effective: decision.available ? this._resolvedDefault(configuredDecision, "cluster_decision_default") : null,
+                error: decisionError,
             },
             system: {
                 configured: isAdmin ? configured.system : normalizeDefaultTuple(null),
@@ -6068,11 +6250,11 @@ export class PilotSwarmManagementClient {
      * agent (with '(none)' for unbound sessions) plus a day×agent series.
      * Same viewer scoping as getProviderUsageSummary.
      */
-    async getProviderUsageAgents(viewer: ProviderViewer, query: ProviderUsageSummaryQuery = {}): Promise<Record<string, unknown>> {
+    async getProviderUsageAgents(viewer: ProviderViewer, query: ProviderUsageSummaryQuery = {}): Promise<ProviderUsageAgents> {
         const { store, actor, isAdmin } = await this._providerActor(viewer);
         const days = clampInteger(query.days ?? undefined, 14, 1, 365);
         const providers = Array.isArray(query.providers) ? query.providers : null;
-        return await store.usageAgents(actor, isAdmin, days, providers, viewer.adminScope === "cluster" && isAdmin) as Record<string, unknown>;
+        return await store.usageAgents(actor, isAdmin, days, providers, viewer.adminScope === "cluster" && isAdmin) as unknown as ProviderUsageAgents;
     }
 
     /** Sessions waiting on a limit right now, with what is holding each one. */
@@ -6573,6 +6755,15 @@ export class PilotSwarmManagementClient {
             }
         }
         return out;
+    }
+
+    async listRuntimeDecisionModels(viewer: ProviderViewer): Promise<ModelSummary[]> {
+        const { store, actor, isAdmin } = await this._providerActor(viewer);
+        const [providers, credentials] = await Promise.all([store.listProviders(actor, isAdmin), store.allCredentials()]);
+        const usable = new Set(providers.filter((provider) => provider.class === "shared" && provider.usableByMe).map((provider) => provider.name));
+        return runtimeDecisionModels(this._modelProviders, credentials.filter((credential) => usable.has(credential.name)))
+            .map((model) => ({ ...model, catalogKind: "runtime_provider" as const, credentialAvailable: true }))
+            .sort((a, b) => a.qualifiedName.localeCompare(b.qualifiedName));
     }
 
     /**

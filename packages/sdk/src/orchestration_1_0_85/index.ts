@@ -2,8 +2,8 @@
  * Durable session orchestration v1.0.85: durable session titles (a spawn-time title that
  * can be locked, summary titles that never overwrite a locked one) and honest session
  * deletes. 1.0.84 is frozen in orchestration_1_0_84/. Turns keep the tool-composition
- * activity contract ("tool-composition-v1"), with the workflow intake, turn
- * controls and workspace protocol.
+ * activity contract, with the workflow intake, turn controls and workspace protocol.
+ * Frozen: this is the 1.0.85 tree of release 0.8.12.
  *
  * Flat event loop backed by a KV FIFO work buffer:
  *   1. `createRuntime` builds the mutable runtime and runs startup gates.

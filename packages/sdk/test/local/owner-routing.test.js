@@ -54,7 +54,7 @@ function parsed(value) {
 }
 
 describe("owner routing on Duroxide runtimes", () => {
-    // Schedules what 1.0.86 schedules for an owner-tagged session, through
+    // Schedules what 1.0.1000 schedules for an owner-tagged session, through
     // PilotSwarm's own proxies. With `pause`, it waits for the "go" event
     // after the workspace check, so a test can restart a worker there.
     function* probe(ctx, input) {
@@ -565,7 +565,7 @@ describe("owner routing with PilotSwarm workers", () => {
             expect(await instance(lone.sessionId)).toBe("NotFound");
         });
     }, TIMEOUT);
-    it("keeps a session started on 1.0.82 untagged on that version and after its continue-as-new to 1.0.86", async () => {
+    it("keeps a session started on 1.0.82 untagged on that version and after its continue-as-new to 1.0.1000", async () => {
         const env = getEnv();
         const respond = (_body, position) => ({ content: `ok:${position.lastUserText.slice(0, 24)}` });
         await withOwnerCluster(env, { respond }, async ({ startWorker, startClients, client, mgmt, catalog, asked, qualifiedModel }) => {
@@ -576,7 +576,7 @@ describe("owner routing with PilotSwarm workers", () => {
             // A session from before the upgrade: no tag saved with its creation
             // config, so a worker with a capacity requester runs its untagged
             // 1.0.82 turns. Its start input still names the owner and the fast
-            // policy, as a 1.0.86 client's would for an owner-routed session.
+            // policy, as a 1.0.1000 client's would for an owner-routed session.
             const pin = pinSessionStartVersion(client, "1.0.82", { sessionId });
             const named = patchSessionStartInput(client, (input) => ({ ...input, ownerTag: TAG.a, workspaceBusyFastRelease: true }), { sessionId });
             try {
@@ -590,7 +590,7 @@ describe("owner routing with PilotSwarm workers", () => {
             expect(await sessionOrchestrationVersion(client, sessionId)).toBe("1.0.82");
 
             await mgmt.setSessionModel(sessionId, qualifiedModel);
-            await eventually(async () => (await sessionOrchestrationVersion(client, sessionId)) === "1.0.86", "the move to 1.0.86");
+            await eventually(async () => (await sessionOrchestrationVersion(client, sessionId)) === "1.0.1000", "the move to 1.0.1000");
             await eventually(async () => (await turnWorkers(catalog, sessionId)).length >= 2, "the turn after the move");
             const inputs = await executionInputs(client, sessionId);
             // 1.0.82 ignores both fields and carries neither into the next execution.

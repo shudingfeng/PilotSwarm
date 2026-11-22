@@ -89,10 +89,15 @@ from. An added repo always pushes to a sandbox, and its agents, skills and
 instructions are never loaded. The reference deployment's local launcher
 allows GitHub and Azure DevOps URLs; the Azure deployment leaves adding off.
 
-A sub-agent can work in the same clone or in its own:
-`spawn_agent({ task, workspace })`. A deployment can give sub-agents no
-workspace at all (`PILOTSWARM_DISABLE_CHILD_WORKSPACE_INHERITANCE=1`); they
-then work outside every workspace.
+A sub-agent can work in the same clone or in its own. With `spawn_agent`,
+omitting `workspace` inherits the parent's record and extra folders. Passing an
+object selects that record. `workspace: null` clears the record but still uses
+the deployment's default folders (your own folder and `shared`).
+`workspace: "none"` clears both the record and those defaults; an omitted value
+on its descendants inherits that clearing unless a descendant explicitly
+passes `workspace`. A deployment can give sub-agents no workspace at all
+(`PILOTSWARM_DISABLE_CHILD_WORKSPACE_INHERITANCE=1`); they then work outside
+every workspace.
 
 **Push before you stop.** A clone that no session uses for a while is
 removed, and uncommitted or unpushed work goes with it. The reference

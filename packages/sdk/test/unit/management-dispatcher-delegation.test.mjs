@@ -2,7 +2,7 @@
  * The dispatcher-delegation opt-in on the direct management client: it reads
  * and writes the named user's flag (the local default user when none is
  * named) and accepts only a boolean. Its CMS migration is 9001, from the block
- * this fork keeps for its own migrations, after upstream's 0090 to 0095 (it
+ * this fork keeps for its own migrations, after upstream's 0090 to 0102 (it
  * was numbered 0090, then 0095, then 0096 before).
  *
  * Run: node --test test/unit/management-dispatcher-delegation.test.mjs
@@ -56,11 +56,14 @@ test("setMyDispatcherDelegation accepts only true or false", async () => {
     assert.deepEqual(calls, []);
 });
 
-test("the opt-in's migration is 9001, registered after upstream's 0090 to 0095", () => {
+test("the opt-in's migration is 9001, registered after upstream's 0090 to 0102", () => {
     const list = CMS_MIGRATIONS("s");
     assert.deepEqual(list.filter(item => item.version >= "0090").map(item => [item.version, item.name]), [
         ["0090", "workflow_carry"], ["0091", "workflow_approvals"], ["0093", "session_summary_title_guard"],
-        ["0094", "session_resurrection"], ["0095", "canvas_ten_slots"], ["9001", "dispatcher_delegation"],
+        ["0094", "session_resurrection"], ["0095", "canvas_ten_slots"], ["0096", "workflow_outcome_retention"],
+        ["0097", "provider_inference_operations"], ["0098", "cluster_decision_default"], ["0099", "workflow_decision_runtime"],
+        ["0100", "decision_provider_identity"], ["0101", "provider_inference_latency"], ["0102", "decision_default_provider_routing"],
+        ["9001", "dispatcher_delegation"],
     ]);
     assert.equal(list.at(-1).sql, dispatcherDelegationMigration("s"));
     assert.equal(new Set(list.map(item => item.version)).size, list.length, "every version once");

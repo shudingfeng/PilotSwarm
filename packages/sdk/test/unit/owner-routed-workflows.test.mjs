@@ -31,6 +31,8 @@ function catalogOf(rows, configs = {}) {
         configs: configMap,
         async getSession(sessionId) { return rowMap.get(sessionId) ?? null; },
         async getSessionCreationConfig(sessionId) { return configMap.get(sessionId) ?? null; },
+        // A Workflow start reads the owning session's workspace events: none here.
+        async getSessionEventsBefore() { return []; },
     };
 }
 
