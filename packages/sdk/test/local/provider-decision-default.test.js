@@ -397,7 +397,8 @@ describe("Cluster Decision Default store and management", () => {
             expect((await mgmt.getModelDefaults(user)).clusterDecision.effective).toBeNull();
             await mgmt._catalog.providers.pool.query(`UPDATE "${env.cmsSchema}".provider_instances
                 SET secret_ref = '{"kind":"apiKey","value":"restored-test-key"}'::jsonb WHERE name = 'team'`);
-            mgmt._modelProviders = loadProviderTypes({ providers: CONFIG.providers.map(provider => ({ ...provider, decisionModels: [] })) });
+            // The live model discovery rebuilds _modelProviders from the type catalog when it reads, so the catalog changes too.
+            mgmt._modelProviderTypeCatalog = mgmt._modelProviders = loadProviderTypes({ providers: CONFIG.providers.map(provider => ({ ...provider, decisionModels: [] })) });
             expect((await mgmt.getWorkflowCapabilities()).decision).toEqual(STALE);
             expect((await mgmt.getModelDefaults(user)).clusterDecision.effective).toBeNull();
         });
