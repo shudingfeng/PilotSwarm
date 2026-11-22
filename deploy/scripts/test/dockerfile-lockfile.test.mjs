@@ -299,3 +299,25 @@ test("worker image unpacks the Copilot CLI program as root, only when the build 
   // No setting in the image: the worker's own COPILOT_PKG_CACHE_HOME names the copy.
   assert.doesNotMatch(source, /^\s*ENV\s[^\n]*COPILOT_PKG_CACHE_HOME/m);
 });
+
+test("the portal image copies every web server module that server.js loads", () => {
+  // The portal image copies the web server's top-level modules by name, so a new
+  // `import ... from "./x.js"` needs its file added there too, or the portal stops at
+  // start with ERR_MODULE_NOT_FOUND.
+  const copied = new Set();
+  for (const line of readDockerfile("Dockerfile.portal").split("\n")) {
+    const copy = /^COPY\s+(?!--from)(.+)\s+\.\/packages\/app\/web\/$/.exec(line.trim());
+    if (copy) for (const source of copy[1].split(/\s+/)) copied.add(source);
+  }
+  const loaded = new Set();
+  const pending = ["server.js"];
+  while (pending.length) {
+    const file = pending.pop();
+    if (loaded.has(file)) continue;
+    loaded.add(file);
+    assert.ok(copied.has(`packages/app/web/${file}`), `Dockerfile.portal must copy packages/app/web/${file}`);
+    const source = readFileSync(join(REPO_ROOT, "packages", "app", "web", file), "utf8");
+    for (const [, imported] of source.matchAll(/\bfrom\s+["']\.\/([^"'/]+\.js)["']/g)) pending.push(imported);
+  }
+  assert.ok(loaded.has("personal-secret-store.js"), "the walk reaches server.js's own imports");
+});
